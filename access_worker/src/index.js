@@ -10,7 +10,7 @@
 import { SignJWT, importPKCS8 } from 'jose';
 import publicJwks from '../public-jwks.json';
 
-const LAMBDA_EVALUATE_URL = 'https://1q0d4vsqe0.execute-api.ap-northeast-2.amazonaws.com/evaluate';
+const LAMBDA_EVALUATE_URL = 'https://g9pdwi0d9k.execute-api.ap-northeast-2.amazonaws.com/evaluate';
 
 export default {
   async fetch(request, env) {

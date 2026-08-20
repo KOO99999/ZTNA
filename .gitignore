@@ -1,6 +1,6 @@
-terraform.tfvars
-terraform.tfstate
-terraform.tfstate.backup
+terraform.tfstate*
+terraform.tfvars*
+*.pem
 .terraform/
 lambda.zip
 private-key.pem

@@ -311,16 +311,30 @@ resource "aws_lambda_permission" "apigw_lambda" {
 }
 
 # ==========================================
-# 5-1. Cloudflare Access — Admin Tier 보호 (v7 추가)
+# 5-1. Cloudflare Access — Admin Tier 보호 (v7 추가, v7.1에서 구조 수정)
 #   워커(https://ztna-access-evaluator.xmcda.workers.dev)를 External Evaluation으로 연결.
-#   재사용 가능한 정책(application_id 미지정)을 만들어 /admin, /api/db-data 두 애플리케이션에서 공유한다.
+#   [v7.1 수정] 원래는 재사용 가능한 정책(application_id 미지정) 하나를 admin_console/admin_api
+#   두 애플리케이션이 공유하는 구조였으나, 프로바이더가 "precedence를 쓰려면 application_id도
+#   반드시 같이 지정해야 한다"는 제약이 있어(Missing required argument 에러 발생) 재사용형 정책이
+#   정상 동작하지 않았다. 그래서 애플리케이션마다 내용이 동일한 정책을 각각 별도로 만드는
+#   구조로 변경함 (application_id를 명시적으로 지정).
 #   require 블록에 넣어야 "이메일 로그인" AND "신뢰점수 통과"가 둘 다 필요한 조건이 된다
 #   (include만 쓰면 둘 중 하나만 통과해도 되는 OR 조건이 되어버리므로 주의)
 # ==========================================
-resource "cloudflare_access_policy" "admin_gate" {
-  account_id = var.cloudflare_account_id
-  name       = "Admin - Email OTP + Trust Score Gate"
-  decision   = "allow"
+resource "cloudflare_zero_trust_access_application" "admin_console" {
+  account_id       = var.cloudflare_account_id
+  name             = "ZT Admin Console"
+  domain           = "${var.domain_name}/admin"
+  type             = "self_hosted"
+  session_duration = "24h"
+}
+
+resource "cloudflare_zero_trust_access_policy" "admin_gate_console" {
+  application_id = cloudflare_zero_trust_access_application.admin_console.id
+  account_id     = var.cloudflare_account_id
+  name           = "Admin Console - Email OTP + Trust Score Gate"
+  decision       = "allow"
+  precedence     = 1
 
   include {
     email = var.admin_allowed_emails
@@ -334,22 +348,31 @@ resource "cloudflare_access_policy" "admin_gate" {
   }
 }
 
-resource "cloudflare_access_application" "admin_console" {
-  zone_id          = var.cloudflare_zone_id
-  name             = "ZT Admin Console"
-  domain           = "${var.domain_name}/admin"
-  type             = "self_hosted"
-  session_duration = "24h"
-  policies         = [cloudflare_access_policy.admin_gate.id]
-}
-
-resource "cloudflare_access_application" "admin_api" {
-  zone_id          = var.cloudflare_zone_id
+resource "cloudflare_zero_trust_access_application" "admin_api" {
+  account_id       = var.cloudflare_account_id
   name             = "ZT Admin API (DynamoDB 감사 로그)"
   domain           = "${var.domain_name}/api/db-data"
   type             = "self_hosted"
   session_duration = "24h"
-  policies         = [cloudflare_access_policy.admin_gate.id]
+}
+
+resource "cloudflare_zero_trust_access_policy" "admin_gate_api" {
+  application_id = cloudflare_zero_trust_access_application.admin_api.id
+  account_id     = var.cloudflare_account_id
+  name           = "Admin API - Email OTP + Trust Score Gate"
+  decision       = "allow"
+  precedence     = 1
+
+  include {
+    email = var.admin_allowed_emails
+  }
+
+  require {
+    external_evaluation {
+      evaluate_url = "https://ztna-access-evaluator.xmcda.workers.dev"
+      keys_url     = "https://ztna-access-evaluator.xmcda.workers.dev/keys"
+    }
+  }
 }
 
 # ==========================================

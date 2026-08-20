@@ -119,46 +119,137 @@ data "archive_file" "lambda_zip" {
     content  = <<EOF
 import json
 import time
+import uuid
+import boto3
 
+dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
+table = dynamodb.Table('trust_score_log')
+
+# v6: 5조(남궁영) 외부 분석 반영
+#   - RISK_MATRIX를 behavioral(자동회복 허용)/security(MFA 재인증 전까지 회복불가) 그룹으로 분리
+#   - device_fingerprint_mismatch 신호 추가 (세션 탈취/단말 변조 방어)
+#   - 경계구간(80점 ±2)은 차단 대신 step_up_mfa_required 반환 -> 관리자 수동승인이 아닌
+#     PEP(Cloudflare Access) 쪽에서 즉시 MFA 챌린지를 띄우도록 함. 관리자는 SOC_ALERT 로그만 수신
+#   - FAIL_POLICY는 참고용 상수: Lambda 자체 장애 시엔 이 함수가 호출조차 안 되므로
+#     실제 Fail-Open/Closed 판단은 PEP(Cloudflare Worker) 쪽에서 이 값을 참조해 구현해야 함
 RISK_MATRIX = {
-    "night_access": -10,
-    "unknown_location": -20,
-    "brute_force": -15,
-    "threat_intel_match": -40,
-    "waf_sqli": -50
+    # --- behavioral: 시간 경과로 자동 회복 가능 ---
+    "night_access": {"penalty": -10, "group": "behavioral"},
+    "unknown_location": {"penalty": -20, "group": "behavioral"},
+
+    # --- security: 자동 회복 불가, security_mfa_passed=True 통과 시에만 리셋 ---
+    "brute_force": {"penalty": -15, "group": "security"},
+    "threat_intel_match": {"penalty": -40, "group": "security"},
+    "waf_sqli": {"penalty": -50, "group": "security"},
+    "device_fingerprint_mismatch": {"penalty": -40, "group": "security"},
+}
+
+COMBINATION_RULES = [
+    (("unknown_location", "waf_sqli"), -15, "interaction_location_waf"),
+    (("brute_force", "threat_intel_match"), -10, "interaction_bruteforce_threatintel"),
+]
+
+REQUIRED_SCORE = 80          # Admin Tier 임계값 (General Tier는 app.py에서 인증 자체를 요구 안 함)
+STEP_UP_MARGIN = 5           # 75~80점 구간을 "경계구간"으로 간주
+                              # (감점값이 전부 5의 배수라 마진도 5단위여야 실제로 도달 가능함 - v6.1 수정)
+
+# 장애 시 정책 참고표 (실제 적용은 PEP/Cloudflare Worker에서 이 값을 조회해 구현)
+FAIL_POLICY = {
+    "general": "fail_open",
+    "admin": "fail_closed",
 }
 
 def lambda_handler(event, context):
-    try:
-        body = json.loads(event.get('body', '{}'))
-    except Exception:
-        body = {}
+    print("Received event:", json.dumps(event))
+    
+    body = {}
+    if "body" in event and event["body"]:
+        try:
+            body = json.loads(event["body"])
+        except Exception:
+            body = {}
+    elif isinstance(event, dict):
+        body = event
 
     score = 100
     reasons = []
+    active_signals = []
+    security_penalty_applied = False
+    current_time = int(time.time())
 
-    for factor, penalty in RISK_MATRIX.items():
+    # 1. 위협 인덱스 감점 계산 (behavioral/security 구분)
+    for factor, rule in RISK_MATRIX.items():
         if body.get(factor):
-            score += penalty
-            reasons.append(f"{factor} ({penalty})")
+            score += rule["penalty"]
+            reasons.append(f"{factor} ({rule['penalty']})")
+            active_signals.append(factor)
+            if rule["group"] == "security":
+                security_penalty_applied = True
 
-    # Interaction Rule (조합 규칙)
-    if body.get("unknown_location") and body.get("waf_sqli"):
-        score -= 15
-        reasons.append("interaction_location_waf (-15)")
+    # 2. 조합 규칙 감점
+    for signals, penalty, label in COMBINATION_RULES:
+        if all(s in active_signals for s in signals):
+            score -= abs(penalty)
+            reasons.append(f"{label} ({penalty})")
+
+    # 3. History Decay — security 감점이 걸려있고 아직 MFA 재인증 전이면 decay 적용 안 함
+    #    (자동 회복 악용/점수 세탁 방지, 5조 지적 반영)
+    security_mfa_passed = bool(body.get("security_mfa_passed"))
+    if not security_penalty_applied or security_mfa_passed:
+        last_activity = body.get("last_activity_timestamp")
+        if last_activity:
+            try:
+                inactivity_hours = int((current_time - int(last_activity)) / 3600)
+                if inactivity_hours > 0:
+                    decay_penalty = inactivity_hours * 5
+                    score -= decay_penalty
+                    reasons.append(f"history_decay_{inactivity_hours}h (-{decay_penalty})")
+            except Exception as e:
+                print("History decay calculation error:", str(e))
 
     score = max(score, 0)
-    
-    # Cloudflare External Evaluation 규격 호환 (Trust >= 80)
-    allow_access = (score >= 80)
+    session_id = body.get("session_id", str(uuid.uuid4()))
+
+    # 4. 보안 감점이 걸린 세션은 MFA 재인증 전까지 무조건 차단
+    if security_penalty_applied and not security_mfa_passed:
+        allow_access = False
+        action = "block_until_mfa"
+    # 5. 경계구간(REQUIRED_SCORE ± STEP_UP_MARGIN)은 즉시 차단 대신 Adaptive MFA 요구
+    #    (관리자 수동검토 병목 해소, 5조 지적 반영 — 관리자는 아래 SOC_ALERT로 사후 인지)
+    elif REQUIRED_SCORE - STEP_UP_MARGIN <= score < REQUIRED_SCORE:
+        allow_access = False
+        action = "step_up_mfa_required"
+        print(f"[SOC_ALERT] identity={body.get('identity','unknown')} score={score} action={action}")
+    else:
+        allow_access = (score >= REQUIRED_SCORE)
+        action = "allow" if allow_access else "block"
+
+    # DynamoDB 감사가 기록
+    try:
+        table.put_item(
+            Item={
+                'session_id': session_id,
+                'timestamp': current_time,
+                'score': score,
+                'reasons': reasons,
+                'allow': allow_access,
+                'action': action,
+                'identity': body.get('identity', 'unknown')
+            }
+        )
+    except Exception as e:
+        print("DynamoDB logging failed:", str(e))
 
     return {
         "statusCode": 200,
         "headers": {"Content-Type": "application/json"},
         "body": json.dumps({
             "success": allow_access,
+            "allow": allow_access,
             "score": score,
-            "reasons": reasons
+            "action": action,
+            "reasons": reasons,
+            "session_id": session_id
         })
     }
 EOF

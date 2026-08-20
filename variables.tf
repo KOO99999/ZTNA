@@ -25,3 +25,8 @@ variable "domain_name" {
   type        = string
   description = "Example: app.yourdomain.com"
 }
+
+variable "admin_allowed_emails" {
+  type        = list(string)
+  description = "관리자 콘솔(/admin) 접근을 허용할 이메일 목록 (Cloudflare Access 이메일 OTP 로그인 대상)"
+}

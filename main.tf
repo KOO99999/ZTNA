@@ -311,6 +311,48 @@ resource "aws_lambda_permission" "apigw_lambda" {
 }
 
 # ==========================================
+# 5-1. Cloudflare Access — Admin Tier 보호 (v7 추가)
+#   워커(https://ztna-access-evaluator.xmcda.workers.dev)를 External Evaluation으로 연결.
+#   재사용 가능한 정책(application_id 미지정)을 만들어 /admin, /api/db-data 두 애플리케이션에서 공유한다.
+#   require 블록에 넣어야 "이메일 로그인" AND "신뢰점수 통과"가 둘 다 필요한 조건이 된다
+#   (include만 쓰면 둘 중 하나만 통과해도 되는 OR 조건이 되어버리므로 주의)
+# ==========================================
+resource "cloudflare_access_policy" "admin_gate" {
+  account_id = var.cloudflare_account_id
+  name       = "Admin - Email OTP + Trust Score Gate"
+  decision   = "allow"
+
+  include {
+    email = var.admin_allowed_emails
+  }
+
+  require {
+    external_evaluation {
+      evaluate_url = "https://ztna-access-evaluator.xmcda.workers.dev"
+      keys_url     = "https://ztna-access-evaluator.xmcda.workers.dev/keys"
+    }
+  }
+}
+
+resource "cloudflare_access_application" "admin_console" {
+  zone_id          = var.cloudflare_zone_id
+  name             = "ZT Admin Console"
+  domain           = "${var.domain_name}/admin"
+  type             = "self_hosted"
+  session_duration = "24h"
+  policies         = [cloudflare_access_policy.admin_gate.id]
+}
+
+resource "cloudflare_access_application" "admin_api" {
+  zone_id          = var.cloudflare_zone_id
+  name             = "ZT Admin API (DynamoDB 감사 로그)"
+  domain           = "${var.domain_name}/api/db-data"
+  type             = "self_hosted"
+  session_duration = "24h"
+  policies         = [cloudflare_access_policy.admin_gate.id]
+}
+
+# ==========================================
 # 5. Cloudflare Tunnel 사전 구성
 # ==========================================
 resource "random_id" "tunnel_secret" {

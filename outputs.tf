@@ -20,3 +20,8 @@ output "site_url" {
   value       = "https://${var.domain_name}"
   description = "터널 연결 후 접속할 주소"
 }
+
+output "access_evaluator_worker_url" {
+  value       = "https://ztna-access-evaluator.xmcda.workers.dev"
+  description = "Cloudflare Access External Evaluation이 호출하는 Worker 주소 (참고용 - main.tf에 직접 하드코딩됨)"
+}

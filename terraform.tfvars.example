@@ -4,3 +4,4 @@ cloudflare_api_token = "REPLACE_ME"
 cloudflare_account_id = "REPLACE_ME"
 cloudflare_zone_id    = "REPLACE_ME"
 domain_name           = "app.yourdomain.com"
+admin_allowed_emails = ["admin@example.com"]

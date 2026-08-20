@@ -1,0 +1,5 @@
+name = "ztna-access-evaluator"
+main = "src/index.js"
+compatibility_date = "2024-09-01"
+
+# PRIVATE_KEY_PEM은 여기 적지 않고 `wrangler secret put`으로 등록한다 (아래 사용법 참고)

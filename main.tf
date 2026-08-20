@@ -53,7 +53,41 @@ resource "aws_dynamodb_table" "trust_score_log" {
 }
 
 # ==========================================
-# 2. AWS Lambda PDP Engine
+# 2. AWS IAM Role (EC2 DynamoDB 읽기 권한)
+# ==========================================
+resource "aws_iam_role" "ec2_role" {
+  name_prefix = "zt-ec2-role-"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+    }]
+  })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_dynamodb" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess"
+}
+
+resource "aws_iam_instance_profile" "ec2_profile" {
+  name_prefix = "zt-ec2-profile-"
+  role        = aws_iam_role.ec2_role.name
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# ==========================================
+# 3. AWS Lambda PDP Engine
 # ==========================================
 resource "aws_iam_role" "lambda_role" {
   name = "trust_score_lambda_role"
@@ -142,7 +176,7 @@ resource "aws_lambda_function" "pdp_engine" {
 }
 
 # ==========================================
-# 3. AWS API Gateway (HTTP API)
+# 4. AWS API Gateway (HTTP API)
 # ==========================================
 resource "aws_apigatewayv2_api" "pdp_api" {
   name          = "trust-score-pdp-api"
@@ -182,7 +216,7 @@ resource "aws_lambda_permission" "apigw_lambda" {
 }
 
 # ==========================================
-# 4. EC2 Web Server (Target App)
+# 5. EC2 Web Server (Target App)
 # ==========================================
 # 서울 리전 최신 Ubuntu 22.04 LTS AMI 동적 조회
 data "aws_ami" "ubuntu" {
@@ -213,9 +247,10 @@ resource "aws_security_group" "web_sg" {
 }
 
 resource "aws_instance" "web_app" {
-  ami               = data.aws_ami.ubuntu.id
-  instance_type     = "t3.micro"
-  availability_zone = "ap-northeast-2a" # <--- ap-northeast-2a로 고정하여 프리티어 문제 해결
+  ami                  = data.aws_ami.ubuntu.id
+  instance_type        = "t3.micro"
+  availability_zone    = "ap-northeast-2a" # <--- ap-northeast-2a로 고정하여 프리티어 문제 해결
+  iam_instance_profile = aws_iam_instance_profile.ec2_profile.name
 
   vpc_security_group_ids = [aws_security_group.web_sg.id]
 
@@ -258,7 +293,7 @@ resource "aws_instance" "web_app" {
 }
 
 # ==========================================
-# 5. Cloudflare Tunnel (도메인 <-> EC2 비공개 연결)
+# 6. Cloudflare Tunnel (도메인 <-> EC2 비공개 연결)
 # ==========================================
 # 터널 인증용 시크릿 (EC2와 Cloudflare Edge 간 연결에 사용)
 resource "random_id" "tunnel_secret" {

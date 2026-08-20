@@ -87,10 +87,10 @@ resource "aws_iam_instance_profile" "ec2_profile" {
 }
 
 # ==========================================
-# 3. AWS Lambda PDP Engine
+# 3. AWS Lambda PDP Engine (History Decay & DynamoDB 저장)
 # ==========================================
 resource "aws_iam_role" "lambda_role" {
-  name = "trust_score_lambda_role"
+  name_prefix = "trust-score-lambda-"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -100,6 +100,10 @@ resource "aws_iam_role" "lambda_role" {
       Principal = { Service = "lambda.amazonaws.com" }
     }]
   })
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
@@ -307,12 +311,48 @@ resource "aws_lambda_permission" "apigw_lambda" {
 }
 
 # ==========================================
-# 5. EC2 Web Server (Target App)
+# 5. Cloudflare Tunnel 사전 구성
 # ==========================================
-# 서울 리전 최신 Ubuntu 22.04 LTS AMI 동적 조회
+resource "random_id" "tunnel_secret" {
+  byte_length = 35
+}
+
+resource "cloudflare_zero_trust_tunnel_cloudflared" "web_tunnel" {
+  account_id = var.cloudflare_account_id
+  name       = "zt-web-app-tunnel"
+  secret     = random_id.tunnel_secret.b64_std
+}
+
+resource "cloudflare_zero_trust_tunnel_cloudflared_config" "web_tunnel_config" {
+  account_id = var.cloudflare_account_id
+  tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.id
+
+  config {
+    ingress_rule {
+      hostname = var.domain_name
+      service  = "http://localhost:8080"
+    }
+    ingress_rule {
+      service = "http_status:404"
+    }
+  }
+}
+
+resource "cloudflare_record" "web_app_dns" {
+  zone_id = var.cloudflare_zone_id
+  name    = var.domain_name
+  type    = "CNAME"
+  content = "${cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.id}.cfargotunnel.com"
+  proxied = true
+  ttl     = 1
+}
+
+# ==========================================
+# 6. EC2 Web Server (Inactivity 타이머 스크립트 포함 UI)
+# ==========================================
 data "aws_ami" "ubuntu" {
   most_recent = true
-  owners      = ["099720109477"] # Canonical (Ubuntu 공식 소유자 ID)
+  owners      = ["099720109477"]
 
   filter {
     name   = "name"
@@ -326,8 +366,8 @@ data "aws_ami" "ubuntu" {
 }
 
 resource "aws_security_group" "web_sg" {
-  name        = "zero_trust_web_sg"
-  description = "Security group for ZT Web App (Outbound only for Cloudflare Tunnel)"
+  name_prefix = "zero_trust_web_sg_"
+  description = "Security group for ZT Web App"
 
   egress {
     from_port   = 0
@@ -335,91 +375,179 @@ resource "aws_security_group" "web_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_instance" "web_app" {
   ami                  = data.aws_ami.ubuntu.id
   instance_type        = "t3.micro"
-  availability_zone    = "ap-northeast-2a" # <--- ap-northeast-2a로 고정하여 프리티어 문제 해결
+  availability_zone    = "ap-northeast-2a"
   iam_instance_profile = aws_iam_instance_profile.ec2_profile.name
 
   vpc_security_group_ids = [aws_security_group.web_sg.id]
 
+  user_data_replace_on_change = true
+
   user_data = <<-EOF
               #!/bin/bash
-              apt update -y
-              apt install -y python3-pip
-              pip3 install flask
-              cat << 'APP' > /home/ubuntu/app.py
-              from flask import Flask
-              app = Flask(__name__)
+              exec > /var/log/user-data.log 2>&1
+              apt-get update -y
+              apt-get install -y python3-pip
+              pip3 install flask boto3
 
+              cat << 'APP' > /home/ubuntu/app.py
+              from flask import Flask, request, jsonify
+              import boto3
+
+              app = Flask(__name__)
+              dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
+              table = dynamodb.Table('trust_score_log')
+
+              def render_page(title, min_score, content_html, is_public=False):
+                  user_email = request.headers.get('Cf-Access-Authenticated-User-Email')
+                  
+                  if is_public and not user_email:
+                      user_status_html = "🌐 <strong>접속 상태:</strong> 게스트 (인증 불필요 오픈 서비스)"
+                  else:
+                      email_str = user_email if user_email else "인증 정보 없음"
+                      user_status_html = f"🔑 <strong>인증된 관리자 계정:</strong> {email_str}<br>🛡️ <strong>요구 신뢰점수:</strong> {min_score}점 이상"
+
+                  # Inactivity (무활동) 감지 타이머 스크립트 (15분 = 900초)
+                  inactivity_script = """
+                  <script>
+                      let inactivityTimer;
+                      const INACTIVITY_LIMIT = 15 * 60 * 1000; // 15분
+
+                      function resetInactivityTimer() {
+                          clearTimeout(inactivityTimer);
+                          inactivityTimer = setTimeout(onInactivityTimeout, INACTIVITY_LIMIT);
+                      }
+
+                      function onInactivityTimeout() {
+                          alert("⚠️ 장시간 사용자 활동이 없어 신뢰 점수가 차감되었습니다.\\n보안을 위해 다시 로그인해 주세요.");
+                          window.location.href = "/cdn-cgi/access/logout";
+                      }
+
+                      window.onload = resetInactivityTimer;
+                      document.onmousemove = resetInactivityTimer;
+                      document.onkeypress = resetInactivityTimer;
+                      document.onclick = resetInactivityTimer;
+                      document.onscroll = resetInactivityTimer;
+                  </script>
+                  """ if not is_public else ""
+
+                  return f"""
+                  <!DOCTYPE html>
+                  <html>
+                  <head>
+                      <meta charset="utf-8">
+                      <title>{title}</title>
+                      <style>
+                          body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; color: #333; }}
+                          .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 650px; margin: 0 auto; }}
+                          .badge {{ display: inline-block; padding: 6px 14px; background-color: #007bff; color: white; border-radius: 20px; font-size: 0.85em; font-weight: bold; }}
+                          .badge-public {{ background-color: #28a745; }}
+                          .user-info {{ background: #e9ecef; padding: 12px 18px; border-radius: 8px; margin-top: 15px; font-size: 0.9em; border-left: 4px solid #007bff; }}
+                          button {{ background: #28a745; color: white; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer; font-size: 0.95em; margin-top: 15px; font-weight: bold; }}
+                          button:hover {{ background: #218838; }}
+                          pre {{ background: #1e1e1e; color: #4ec9b0; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.9em; }}
+                      </style>
+                      {inactivity_script}
+                  </head>
+                  <body>
+                      <div class="card">
+                          <span class="badge {'badge-public' if is_public else ''}">{'Public Access Area' if is_public else 'Zero Trust Protected Area'}</span>
+                          <h2>{title}</h2>
+                          <div class="user-info">
+                              {user_status_html}
+                          </div>
+                          <hr style="border: 0.5px solid #eee; margin: 20px 0;">
+                          {content_html}
+                      </div>
+                  </body>
+                  </html>
+                  """
+
+              @app.route('/')
               @app.route('/general')
               def general():
-                  return "<h1>[General Tier] Access Granted (Threshold: 50)</h1>"
-
-              @app.route('/profile')
-              def profile():
-                  return "<h1>[Profile Tier] Access Granted (Threshold: 70)</h1>"
+                  html = """
+                  <p>누구나 무료로 이용할 수 있는 오픈 서비스 영역입니다.</p>
+                  <ul>
+                      <li>인증 절차 없이 즉시 접근 가능</li>
+                      <li>서비스 기본 정보 및 공개 게시판 제공</li>
+                  </ul>
+                  <a href="/admin"><button style="background-color: #dc3545;">관리자 콘솔 바로가기 (이메일 OTP 인증 필요)</button></a>
+                  """
+                  return render_page("[Public Tier] 일반 대시보드", 0, html, is_public=True)
 
               @app.route('/admin')
               def admin():
-                  return "<h1>[Admin Tier] Access Granted (Threshold: 80)</h1>"
+                  html = """
+                  <p><strong>⚠️ 관리자 전용 영역입니다. (이메일 OTP 인증 완료됨)</strong></p>
+                  <p><small>💡 15분간 아무런 활동이 없으면 신뢰 점수 Decay 정책에 따라 자동 세션 만료 및 재인증이 유도됩니다.</small></p>
+                  <button onclick="fetchData('admin_logs')" style="background-color: #dc3545;">DynamoDB 감사 로그 전체 조회</button>
+                  <div id="result"></div>
+                  <script>
+                      function fetchData(datatype) {
+                          document.getElementById('result').innerHTML = '<p>DynamoDB 테이블 스캔 중...</p>';
+                          fetch('/api/db-data?type=' + datatype)
+                              .then(res => res.json())
+                              .then(data => {
+                                  document.getElementById('result').innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                              });
+                      }
+                  </script>
+                  """
+                  return render_page("[Admin Tier] 관리자 콘솔", 80, html, is_public=False)
+
+              @app.route('/api/db-data')
+              def get_db_data():
+                  data_type = request.args.get('type')
+                  user_email = request.headers.get('Cf-Access-Authenticated-User-Email')
+
+                  if not user_email:
+                      return jsonify({
+                          "status": "Denied",
+                          "message": "관리자 이메일 인증 헤더가 누락되어 DB 접근이 거부되었습니다."
+                      }), 403
+
+                  try:
+                      if data_type == 'admin_logs':
+                          response = table.scan(Limit=5)
+                          logs = response.get('Items', [])
+                          return jsonify({
+                              "status": "Success",
+                              "identity": user_email,
+                              "db_table": "trust_score_log",
+                              "fetched_logs_count": len(logs),
+                              "logs": logs
+                          })
+                      else:
+                          return jsonify({"status": "Error", "message": "유효하지 않은 데이터 요청입니다."}), 400
+                  except Exception as e:
+                      return jsonify({"status": "Error", "message": str(e)}), 500
 
               if __name__ == '__main__':
                   app.run(host='0.0.0.0', port=8080)
               APP
+
               nohup python3 /home/ubuntu/app.py > /home/ubuntu/app.log 2>&1 &
 
-              # --- Cloudflare Tunnel (cloudflared) 설치 및 실행 ---
-              # 인바운드 포트를 열지 않고, EC2가 Cloudflare로 아웃바운드 연결만 맺어 터널을 만듦
               curl -L --output /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
               dpkg -i /tmp/cloudflared.deb
               cloudflared service install ${cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.tunnel_token}
+              systemctl start cloudflared
               EOF
 
   tags = {
     Name = "ZT-Target-WebApp"
   }
-}
 
-# ==========================================
-# 6. Cloudflare Tunnel (도메인 <-> EC2 비공개 연결)
-# ==========================================
-# 터널 인증용 시크릿 (EC2와 Cloudflare Edge 간 연결에 사용)
-resource "random_id" "tunnel_secret" {
-  byte_length = 35
-}
-
-resource "cloudflare_zero_trust_tunnel_cloudflared" "web_tunnel" {
-  account_id = var.cloudflare_account_id
-  name       = "zt-web-app-tunnel"
-  secret     = random_id.tunnel_secret.b64_std
-}
-
-# 터널이 도메인 요청을 받았을 때, EC2 내부의 어느 포트로 보낼지 정의
-resource "cloudflare_zero_trust_tunnel_cloudflared_config" "web_tunnel_config" {
-  account_id = var.cloudflare_account_id
-  tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.id
-
-  config {
-    ingress_rule {
-      hostname = var.domain_name
-      service  = "http://localhost:8080"
-    }
-    # 위 hostname에 해당 안 되는 나머지 요청은 전부 404 처리 (필수 catch-all)
-    ingress_rule {
-      service = "http_status:404"
-    }
+  lifecycle {
+    create_before_destroy = true
   }
-}
-
-# 도메인(xmcda.store)을 터널로 연결하는 DNS 레코드 (public IP 없이 CNAME으로 연결됨)
-resource "cloudflare_record" "web_app_dns" {
-  zone_id = var.cloudflare_zone_id
-  name    = var.domain_name
-  type    = "CNAME"
-  content = "${cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.id}.cfargotunnel.com"
-  proxied = true
-  ttl     = 1 # proxied=true일 때는 자동(TTL 무시됨)
 }

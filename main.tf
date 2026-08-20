@@ -12,11 +12,16 @@ terraform {
       source  = "cloudflare/cloudflare"
       version = "~> 4.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
   }
 }
 
 provider "aws" {
-  region = var.aws_region
+  region  = var.aws_region
+  profile = var.aws_profile
 }
 
 provider "cloudflare" {
@@ -208,8 +213,10 @@ resource "aws_security_group" "web_sg" {
 }
 
 resource "aws_instance" "web_app" {
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "t3.micro"
+  ami               = data.aws_ami.ubuntu.id
+  instance_type     = "t3.micro"
+  availability_zone = "ap-northeast-2a" # <--- ap-northeast-2a로 고정하여 프리티어 문제 해결
+
   vpc_security_group_ids = [aws_security_group.web_sg.id]
 
   user_data = <<-EOF
@@ -237,9 +244,56 @@ resource "aws_instance" "web_app" {
                   app.run(host='0.0.0.0', port=8080)
               APP
               nohup python3 /home/ubuntu/app.py > /home/ubuntu/app.log 2>&1 &
+
+              # --- Cloudflare Tunnel (cloudflared) 설치 및 실행 ---
+              # 인바운드 포트를 열지 않고, EC2가 Cloudflare로 아웃바운드 연결만 맺어 터널을 만듦
+              curl -L --output /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+              dpkg -i /tmp/cloudflared.deb
+              cloudflared service install ${cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.tunnel_token}
               EOF
 
   tags = {
     Name = "ZT-Target-WebApp"
   }
+}
+
+# ==========================================
+# 5. Cloudflare Tunnel (도메인 <-> EC2 비공개 연결)
+# ==========================================
+# 터널 인증용 시크릿 (EC2와 Cloudflare Edge 간 연결에 사용)
+resource "random_id" "tunnel_secret" {
+  byte_length = 35
+}
+
+resource "cloudflare_zero_trust_tunnel_cloudflared" "web_tunnel" {
+  account_id = var.cloudflare_account_id
+  name       = "zt-web-app-tunnel"
+  secret     = random_id.tunnel_secret.b64_std
+}
+
+# 터널이 도메인 요청을 받았을 때, EC2 내부의 어느 포트로 보낼지 정의
+resource "cloudflare_zero_trust_tunnel_cloudflared_config" "web_tunnel_config" {
+  account_id = var.cloudflare_account_id
+  tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.id
+
+  config {
+    ingress_rule {
+      hostname = var.domain_name
+      service  = "http://localhost:8080"
+    }
+    # 위 hostname에 해당 안 되는 나머지 요청은 전부 404 처리 (필수 catch-all)
+    ingress_rule {
+      service = "http_status:404"
+    }
+  }
+}
+
+# 도메인(xmcda.store)을 터널로 연결하는 DNS 레코드 (public IP 없이 CNAME으로 연결됨)
+resource "cloudflare_record" "web_app_dns" {
+  zone_id = var.cloudflare_zone_id
+  name    = var.domain_name
+  type    = "CNAME"
+  content = "${cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.id}.cfargotunnel.com"
+  proxied = true
+  ttl     = 1 # proxied=true일 때는 자동(TTL 무시됨)
 }

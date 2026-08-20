@@ -1,1 +1,6 @@
-aws_region = "ap-northeast-2"
+aws_region           = "ap-northeast-2"
+aws_profile          = "your-aws-cli-profile"
+cloudflare_api_token = "REPLACE_ME"
+cloudflare_account_id = "REPLACE_ME"
+cloudflare_zone_id    = "REPLACE_ME"
+domain_name           = "app.yourdomain.com"

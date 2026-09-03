@@ -117,14 +117,6 @@ resource "aws_security_group" "web_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  egress {
-    description     = "App 티어 Flask(8080)로만 프록시"
-    from_port       = 8080
-    to_port         = 8080
-    protocol        = "tcp"
-    security_groups = [aws_security_group.app_sg.id]
-  }
-
   lifecycle {
     create_before_destroy = true
   }
@@ -140,22 +132,6 @@ resource "aws_security_group" "app_sg" {
   name_prefix = "zt-app-sg-"
   description = "App tier: Web 티어에서만 인바운드, DB 티어/인터넷으로만 egress"
   vpc_id      = aws_vpc.zt_vpc.id
-
-  ingress {
-    description     = "Web 티어에서만 Flask(8080) 접근 허용"
-    from_port       = 8080
-    to_port         = 8080
-    protocol        = "tcp"
-    security_groups = [aws_security_group.web_sg.id]
-  }
-
-  egress {
-    description     = "DB 티어 MySQL(3306)로만 접근"
-    from_port       = 3306
-    to_port         = 3306
-    protocol        = "tcp"
-    security_groups = [aws_security_group.db_sg.id]
-  }
 
   egress {
     description = "Lambda API Gateway 호출 + 패키지 설치용 HTTPS"
@@ -189,14 +165,6 @@ resource "aws_security_group" "db_sg" {
   description = "DB tier: App 티어에서만 인바운드 허용, Web 티어는 접근 불가"
   vpc_id      = aws_vpc.zt_vpc.id
 
-  ingress {
-    description     = "App 티어에서만 MySQL(3306) 접근 허용"
-    from_port       = 3306
-    to_port         = 3306
-    protocol        = "tcp"
-    security_groups = [aws_security_group.app_sg.id]
-  }
-
   egress {
     from_port   = 0
     to_port     = 0
@@ -211,6 +179,47 @@ resource "aws_security_group" "db_sg" {
   tags = {
     Name = "ZT-DB-SG"
   }
+}
+
+# ==========================================
+# 8-1. SG 간 참조 규칙 (별도 리소스로 분리 — 인라인으로 넣으면 web_sg/app_sg/db_sg가
+#      서로를 참조하며 순환 참조 에러(Cycle)가 발생하므로, SG 본체는 서로 모르는 채로
+#      먼저 만들고 이 규칙들이 나중에 둘을 이어줌)
+# ==========================================
+resource "aws_vpc_security_group_egress_rule" "web_to_app" {
+  security_group_id           = aws_security_group.web_sg.id
+  referenced_security_group_id = aws_security_group.app_sg.id
+  description                 = "App 티어 Flask(8080)로만 프록시"
+  from_port                   = 8080
+  to_port                     = 8080
+  ip_protocol                 = "tcp"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "app_from_web" {
+  security_group_id           = aws_security_group.app_sg.id
+  referenced_security_group_id = aws_security_group.web_sg.id
+  description                 = "Web 티어에서만 Flask(8080) 접근 허용"
+  from_port                   = 8080
+  to_port                     = 8080
+  ip_protocol                 = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "app_to_db" {
+  security_group_id           = aws_security_group.app_sg.id
+  referenced_security_group_id = aws_security_group.db_sg.id
+  description                 = "DB 티어 MySQL(3306)로만 접근"
+  from_port                   = 3306
+  to_port                     = 3306
+  ip_protocol                 = "tcp"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "db_from_app" {
+  security_group_id           = aws_security_group.db_sg.id
+  referenced_security_group_id = aws_security_group.app_sg.id
+  description                 = "App 티어에서만 MySQL(3306) 접근 허용"
+  from_port                   = 3306
+  to_port                     = 3306
+  ip_protocol                 = "tcp"
 }
 
 # ==========================================

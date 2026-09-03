@@ -98,24 +98,8 @@ resource "aws_route_table_association" "app_assoc" {
 #           App 티어(8080)로만 나갈 수 있게 egress 제한.
 resource "aws_security_group" "web_sg" {
   name_prefix = "zt-web-sg-"
-  description = "Web tier: cloudflared 아웃바운드 전용, App 티어로만 egress"
+  description = "Web tier: cloudflared outbound only, egress to App tier only"
   vpc_id      = aws_vpc.zt_vpc.id
-
-  egress {
-    description = "Outbound HTTPS for Cloudflare and package install"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    description = "Outbound HTTP for apt package install"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 
   lifecycle {
     create_before_destroy = true
@@ -130,24 +114,8 @@ resource "aws_security_group" "web_sg" {
 #           DB 티어(3306)와 인터넷(Lambda 호출, apt)로만 egress.
 resource "aws_security_group" "app_sg" {
   name_prefix = "zt-app-sg-"
-  description = "App tier: Web 티어에서만 인바운드, DB 티어/인터넷으로만 egress"
+  description = "App tier: ingress from Web tier only, egress to DB tier and internet only"
   vpc_id      = aws_vpc.zt_vpc.id
-
-  egress {
-    description = "Outbound HTTPS for Lambda API Gateway and package install"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    description = "Outbound HTTP for apt package install"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 
   lifecycle {
     create_before_destroy = true
@@ -162,15 +130,8 @@ resource "aws_security_group" "app_sg" {
 #          없어 원천적으로 DB에 접근 불가 — 이게 3-Tier 격리의 핵심.
 resource "aws_security_group" "db_sg" {
   name_prefix = "zt-db-sg-"
-  description = "DB tier: App 티어에서만 인바운드 허용, Web 티어는 접근 불가"
+  description = "DB tier: ingress from App tier only, Web tier has no access"
   vpc_id      = aws_vpc.zt_vpc.id
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 
   lifecycle {
     create_before_destroy = true
@@ -182,10 +143,77 @@ resource "aws_security_group" "db_sg" {
 }
 
 # ==========================================
-# 8-1. SG 간 참조 규칙 (별도 리소스로 분리 — 인라인으로 넣으면 web_sg/app_sg/db_sg가
-#      서로를 참조하며 순환 참조 에러(Cycle)가 발생하므로, SG 본체는 서로 모르는 채로
-#      먼저 만들고 이 규칙들이 나중에 둘을 이어줌)
+# 8-1. SG 규칙 — 전부 별도 리소스로 분리 (SG 본체와 규칙을 섞으면 서로
+#      "내가 관리하는 규칙 아님"이라며 계속 지웠다 다시 만드는 충돌이 반복되므로,
+#      SG 본체는 규칙을 하나도 안 갖고 있고 이 리소스들이 전부 담당함)
 # ==========================================
+
+# --- Web 티어 egress (인터넷: Cloudflare/패키지 설치) ---
+resource "aws_vpc_security_group_egress_rule" "web_out_https" {
+  security_group_id = aws_security_group.web_sg.id
+  cidr_ipv4          = "0.0.0.0/0"
+  description        = "Outbound HTTPS for Cloudflare and package install"
+  from_port          = 443
+  to_port            = 443
+  ip_protocol        = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "web_out_http" {
+  security_group_id = aws_security_group.web_sg.id
+  cidr_ipv4          = "0.0.0.0/0"
+  description        = "Outbound HTTP for apt package install"
+  from_port          = 80
+  to_port            = 80
+  ip_protocol        = "tcp"
+}
+
+# cloudflared 터널 연결은 443이 아니라 7844(QUIC/UDP, TCP fallback)를 사용함.
+# 이게 없으면 "Allow outbound QUIC/TCP traffic on port 7844" 에러로 터널이 아예 안 붙음.
+resource "aws_vpc_security_group_egress_rule" "web_out_tunnel_udp" {
+  security_group_id = aws_security_group.web_sg.id
+  cidr_ipv4          = "0.0.0.0/0"
+  description        = "Outbound QUIC for Cloudflare Tunnel"
+  from_port          = 7844
+  to_port            = 7844
+  ip_protocol        = "udp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "web_out_tunnel_tcp" {
+  security_group_id = aws_security_group.web_sg.id
+  cidr_ipv4          = "0.0.0.0/0"
+  description        = "Outbound TCP fallback for Cloudflare Tunnel"
+  from_port          = 7844
+  to_port            = 7844
+  ip_protocol        = "tcp"
+}
+
+# --- App 티어 egress (인터넷: Lambda API Gateway 호출/패키지 설치) ---
+resource "aws_vpc_security_group_egress_rule" "app_out_https" {
+  security_group_id = aws_security_group.app_sg.id
+  cidr_ipv4          = "0.0.0.0/0"
+  description        = "Outbound HTTPS for Lambda API Gateway and package install"
+  from_port          = 443
+  to_port            = 443
+  ip_protocol        = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "app_out_http" {
+  security_group_id = aws_security_group.app_sg.id
+  cidr_ipv4          = "0.0.0.0/0"
+  description        = "Outbound HTTP for apt package install"
+  from_port          = 80
+  to_port            = 80
+  ip_protocol        = "tcp"
+}
+
+# --- DB 티어 egress (전체 허용, RDS 기본 아웃바운드용) ---
+resource "aws_vpc_security_group_egress_rule" "db_out_all" {
+  security_group_id = aws_security_group.db_sg.id
+  cidr_ipv4          = "0.0.0.0/0"
+  ip_protocol        = "-1"
+}
+
+# --- 티어 간 참조 규칙 (Web→App, App→DB) ---
 resource "aws_vpc_security_group_egress_rule" "web_to_app" {
   security_group_id           = aws_security_group.web_sg.id
   referenced_security_group_id = aws_security_group.app_sg.id

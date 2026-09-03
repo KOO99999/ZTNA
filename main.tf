@@ -77,6 +77,13 @@ resource "aws_iam_role_policy_attachment" "ec2_dynamodb" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess"
 }
 
+# EC2를 AWS 콘솔의 Session Manager로 SSH 없이 접속하기 위한 권한
+# (부팅 스크립트 실패 원인 확인 등, 문제 해결 목적으로 추가)
+resource "aws_iam_role_policy_attachment" "ec2_ssm" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 resource "aws_iam_instance_profile" "ec2_profile" {
   name_prefix = "zt-ec2-profile-"
   role        = aws_iam_role.ec2_role.name

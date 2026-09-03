@@ -25,7 +25,7 @@ resource "aws_db_instance" "login_db" {
   instance_class = "db.t3.micro"
 
   allocated_storage = 20
-  storage_type       = "gp2"
+  storage_type      = "gp2"
 
   db_name  = "login_server"
   username = "zt_admin"
@@ -33,7 +33,7 @@ resource "aws_db_instance" "login_db" {
 
   db_subnet_group_name   = aws_db_subnet_group.login_db_subnet_group.name
   vpc_security_group_ids = [aws_security_group.db_sg.id]
-  publicly_accessible     = false
+  publicly_accessible    = false
 
   skip_final_snapshot = true # 8주 프로젝트 범위: 운영환경이라면 false + 스냅샷 정책 필요
 

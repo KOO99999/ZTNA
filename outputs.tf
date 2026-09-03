@@ -4,11 +4,15 @@ output "pdp_evaluate_url" {
 }
 
 output "dynamodb_table_name" {
-  value = aws_dynamodb_table.trust_score_log.name
+  value = aws_dynamodb_table.risk_score_log.name
 }
 
 output "web_ec2_instance_id" {
-  value = aws_instance.web_app.id
+  value = aws_instance.web_server.id
+}
+
+output "app_ec2_instance_id" {
+  value = aws_instance.app_server.id
 }
 
 output "tunnel_id" {

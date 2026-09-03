@@ -102,7 +102,7 @@ resource "aws_security_group" "web_sg" {
   vpc_id      = aws_vpc.zt_vpc.id
 
   egress {
-    description = "Cloudflare / 패키지 설치용 HTTPS"
+    description = "Outbound HTTPS for Cloudflare and package install"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
@@ -110,7 +110,7 @@ resource "aws_security_group" "web_sg" {
   }
 
   egress {
-    description = "apt 패키지 설치용 HTTP"
+    description = "Outbound HTTP for apt package install"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
@@ -134,7 +134,7 @@ resource "aws_security_group" "app_sg" {
   vpc_id      = aws_vpc.zt_vpc.id
 
   egress {
-    description = "Lambda API Gateway 호출 + 패키지 설치용 HTTPS"
+    description = "Outbound HTTPS for Lambda API Gateway and package install"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
@@ -142,7 +142,7 @@ resource "aws_security_group" "app_sg" {
   }
 
   egress {
-    description = "apt 패키지 설치용 HTTP"
+    description = "Outbound HTTP for apt package install"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
@@ -189,7 +189,7 @@ resource "aws_security_group" "db_sg" {
 resource "aws_vpc_security_group_egress_rule" "web_to_app" {
   security_group_id           = aws_security_group.web_sg.id
   referenced_security_group_id = aws_security_group.app_sg.id
-  description                 = "App 티어 Flask(8080)로만 프록시"
+  description                 = "Allow proxy to App tier Flask on 8080"
   from_port                   = 8080
   to_port                     = 8080
   ip_protocol                 = "tcp"
@@ -198,7 +198,7 @@ resource "aws_vpc_security_group_egress_rule" "web_to_app" {
 resource "aws_vpc_security_group_ingress_rule" "app_from_web" {
   security_group_id           = aws_security_group.app_sg.id
   referenced_security_group_id = aws_security_group.web_sg.id
-  description                 = "Web 티어에서만 Flask(8080) 접근 허용"
+  description                 = "Allow Flask 8080 access from Web tier only"
   from_port                   = 8080
   to_port                     = 8080
   ip_protocol                 = "tcp"
@@ -207,7 +207,7 @@ resource "aws_vpc_security_group_ingress_rule" "app_from_web" {
 resource "aws_vpc_security_group_egress_rule" "app_to_db" {
   security_group_id           = aws_security_group.app_sg.id
   referenced_security_group_id = aws_security_group.db_sg.id
-  description                 = "DB 티어 MySQL(3306)로만 접근"
+  description                 = "Allow access to DB tier MySQL on 3306"
   from_port                   = 3306
   to_port                     = 3306
   ip_protocol                 = "tcp"
@@ -216,7 +216,7 @@ resource "aws_vpc_security_group_egress_rule" "app_to_db" {
 resource "aws_vpc_security_group_ingress_rule" "db_from_app" {
   security_group_id           = aws_security_group.db_sg.id
   referenced_security_group_id = aws_security_group.app_sg.id
-  description                 = "App 티어에서만 MySQL(3306) 접근 허용"
+  description                 = "Allow MySQL 3306 access from App tier only"
   from_port                   = 3306
   to_port                     = 3306
   ip_protocol                 = "tcp"

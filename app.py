@@ -1,9 +1,69 @@
 from flask import Flask, request, jsonify
+from flask_sqlalchemy import SQLAlchemy
 import boto3
+import os
 
 app = Flask(__name__)
 dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
 table = dynamodb.Table('risk_score_log')
+
+# ==========================================
+# RDS(MySQL, login_server DB) 연결 설정
+#   DB_HOST/DB_NAME/DB_USER/DB_PASSWORD는 ec2_app.tf가 부팅스크립트(user_data_app.sh.tpl)를
+#   통해 EC2의 .env 파일로 넘겨준 값을, 부팅스크립트가 환경변수로 export해서 여기서 읽음
+# ==========================================
+DB_HOST = os.environ.get('DB_HOST')
+DB_NAME = os.environ.get('DB_NAME')
+DB_USER = os.environ.get('DB_USER')
+DB_PASSWORD = os.environ.get('DB_PASSWORD')
+
+app.config['SQLALCHEMY_DATABASE_URI'] = (
+    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}"
+)
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+
+
+# ==========================================
+# 로그인서버 테이블 정의 (SQLAlchemy 모델)
+#   실제 CREATE TABLE은 파일 하단 db.create_all()이 앱 기동 시 자동 수행
+#   (테이블이 이미 있으면 건드리지 않음 — 매번 재기동해도 안전)
+# ==========================================
+class Account(db.Model):
+    __tablename__ = 'accounts'
+
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(255), unique=True, nullable=False)
+    password_hash = db.Column(db.String(255), nullable=False)
+    totp_secret = db.Column(db.String(64), nullable=True)
+    totp_enabled = db.Column(db.Boolean, default=False, nullable=False)
+    # employee/admin — 추후 '/general' 로그인 전환 결정 시 admin_viewer/admin_operator 등으로 세분화 검토
+    role = db.Column(db.String(32), default='employee', nullable=False)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+
+class BackupCode(db.Model):
+    __tablename__ = 'backup_codes'
+
+    id = db.Column(db.Integer, primary_key=True)
+    account_id = db.Column(db.Integer, db.ForeignKey('accounts.id'), nullable=False)
+    code_hash = db.Column(db.String(255), nullable=False)  # 평문 저장 금지, 해시만 저장
+    used = db.Column(db.Boolean, default=False, nullable=False)  # 1회용 소진 여부
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+
+class LoginFailure(db.Model):
+    __tablename__ = 'login_failures'
+
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(255), nullable=False, index=True)
+    attempted_at = db.Column(db.DateTime, server_default=db.func.now())
+    ip_address = db.Column(db.String(45), nullable=True)  # IPv6까지 고려한 길이
+
+
+with app.app_context():
+    db.create_all()
 
 def render_page(title, min_score, content_html, is_public=False):
     user_email = request.headers.get('Cf-Access-Authenticated-User-Email')
@@ -130,7 +190,7 @@ def get_db_data():
         return jsonify({"status": "Error", "message": str(e)}), 500
 
 # TODO(다음 세션): /authorize, /token, /userinfo — OIDC 로그인서버 라우트 추가 예정
-# TODO(다음 세션): RDS(login_db) 연결 — pymysql/SQLAlchemy 커넥션 추가 예정
+#   (accounts/backup_codes/login_failures 테이블은 이제 준비됨, 위 모델 사용)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)

@@ -2,10 +2,14 @@
 main.tf가 참조하는 risk_score_engine.py를 실제 AWS 없이 로컬에서 검증하는 스크립트.
 v10: 전체 배점 2배 재설정 반영 (RISK_THRESHOLD=40, STEP_UP_MARGIN=20).
 """
+import os
 import sys
 import time
 import json
 from unittest.mock import MagicMock
+
+# risk_score_engine.py가 import 시점에 os.environ에서 읽으므로 import보다 먼저 세팅해야 함
+os.environ["EVALUATE_SHARED_SECRET"] = "test-secret-local-only"
 
 sys.modules['boto3'] = MagicMock()
 import boto3
@@ -15,9 +19,11 @@ boto3.resource.return_value.Table.return_value = mock_table
 sys.path.insert(0, '.')
 import risk_score_engine as engine
 
+TEST_HEADERS = {"x-evaluate-secret": "test-secret-local-only"}
+
 def run_case(name, body, expect_allow=None, expect_action=None):
     mock_table.reset_mock()
-    result_raw = engine.lambda_handler({"body": json.dumps(body)}, None)
+    result_raw = engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps(body)}, None)
     result = json.loads(result_raw["body"])
     ok_allow = (expect_allow is None) or (result["allow"] == expect_allow)
     ok_action = (expect_action is None) or (result["action"] == expect_action)
@@ -145,3 +151,20 @@ run_case(
      "security_mfa_passed": True},
     expect_allow=False, expect_action="block"
 )
+
+# --- 공유 비밀키 검증 자체 테스트 (헤더 없이/틀린 값으로 호출 시 401) ---
+def run_auth_case(name, headers):
+    mock_table.reset_mock()
+    result_raw = engine.lambda_handler(
+        {"headers": headers, "body": json.dumps({"session_id": "auth1", "identity": "x@test.com"})},
+        None
+    )
+    status = "PASS" if result_raw["statusCode"] == 401 else "FAIL"
+    print(f"[{status}] {name}")
+    print(f"    -> statusCode={result_raw['statusCode']}")
+    if status == "FAIL":
+        print("    !! 기대값: statusCode=401")
+    print()
+
+run_auth_case("헤더 없이 호출 -> 401 unauthorized", {})
+run_auth_case("틀린 비밀키로 호출 -> 401 unauthorized", {"x-evaluate-secret": "wrong-value"})

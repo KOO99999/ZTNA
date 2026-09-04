@@ -129,6 +129,13 @@ data "archive_file" "lambda_zip" {
   source_file = "${path.module}/risk_score_engine.py"
 }
 
+# /evaluate가 인증 없이 URL만 알면 호출 가능한 문제 보완용 공유 비밀키.
+# HTTP API(v2)는 API Key/Usage Plan을 지원하지 않아, Lambda가 직접 헤더를 검증하는 방식으로 대체.
+resource "random_password" "evaluate_shared_secret" {
+  length  = 32
+  special = false
+}
+
 resource "aws_lambda_function" "pdp_engine" {
   filename         = data.archive_file.lambda_zip.output_path
   function_name    = "risk-score-engine"
@@ -136,6 +143,12 @@ resource "aws_lambda_function" "pdp_engine" {
   handler          = "risk_score_engine.lambda_handler"
   runtime          = "python3.12"
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+
+  environment {
+    variables = {
+      EVALUATE_SHARED_SECRET = random_password.evaluate_shared_secret.result
+    }
+  }
 }
 
 # ==========================================

@@ -1,10 +1,15 @@
 import json
+import os
 import time
 import uuid
 import boto3
 
 dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
 table = dynamodb.Table('risk_score_log')
+
+# /evaluate가 인증 없이 URL만 알면 호출되는 문제 보완용.
+# Terraform(main.tf)이 random_password로 생성해 Lambda 환경변수로 주입한 값과 대조한다.
+SHARED_SECRET = os.environ.get("EVALUATE_SHARED_SECRET")
 
 # v10: 전체 배점 2배 확대 (임계값·마진·조합보너스·시간감쇠 포함 일관 적용)
 #   - v9까지: night_access=10 ~ waf_sqli=47, 임계값 20, 마진 10 (재인증 구간 20~30)
@@ -44,6 +49,16 @@ FAIL_POLICY = {
 
 def lambda_handler(event, context):
     print("Received event:", json.dumps(event))
+
+    # API Gateway(HTTP API v2)는 헤더 키를 소문자로 정규화해서 넘겨줌
+    headers = event.get("headers", {}) or {}
+    provided_secret = headers.get("x-evaluate-secret")
+    if not SHARED_SECRET or provided_secret != SHARED_SECRET:
+        return {
+            "statusCode": 401,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"error": "unauthorized"})
+        }
 
     body = {}
     if "body" in event and event["body"]:

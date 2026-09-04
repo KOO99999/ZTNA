@@ -29,3 +29,9 @@ output "access_evaluator_worker_url" {
   value       = "https://ztna-access-evaluator.xmcda.workers.dev"
   description = "Cloudflare Access External Evaluation이 호출하는 Worker 주소 (참고용 - main.tf에 직접 하드코딩됨)"
 }
+
+output "evaluate_shared_secret" {
+  value       = random_password.evaluate_shared_secret.result
+  sensitive   = true
+  description = "Worker -> Lambda(/evaluate) 호출 인증용 공유 비밀키. terraform output -raw evaluate_shared_secret 로 확인 후 wrangler secret put에 입력"
+}

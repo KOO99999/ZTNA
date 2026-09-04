@@ -46,7 +46,12 @@ export default {
     try {
       const lambdaResp = await fetch(LAMBDA_EVALUATE_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          // Lambda가 이 값을 대조해 인증 없는 호출을 차단함 (env.EVALUATE_SHARED_SECRET는
+          // `wrangler secret put EVALUATE_SHARED_SECRET`로 미리 등록해둬야 함)
+          'X-Evaluate-Secret': env.EVALUATE_SHARED_SECRET,
+        },
         body: JSON.stringify({
           identity: identity,
           session_id: accessPayload.session_id || crypto.randomUUID(),

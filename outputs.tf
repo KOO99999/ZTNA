@@ -35,3 +35,14 @@ output "evaluate_shared_secret" {
   sensitive   = true
   description = "Worker -> Lambda(/evaluate) 호출 인증용 공유 비밀키 (terraform.tfvars 고정값). 값이 tfvars와 일치하는지 확인용 — wrangler secret put은 이 값이 처음 생성될 때(최초 1회)만 하면 됨"
 }
+
+output "oidc_client_id" {
+  value       = var.oidc_client_id
+  description = "다음 단계(cloudflare_zero_trust_access_identity_provider 등록)에 그대로 넣을 client_id"
+}
+
+output "oidc_client_secret" {
+  value       = var.oidc_client_secret
+  sensitive   = true
+  description = "다음 단계(cloudflare_zero_trust_access_identity_provider 등록)에 그대로 넣을 client_secret"
+}

@@ -21,6 +21,8 @@ DB_PASSWORD=${db_password}
 PDP_EVALUATE_URL=${pdp_evaluate_url}
 EVALUATE_SHARED_SECRET=${evaluate_shared_secret}
 DOMAIN_NAME=${domain_name}
+OIDC_CLIENT_ID=${oidc_client_id}
+OIDC_CLIENT_SECRET=${oidc_client_secret}
 ENV
 
 # .env 값을 실제 프로세스 환경변수로 로드 (app.py가 os.environ으로 읽음)

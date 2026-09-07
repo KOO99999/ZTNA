@@ -27,6 +27,10 @@ resource "aws_instance" "app_server" {
     pdp_evaluate_url        = "${aws_apigatewayv2_stage.pdp_stage.invoke_url}evaluate"
     evaluate_shared_secret  = var.evaluate_shared_secret
     domain_name             = var.domain_name
+    # /token이 요청자(Cloudflare Access)를 검증할 때 대조할 값 — 아래 main.tf의
+    # cloudflare_zero_trust_access_identity_provider 등록 설정과 반드시 같은 값이어야 함
+    oidc_client_id          = var.oidc_client_id
+    oidc_client_secret      = var.oidc_client_secret
   }))
 
   tags = {

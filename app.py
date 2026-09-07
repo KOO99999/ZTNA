@@ -125,6 +125,27 @@ JWT_KID = "zt-login-server-key-1"
 
 OIDC_ISSUER = f"https://{os.environ.get('DOMAIN_NAME', 'xmcda.store')}"
 
+# ==========================================
+# /token 클라이언트 인증 (Cloudflare Access가 진짜 우리 IdP를 등록한 Access인지 확인)
+#   지금까지 /token은 code만 맞으면 누구든 토큰을 받아갈 수 있었음(client_secret 검증 없음).
+#   OAuth 표준은 클라이언트 인증 방식이 두 가지라 Access가 어느 쪽을 쓰는지 확정되기 전까지
+#   둘 다 지원: client_secret_basic(Authorization: Basic 헤더) / client_secret_post(폼 필드)
+# ==========================================
+OIDC_CLIENT_ID = os.environ.get('OIDC_CLIENT_ID')
+OIDC_CLIENT_SECRET = os.environ.get('OIDC_CLIENT_SECRET')
+
+def _get_client_credentials():
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.startswith('Basic '):
+        try:
+            import base64
+            decoded = base64.b64decode(auth_header[len('Basic '):]).decode('utf-8')
+            client_id, _, client_secret = decoded.partition(':')
+            return client_id, client_secret
+        except Exception:
+            return None, None
+    return request.form.get('client_id'), request.form.get('client_secret')
+
 # 인가 코드(authorization code)와 access_token을 임시 보관하는 메모리 저장소.
 # 8주 프로젝트 범위 단순화: App 서버가 1대뿐이라 메모리로 충분하나, 서버가 여러 대로
 # 늘어나면(오토스케일링 등) 공유 저장소(예: 검토 중이던 ElastiCache Redis)로 옮겨야 함.
@@ -481,6 +502,15 @@ def token():
 
     if grant_type != 'authorization_code' or not code:
         return jsonify({"error": "unsupported_grant_type"}), 400
+
+    # client_secret 검증 — 이게 없으면 code(60초 유효, 1회용)만 가로채도 누구나
+    # 토큰을 받아갈 수 있었음. 서버 자체 설정이 비어있으면(배포 실수) fail-closed.
+    if not OIDC_CLIENT_ID or not OIDC_CLIENT_SECRET:
+        return jsonify({"error": "server_misconfigured"}), 500
+
+    client_id, client_secret = _get_client_credentials()
+    if client_id != OIDC_CLIENT_ID or client_secret != OIDC_CLIENT_SECRET:
+        return jsonify({"error": "invalid_client"}), 401
 
     entry = AUTH_CODES.pop(code, None)
     if not entry or entry["expires_at"] < time.time():

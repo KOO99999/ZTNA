@@ -10,7 +10,8 @@
 import { SignJWT, importPKCS8 } from 'jose';
 import publicJwks from '../public-jwks.json';
 
-const LAMBDA_EVALUATE_URL = 'https://g9pdwi0d9k.execute-api.ap-northeast-2.amazonaws.com/evaluate';
+// LAMBDA_EVALUATE_URL은 wrangler.toml의 [vars]에서 관리 (destroy/apply로 API Gateway URL이
+// 바뀌어도 이 파일은 안 건드리고 wrangler.toml 값만 고치면 되도록 분리)
 
 export default {
   async fetch(request, env) {
@@ -31,6 +32,7 @@ export default {
     let accessPayload = {};
     try {
       const incomingJwt = await request.text();
+      console.log('[DEBUG] incoming JWT (raw):', incomingJwt);
       // 데모/8주 과제 범위에서는 Access가 보낸 JWT의 서명 검증은 생략하고 payload만 파싱한다.
       // (정식 프로덕션이라면 Access의 팀도메인 JWKS로 이 JWT도 검증해야 함 - 아래 TODO 참고)
       const payloadPart = incomingJwt.split('.')[1];
@@ -39,12 +41,15 @@ export default {
       accessPayload = {};
     }
 
-    const identity = accessPayload.email || accessPayload.identity || 'unknown';
+    const identity = accessPayload.email || accessPayload.identity?.email || accessPayload.identity || 'unknown';
+    // Access는 응답 JWT에 요청 때 보낸 nonce를 그대로 담아 돌려줘야 검증을 통과시킴
+    // (success:true만으로는 부족함 - Cloudflare External Evaluation 스펙)
+    const nonce = accessPayload.nonce;
 
     // 1) 우리 Trust Score Engine(Lambda) 호출
     let trustResult;
     try {
-      const lambdaResp = await fetch(LAMBDA_EVALUATE_URL, {
+      const lambdaResp = await fetch(env.LAMBDA_EVALUATE_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -59,8 +64,10 @@ export default {
         }),
       });
       trustResult = await lambdaResp.json();
+      console.log('[DEBUG] identity:', identity, 'nonce:', nonce, 'trustResult:', JSON.stringify(trustResult));
     } catch (e) {
       // Lambda 호출 자체가 실패하면 Fail-Closed (5조 피드백 반영 - admin 등급 기준)
+      console.log('[DEBUG] lambda call failed:', e.message);
       trustResult = { allow: false, action: 'lambda_call_failed' };
     }
 
@@ -68,13 +75,14 @@ export default {
     const privateKey = await importPKCS8(env.PRIVATE_KEY_PEM, 'RS256');
     const responseJwt = await new SignJWT({
       success: trustResult.allow === true,
-      score: trustResult.score,
-      action: trustResult.action,
+      nonce: nonce,
     })
       .setProtectedHeader({ alg: 'RS256', kid: publicJwks.keys[0].kid })
       .setIssuedAt()
       .setExpirationTime('60s')
       .sign(privateKey);
+
+    console.log('[DEBUG] outgoing JWT (raw):', responseJwt);
 
     return new Response(responseJwt, {
       headers: { 'Content-Type': 'application/jwt' },

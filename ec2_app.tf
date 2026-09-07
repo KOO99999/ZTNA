@@ -25,7 +25,7 @@ resource "aws_instance" "app_server" {
     # /authorize가 로그인 시도 자체의 위험도를 Lambda에 직접 물어볼 때 필요한 값
     # (Worker를 거치지 않고 직접 호출 — 기존 /evaluate 공유 비밀키 인증 그대로 재사용)
     pdp_evaluate_url        = "${aws_apigatewayv2_stage.pdp_stage.invoke_url}evaluate"
-    evaluate_shared_secret  = random_password.evaluate_shared_secret.result
+    evaluate_shared_secret  = var.evaluate_shared_secret
     domain_name             = var.domain_name
   }))
 

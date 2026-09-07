@@ -189,6 +189,30 @@ resource "aws_lambda_permission" "apigw_lambda" {
 }
 
 # ==========================================
+# 5-0. Cloudflare Access Identity Provider — 우리 로그인서버를 OIDC IdP로 등록
+#   Access가 "이메일 OTP" 대신 우리 로그인서버(app.py의 /authorize, /token,
+#   /.well-known/jwks.json)로 신원을 확인하도록 등록. client_id/client_secret은
+#   /token이 검증하는 값과 반드시 동일해야 함(variables.tf에서 관리, ec2_app.tf가
+#   같은 값을 Flask 환경변수로도 전달함).
+#   Access는 /token이 돌려주는 id_token(JWT)의 클레임(email 등)을 certs_url(JWKS)로
+#   서명 검증해서 직접 읽어옴 — /userinfo를 따로 호출하진 않음(OIDC 표준 동작).
+# ==========================================
+resource "cloudflare_zero_trust_access_identity_provider" "login_server" {
+  account_id = var.cloudflare_account_id
+  name       = "ZT Login Server"
+  type       = "oidc"
+
+  config {
+    client_id     = var.oidc_client_id
+    client_secret = var.oidc_client_secret
+    auth_url      = "https://${var.domain_name}/authorize"
+    token_url     = "https://${var.domain_name}/token"
+    certs_url     = "https://${var.domain_name}/.well-known/jwks.json"
+    scopes        = ["openid", "email"]
+  }
+}
+
+# ==========================================
 # 5-1. Cloudflare Access — Admin Tier 보호 (v7 추가, v7.1에서 구조 수정)
 #   워커(https://ztna-access-evaluator.xmcda.workers.dev)를 External Evaluation으로 연결.
 #   [v7.1 수정] 원래는 재사용 가능한 정책(application_id 미지정) 하나를 admin_console/admin_api
@@ -205,6 +229,10 @@ resource "cloudflare_zero_trust_access_application" "admin_console" {
   domain           = "${var.domain_name}/admin"
   type             = "self_hosted"
   session_duration = "24h"
+  # 이메일 OTP 선택지를 없애고, 이 앱은 우리 로그인서버(TOTP 2단계)로만 로그인 가능하게 제한
+  allowed_idps     = [cloudflare_zero_trust_access_identity_provider.login_server.id]
+  # 선택지가 하나뿐이니 "로그인 방법 선택" 화면 없이 바로 우리 로그인서버로 리다이렉트
+  auto_redirect_to_identity = true
 }
 
 resource "cloudflare_zero_trust_access_policy" "admin_gate_console" {
@@ -232,6 +260,8 @@ resource "cloudflare_zero_trust_access_application" "admin_api" {
   domain           = "${var.domain_name}/api/db-data"
   type             = "self_hosted"
   session_duration = "24h"
+  allowed_idps     = [cloudflare_zero_trust_access_identity_provider.login_server.id]
+  auto_redirect_to_identity = true
 }
 
 resource "cloudflare_zero_trust_access_policy" "admin_gate_api" {

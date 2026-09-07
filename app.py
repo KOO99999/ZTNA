@@ -130,6 +130,10 @@ OIDC_ISSUER = f"https://{os.environ.get('DOMAIN_NAME', 'xmcda.store')}"
 # 늘어나면(오토스케일링 등) 공유 저장소(예: 검토 중이던 ElastiCache Redis)로 옮겨야 함.
 AUTH_CODES = {}   # code -> {"email": ..., "expires_at": ...}
 ACCESS_TOKENS = {}  # access_token -> {"email": ..., "expires_at": ...}
+# 1단계(이메일+비밀번호) 통과 후, 2단계(TOTP) 화면으로 넘어갈 때 쓰는 임시 진행표.
+# 비밀번호를 두 번째 화면까지 들고 다니지 않기 위해, "이 사람이 1단계를 통과했다"는
+# 사실만 짧게(5분) 기억해두는 용도.
+PENDING_LOGINS = {}  # challenge_id -> {"email": ..., "expires_at": ..., oauth params...}
 
 def render_page(title, min_score, content_html, is_public=False):
     user_email = request.headers.get('Cf-Access-Authenticated-User-Email')
@@ -263,7 +267,8 @@ def get_db_data():
 #         (Worker->Lambda) 위험점수 재검사는 이 흐름과 별개로 그대로 이어서 실행됨
 # ==========================================
 
-def render_login_form(client_id, redirect_uri, state, response_type, scope, error=None):
+def render_credentials_form(client_id, redirect_uri, state, response_type, scope, error=None):
+    """1단계: 이메일 + 비밀번호만 받는 화면"""
     error_html = f'<p style="color:#dc3545;"><strong>{error}</strong></p>' if error else ""
     return f"""
     <!DOCTYPE html>
@@ -291,13 +296,46 @@ def render_login_form(client_id, redirect_uri, state, response_type, scope, erro
                 <input type="hidden" name="scope" value="{scope}">
 
                 <label>이메일</label>
-                <input type="email" name="email" required>
+                <input type="email" name="email" required autofocus>
 
                 <label>비밀번호</label>
                 <input type="password" name="password" required>
 
-                <label>TOTP 코드 (등록된 계정만)</label>
-                <input type="text" name="totp_code" placeholder="6자리 코드 또는 백업코드">
+                <button type="submit">다음</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    """
+
+
+def render_totp_form(challenge_id, error=None):
+    """2단계: 비밀번호 확인 후, TOTP(또는 백업코드)만 받는 화면 (비밀번호는 다시 안 물어봄)"""
+    error_html = f'<p style="color:#dc3545;"><strong>{error}</strong></p>' if error else ""
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>ZT Login Server</title>
+        <style>
+            body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
+            .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 400px; margin: 60px auto; }}
+            input {{ width: 100%; padding: 10px; margin: 6px 0 14px 0; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }}
+            button {{ width: 100%; background: #007bff; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-weight: bold; }}
+            label {{ font-size: 0.9em; color: #555; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h2>2단계 인증</h2>
+            <p style="font-size:0.9em; color:#555;">인증 앱의 6자리 코드 또는 백업코드를 입력하세요.</p>
+            {error_html}
+            <form method="POST" action="/authorize/verify-totp">
+                <input type="hidden" name="challenge_id" value="{challenge_id}">
+
+                <label>TOTP 코드 (또는 백업코드)</label>
+                <input type="text" name="totp_code" required autofocus>
 
                 <button type="submit">로그인</button>
             </form>
@@ -305,6 +343,44 @@ def render_login_form(client_id, redirect_uri, state, response_type, scope, erro
     </body>
     </html>
     """
+
+
+def check_brute_force(email):
+    """최근 15분 안에 이 이메일로 5회 이상 로그인 실패했는지 확인"""
+    from datetime import datetime, timedelta
+    fifteen_min_ago = datetime.utcnow() - timedelta(minutes=15)
+    recent_failures = LoginFailure.query.filter(
+        LoginFailure.email == email,
+        LoginFailure.attempted_at >= fifteen_min_ago,
+    ).count()
+    return recent_failures >= 5
+
+
+def finalize_login(email, client_id, redirect_uri, state, response_type, scope, totp_ok):
+    """brute_force/night_access 신호를 모아 Lambda에 위험도를 물어보고, 통과하면
+    인가 코드를 발급해 Access(redirect_uri)로 돌려보냄. 실패 시 알맞은 에러 화면 반환."""
+    brute_force_flag = check_brute_force(email)
+
+    # night_access: 현재 서버 시각(UTC) 기준 0~5시를 야간으로 간주 — 추후 KST 등
+    # 타임존 보정 필요 시 조정. unknown_location/device_fingerprint_mismatch는
+    # 사용자별 과거 로그인 기록(위치/기기 이력) 축적 로직이 아직 없어 이번 단계는 보류.
+    current_hour_utc = time.gmtime().tm_hour
+    signals = {
+        "brute_force": brute_force_flag,
+        "night_access": current_hour_utc < 5,
+    }
+    risk_result = evaluate_login_risk(email, {**signals, "security_mfa_passed": totp_ok})
+
+    if not risk_result.get("allow", False):
+        print(f"[LOGIN_BLOCKED] identity={email} action={risk_result.get('action')}")
+        return render_credentials_form(
+            client_id, redirect_uri, state, response_type, scope,
+            error=f"보안 정책에 의해 로그인이 차단되었습니다 ({risk_result.get('action')})."
+        )
+
+    auth_code = secrets.token_urlsafe(32)
+    AUTH_CODES[auth_code] = {"email": email, "expires_at": time.time() + 60}
+    return redirect(f"{redirect_uri}?code={auth_code}&state={state}")
 
 
 @app.route('/authorize', methods=['GET', 'POST'])
@@ -316,9 +392,9 @@ def authorize():
         state = request.args.get('state', '')
         response_type = request.args.get('response_type', 'code')
         scope = request.args.get('scope', 'openid')
-        return render_login_form(client_id, redirect_uri, state, response_type, scope)
+        return render_credentials_form(client_id, redirect_uri, state, response_type, scope)
 
-    # --- POST: 실제 로그인 시도 처리 ---
+    # --- POST: 1단계 (이메일 + 비밀번호) 검증 ---
     client_id = request.form.get('client_id', '')
     redirect_uri = request.form.get('redirect_uri', '')
     state = request.form.get('state', '')
@@ -327,75 +403,75 @@ def authorize():
 
     email = request.form.get('email', '').strip().lower()
     password = request.form.get('password', '')
-    totp_input = request.form.get('totp_code', '').strip()
     client_ip = request.headers.get('CF-Connecting-IP', request.remote_addr)
 
-    def reject(error_message, record_failure=True):
-        if record_failure:
-            db.session.add(LoginFailure(email=email, ip_address=client_ip))
-            db.session.commit()
-        return render_login_form(client_id, redirect_uri, state, response_type, scope, error=error_message)
-
-    # 1) brute_force 판정 — 최근 15분 안에 이 이메일로 5회 이상 실패했는지 먼저 확인
-    #    (자격증명 확인보다 먼저 체크: 공격자가 굳이 올바른 비번 없이도 시도 자체로
-    #     계속 소모전을 거는 걸 막기 위함)
-    #    DB 종류(MySQL/SQLite 등)를 안 타도록 SQL 함수 대신 파이썬에서 시각 계산
-    from datetime import datetime, timedelta
-    fifteen_min_ago = datetime.utcnow() - timedelta(minutes=15)
-    recent_failures = LoginFailure.query.filter(
-        LoginFailure.email == email,
-        LoginFailure.attempted_at >= fifteen_min_ago,
-    ).count()
-    brute_force_flag = recent_failures >= 5
-
-    # 2) 계정 조회 + 비밀번호 검증
     account = Account.query.filter_by(email=email).first()
     credentials_ok = bool(account) and check_password_hash(account.password_hash, password)
 
-    # 3) TOTP 검증 (계정에 TOTP가 켜져 있는 경우에만 요구)
-    totp_ok = True
-    if credentials_ok and account.totp_enabled:
-        totp_ok = False
-        if account.totp_secret and pyotp.TOTP(account.totp_secret).verify(totp_input, valid_window=1):
-            totp_ok = True
-        else:
-            # 백업코드로 대체 시도 (해시 비교, 맞으면 그 코드는 즉시 소진 처리)
-            for bc in BackupCode.query.filter_by(account_id=account.id, used=False).all():
-                if check_password_hash(bc.code_hash, totp_input):
-                    bc.used = True
-                    db.session.commit()
-                    totp_ok = True
-                    break
-
-    # 4) 로그인 시도 자체의 위험도를 Lambda에 직접 물어봄 (Worker 경유 안 함)
-    #    night_access: 현재 서버 시각(UTC) 기준 0~5시를 야간으로 간주 — 추후 KST 등
-    #    타임존 보정 필요 시 조정. unknown_location/device_fingerprint_mismatch는
-    #    사용자별 과거 로그인 기록(위치/기기 이력) 축적 로직이 아직 없어 이번 단계는 보류.
-    current_hour_utc = time.gmtime().tm_hour
-    signals = {
-        "brute_force": brute_force_flag,
-        "night_access": current_hour_utc < 5,
-    }
-    risk_result = evaluate_login_risk(email, {**signals, "security_mfa_passed": totp_ok and credentials_ok})
-
-    # 5) 최종 판정 — 자격증명/TOTP가 맞아도 위험점수가 차단이면 로그인 거부
     if not credentials_ok:
-        return reject("이메일 또는 비밀번호가 올바르지 않습니다.")
-    if not totp_ok:
-        return reject("TOTP 코드(또는 백업코드)가 올바르지 않습니다.", record_failure=False)
-    if not risk_result.get("allow", False):
-        # 자격증명은 맞았으므로 계정 자체를 실패로 기록하진 않되, 로그에는 남김
-        print(f"[LOGIN_BLOCKED] identity={email} action={risk_result.get('action')}")
-        return render_login_form(
+        db.session.add(LoginFailure(email=email, ip_address=client_ip))
+        db.session.commit()
+        return render_credentials_form(
             client_id, redirect_uri, state, response_type, scope,
-            error=f"보안 정책에 의해 로그인이 차단되었습니다 ({risk_result.get('action')})."
+            error="이메일 또는 비밀번호가 올바르지 않습니다."
         )
 
-    # 6) 통과 — 인가 코드 발급 후 Access(redirect_uri)로 돌려보냄
-    auth_code = secrets.token_urlsafe(32)
-    AUTH_CODES[auth_code] = {"email": email, "expires_at": time.time() + 60}
+    # 비밀번호까지만 맞은 상태. TOTP가 꺼져있는 계정이면 바로 최종 판정으로,
+    # 켜져있으면 2단계(TOTP 전용) 화면으로 넘어감 — 비밀번호는 다시 요구하지 않음.
+    if not account.totp_enabled:
+        return finalize_login(email, client_id, redirect_uri, state, response_type, scope, totp_ok=True)
 
-    return redirect(f"{redirect_uri}?code={auth_code}&state={state}")
+    challenge_id = secrets.token_urlsafe(24)
+    PENDING_LOGINS[challenge_id] = {
+        "email": email,
+        "expires_at": time.time() + 300,  # 5분 안에 TOTP 입력 안 하면 처음부터 다시
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "state": state,
+        "response_type": response_type,
+        "scope": scope,
+    }
+    return render_totp_form(challenge_id)
+
+
+@app.route('/authorize/verify-totp', methods=['POST'])
+def authorize_verify_totp():
+    challenge_id = request.form.get('challenge_id', '')
+    totp_input = request.form.get('totp_code', '').strip()
+
+    entry = PENDING_LOGINS.get(challenge_id)
+    if not entry or entry["expires_at"] < time.time():
+        PENDING_LOGINS.pop(challenge_id, None)
+        # 진행표가 만료됨 — 처음(이메일/비밀번호)부터 다시 시작하도록 안내
+        return render_credentials_form(
+            '', '', '', 'code', 'openid',
+            error="로그인 세션이 만료되었습니다. 처음부터 다시 시도해주세요."
+        )
+
+    email = entry["email"]
+    account = Account.query.filter_by(email=email).first()
+
+    totp_ok = False
+    if account and account.totp_secret and pyotp.TOTP(account.totp_secret).verify(totp_input, valid_window=1):
+        totp_ok = True
+    elif account:
+        # 백업코드로 대체 시도 (해시 비교, 맞으면 그 코드는 즉시 소진 처리)
+        for bc in BackupCode.query.filter_by(account_id=account.id, used=False).all():
+            if check_password_hash(bc.code_hash, totp_input):
+                bc.used = True
+                db.session.commit()
+                totp_ok = True
+                break
+
+    if not totp_ok:
+        # TOTP 오입력은 brute_force 실패 기록에 포함하지 않음 (이미 1단계에서 비번은 맞춘 상태)
+        return render_totp_form(challenge_id, error="TOTP 코드(또는 백업코드)가 올바르지 않습니다.")
+
+    PENDING_LOGINS.pop(challenge_id, None)
+    return finalize_login(
+        email, entry["client_id"], entry["redirect_uri"], entry["state"],
+        entry["response_type"], entry["scope"], totp_ok=True,
+    )
 
 
 @app.route('/token', methods=['POST'])

@@ -8,3 +8,5 @@ public-jwks.json
 README.md
 node_modules/
 .wrangler/
+account/
+access_worker/wrangler.toml

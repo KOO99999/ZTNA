@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, redirect
+from flask import Flask, request, jsonify, redirect, make_response
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 import boto3
@@ -253,6 +253,32 @@ def admin():
     """
     return render_page("[Admin Tier] 관리자 콘솔", 40, html, is_public=False)
 
+@app.route('/dev')
+def dev_page():
+    html = "<p>개발팀 전용 공간입니다. (Cloudflare Access가 개발팀 계정만 통과시킴)</p>"
+    return render_page("[Dev Team] 개발팀 페이지", 10, html, is_public=False)
+
+@app.route('/marketing')
+def marketing_page():
+    html = "<p>마케팅팀 전용 공간입니다. (Cloudflare Access가 마케팅팀 계정만 통과시킴)</p>"
+    return render_page("[Marketing Team] 마케팅팀 페이지", 10, html, is_public=False)
+
+@app.route('/hr')
+def hr_page():
+    html = "<p>인사팀 전용 공간입니다. (Cloudflare Access가 인사팀 계정만 통과시킴)</p>"
+    return render_page("[HR Team] 인사팀 페이지", 10, html, is_public=False)
+
+@app.route('/logout')
+def logout():
+    """SSO 세션을 서버/브라우저 양쪽에서 무효화. Access 자체 세션(24h)은 별개라
+    안 지워짐 — 완전 로그아웃하려면 브라우저에서 시크릿 창을 닫는 게 가장 확실함."""
+    sso_token = request.cookies.get(SSO_COOKIE_NAME)
+    if sso_token:
+        clear_sso_session(sso_token)
+    response = make_response("로그아웃되었습니다. 다음 접속 시 다시 로그인해야 합니다.")
+    response.delete_cookie(SSO_COOKIE_NAME)
+    return response
+
 @app.route('/api/db-data')
 def get_db_data():
     data_type = request.args.get('type')
@@ -366,6 +392,36 @@ def render_totp_form(challenge_id, error=None):
     """
 
 
+# ==========================================
+# SSO 세션 — "한 번 로그인하면, 다른 앱(/admin 등) 갈 때 비밀번호+TOTP 다시 안 물어봄"
+#   PENDING_LOGINS/AUTH_CODES와 같은 이유로 메모리 dict 사용 (8주 프로젝트 범위 단순화 —
+#   서버 재기동 시 전부 로그아웃됨. 실제 서비스라면 Redis 등 영속 저장소로 교체 권장)
+#   쿠키 자체엔 이메일을 담지 않고 랜덤 토큰만 담아서, 서버 쪽 SSO_SESSIONS에만
+#   실제 신원이 남도록 함 (쿠키 위변조로는 다른 사람 행세 불가능)
+# ==========================================
+SSO_SESSIONS = {}
+SSO_COOKIE_NAME = 'sso_session'
+SSO_SESSION_SECONDS = 8 * 3600  # 업무시간 기준 8시간
+
+
+def create_sso_session(email):
+    token = secrets.token_urlsafe(32)
+    SSO_SESSIONS[token] = {"email": email, "expires_at": time.time() + SSO_SESSION_SECONDS}
+    return token
+
+
+def get_sso_session_email(token):
+    entry = SSO_SESSIONS.get(token)
+    if not entry or entry["expires_at"] < time.time():
+        SSO_SESSIONS.pop(token, None)
+        return None
+    return entry["email"]
+
+
+def clear_sso_session(token):
+    SSO_SESSIONS.pop(token, None)
+
+
 def check_brute_force(email):
     """최근 15분 안에 이 이메일로 5회 이상 로그인 실패했는지 확인"""
     from datetime import datetime, timedelta
@@ -401,7 +457,17 @@ def finalize_login(email, client_id, redirect_uri, state, response_type, scope, 
 
     auth_code = secrets.token_urlsafe(32)
     AUTH_CODES[auth_code] = {"email": email, "expires_at": time.time() + 60}
-    return redirect(f"{redirect_uri}?code={auth_code}&state={state}")
+
+    response = make_response(redirect(f"{redirect_uri}?code={auth_code}&state={state}"))
+    sso_token = create_sso_session(email)
+    response.set_cookie(
+        SSO_COOKIE_NAME, sso_token,
+        max_age=SSO_SESSION_SECONDS,
+        httponly=True,     # JS로 못 읽음 (XSS 방어)
+        secure=True,       # HTTPS에서만 전송
+        samesite='Lax',    # 다른 사이트발 요청에는 안 실림 (CSRF 방어)
+    )
+    return response
 
 
 @app.route('/authorize', methods=['GET', 'POST'])
@@ -413,6 +479,15 @@ def authorize():
         state = request.args.get('state', '')
         response_type = request.args.get('response_type', 'code')
         scope = request.args.get('scope', 'openid')
+
+        # SSO: 이미 다른 앱에서 로그인해서 유효한 세션 쿠키가 있으면, 비밀번호/TOTP 화면을
+        # 또 보여주지 않고 바로 통과시킴 (단, 위험점수 재평가는 finalize_login이 그대로 수행함
+        # — "신원 재확인"은 생략해도 "권한/위험 재확인"은 Zero Trust 원칙상 매번 다시 함)
+        sso_token = request.cookies.get(SSO_COOKIE_NAME)
+        sso_email = get_sso_session_email(sso_token) if sso_token else None
+        if sso_email:
+            return finalize_login(sso_email, client_id, redirect_uri, state, response_type, scope, totp_ok=True)
+
         return render_credentials_form(client_id, redirect_uri, state, response_type, scope)
 
     # --- POST: 1단계 (이메일 + 비밀번호) 검증 ---

@@ -29,6 +29,20 @@ provider "cloudflare" {
 }
 
 # ==========================================
+# 0-1. 부서별 이메일 목록 + 로그인서버 서브도메인
+#   (2026-09: 로그인서버를 login.xmcda.store로 분리 - Access가 xmcda.store를 통째로
+#   지켜도 로그인서버 자신은 보호 대상 밖에 있어 "자기 자신을 지키는 문제"가 원천 차단됨)
+# ==========================================
+locals {
+  login_domain = "login.${var.domain_name}"
+
+  dev_team_emails       = ["employee01@xmcda.store", "employee02@xmcda.store", "employee03@xmcda.store", "employee04@xmcda.store"]
+  marketing_team_emails = ["employee05@xmcda.store", "employee06@xmcda.store", "employee07@xmcda.store"]
+  hr_team_emails        = ["employee08@xmcda.store", "employee09@xmcda.store"]
+  all_employee_emails   = concat(local.dev_team_emails, local.marketing_team_emails, local.hr_team_emails, var.admin_allowed_emails)
+}
+
+# ==========================================
 # 1. AWS DynamoDB (Risk Score & Audit Log)
 # ==========================================
 resource "aws_dynamodb_table" "risk_score_log" {
@@ -205,9 +219,9 @@ resource "cloudflare_zero_trust_access_identity_provider" "login_server" {
   config {
     client_id     = var.oidc_client_id
     client_secret = var.oidc_client_secret
-    auth_url      = "https://${var.domain_name}/authorize"
-    token_url     = "https://${var.domain_name}/token"
-    certs_url     = "https://${var.domain_name}/.well-known/jwks.json"
+    auth_url      = "https://${local.login_domain}/authorize"
+    token_url     = "https://${local.login_domain}/token"
+    certs_url     = "https://${local.login_domain}/.well-known/jwks.json"
     scopes        = ["openid", "email"]
   }
 }
@@ -223,6 +237,137 @@ resource "cloudflare_zero_trust_access_identity_provider" "login_server" {
 #   require 블록에 넣어야 "이메일 로그인" AND "신뢰점수 통과"가 둘 다 필요한 조건이 된다
 #   (include만 쓰면 둘 중 하나만 통과해도 되는 OR 조건이 되어버리므로 주의)
 # ==========================================
+# ==========================================
+# 5-0-1. Cloudflare Access Groups — 이메일을 재사용 가능한 이름표로 묶어둠
+#   (개별 정책마다 이메일을 나열하지 않고, 그룹만 참조. 인원 변경 시 여기만 수정하면 됨)
+# ==========================================
+resource "cloudflare_zero_trust_access_group" "all_employees" {
+  account_id = var.cloudflare_account_id
+  name       = "전체 직원"
+  include {
+    email = local.all_employee_emails
+  }
+}
+
+resource "cloudflare_zero_trust_access_group" "dev_team" {
+  account_id = var.cloudflare_account_id
+  name       = "개발팀"
+  include {
+    email = local.dev_team_emails
+  }
+}
+
+resource "cloudflare_zero_trust_access_group" "marketing_team" {
+  account_id = var.cloudflare_account_id
+  name       = "마케팅팀"
+  include {
+    email = local.marketing_team_emails
+  }
+}
+
+resource "cloudflare_zero_trust_access_group" "hr_team" {
+  account_id = var.cloudflare_account_id
+  name       = "인사팀"
+  include {
+    email = local.hr_team_emails
+  }
+}
+
+resource "cloudflare_zero_trust_access_group" "admins" {
+  account_id = var.cloudflare_account_id
+  name       = "관리자"
+  include {
+    email = var.admin_allowed_emails
+  }
+}
+
+# ==========================================
+# 5-2. 포털 홈 + 부서별 애플리케이션 (전체 직원 / 개발팀 / 마케팅팀 / 인사팀)
+# ==========================================
+resource "cloudflare_zero_trust_access_application" "portal" {
+  account_id                = var.cloudflare_account_id
+  name                       = "ZT Portal (전사 공통)"
+  domain                     = var.domain_name
+  type                       = "self_hosted"
+  session_duration           = "24h"
+  allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
+  auto_redirect_to_identity  = true
+}
+
+resource "cloudflare_zero_trust_access_policy" "portal_gate" {
+  application_id = cloudflare_zero_trust_access_application.portal.id
+  account_id     = var.cloudflare_account_id
+  name           = "Portal - All Employees"
+  decision       = "allow"
+  precedence     = 1
+  include {
+    group = [cloudflare_zero_trust_access_group.all_employees.id]
+  }
+}
+
+resource "cloudflare_zero_trust_access_application" "dev" {
+  account_id                = var.cloudflare_account_id
+  name                       = "ZT Dev Team"
+  domain                     = "${var.domain_name}/dev"
+  type                       = "self_hosted"
+  session_duration           = "24h"
+  allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
+  auto_redirect_to_identity  = true
+}
+
+resource "cloudflare_zero_trust_access_policy" "dev_gate" {
+  application_id = cloudflare_zero_trust_access_application.dev.id
+  account_id     = var.cloudflare_account_id
+  name           = "Dev - Dev Team Only"
+  decision       = "allow"
+  precedence     = 1
+  include {
+    group = [cloudflare_zero_trust_access_group.dev_team.id]
+  }
+}
+
+resource "cloudflare_zero_trust_access_application" "marketing" {
+  account_id                = var.cloudflare_account_id
+  name                       = "ZT Marketing Team"
+  domain                     = "${var.domain_name}/marketing"
+  type                       = "self_hosted"
+  session_duration           = "24h"
+  allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
+  auto_redirect_to_identity  = true
+}
+
+resource "cloudflare_zero_trust_access_policy" "marketing_gate" {
+  application_id = cloudflare_zero_trust_access_application.marketing.id
+  account_id     = var.cloudflare_account_id
+  name           = "Marketing - Marketing Team Only"
+  decision       = "allow"
+  precedence     = 1
+  include {
+    group = [cloudflare_zero_trust_access_group.marketing_team.id]
+  }
+}
+
+resource "cloudflare_zero_trust_access_application" "hr" {
+  account_id                = var.cloudflare_account_id
+  name                       = "ZT HR Team"
+  domain                     = "${var.domain_name}/hr"
+  type                       = "self_hosted"
+  session_duration           = "24h"
+  allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
+  auto_redirect_to_identity  = true
+}
+
+resource "cloudflare_zero_trust_access_policy" "hr_gate" {
+  application_id = cloudflare_zero_trust_access_application.hr.id
+  account_id     = var.cloudflare_account_id
+  name           = "HR - HR Team Only"
+  decision       = "allow"
+  precedence     = 1
+  include {
+    group = [cloudflare_zero_trust_access_group.hr_team.id]
+  }
+}
+
 resource "cloudflare_zero_trust_access_application" "admin_console" {
   account_id       = var.cloudflare_account_id
   name             = "ZT Admin Console"
@@ -238,20 +383,16 @@ resource "cloudflare_zero_trust_access_application" "admin_console" {
 resource "cloudflare_zero_trust_access_policy" "admin_gate_console" {
   application_id = cloudflare_zero_trust_access_application.admin_console.id
   account_id     = var.cloudflare_account_id
-  name           = "Admin Console - Email OTP + Risk Score Gate"
+  name           = "Admin Console - Admins Only"
   decision       = "allow"
   precedence     = 1
 
   include {
-    email = var.admin_allowed_emails
+    group = [cloudflare_zero_trust_access_group.admins.id]
   }
-
-  require {
-    external_evaluation {
-      evaluate_url = "https://ztna-access-evaluator.xmcda.workers.dev"
-      keys_url     = "https://ztna-access-evaluator.xmcda.workers.dev/keys"
-    }
-  }
+  # External Evaluation(위험점수 게이트)은 Cloudflare Access의 Require 위치에서
+  # 원인불명 오류로 항상 거부되는 현상이 확인되어 제거함. 위험점수 재확인은
+  # app.py의 /admin 라우트가 로그인 시점/재접속 시 직접 담당하도록 이관.
 }
 
 resource "cloudflare_zero_trust_access_application" "admin_api" {
@@ -267,19 +408,12 @@ resource "cloudflare_zero_trust_access_application" "admin_api" {
 resource "cloudflare_zero_trust_access_policy" "admin_gate_api" {
   application_id = cloudflare_zero_trust_access_application.admin_api.id
   account_id     = var.cloudflare_account_id
-  name           = "Admin API - Email OTP + Risk Score Gate"
+  name           = "Admin API - Admins Only"
   decision       = "allow"
   precedence     = 1
 
   include {
-    email = var.admin_allowed_emails
-  }
-
-  require {
-    external_evaluation {
-      evaluate_url = "https://ztna-access-evaluator.xmcda.workers.dev"
-      keys_url     = "https://ztna-access-evaluator.xmcda.workers.dev/keys"
-    }
+    group = [cloudflare_zero_trust_access_group.admins.id]
   }
 }
 
@@ -302,6 +436,10 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "web_tunnel_config" {
 
   config {
     ingress_rule {
+      hostname = local.login_domain
+      service  = "http://localhost:80"
+    }
+    ingress_rule {
       hostname = var.domain_name
       service  = "http://localhost:80"
     }
@@ -309,6 +447,15 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "web_tunnel_config" {
       service = "http_status:404"
     }
   }
+}
+
+resource "cloudflare_record" "login_dns" {
+  zone_id = var.cloudflare_zone_id
+  name    = "login"
+  type    = "CNAME"
+  content = "${cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.id}.cfargotunnel.com"
+  proxied = true
+  ttl     = 1
 }
 
 resource "cloudflare_record" "web_app_dns" {

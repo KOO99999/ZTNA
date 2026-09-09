@@ -10,3 +10,4 @@ node_modules/
 .wrangler/
 account/
 access_worker/wrangler.toml
+app.py

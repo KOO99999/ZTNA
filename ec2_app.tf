@@ -1,6 +1,7 @@
 # ==========================================
-# 11. App 티어 EC2 — Flask (로그인서버 로직 포함 예정)
-#    코드는 app.py 외부 파일에서 관리, main.tf/compute.tf는 참조만 함 (Lambda와 동일 원칙)
+# 11. Portal 티어 EC2 — Flask (포털/부서 페이지/관리자 콘솔)
+#    로그인 로직은 auth_server(ec2_auth.tf)로 분리됨 - 이 서버는 DB 연결이 필요 없음
+#    코드는 portal_app.py 외부 파일에서 관리, main.tf/compute.tf는 참조만 함
 # ==========================================
 resource "aws_instance" "app_server" {
   ami                  = data.aws_ami.ubuntu.id
@@ -12,29 +13,12 @@ resource "aws_instance" "app_server" {
 
   user_data_replace_on_change = true
 
-  # AWS EC2 user_data는 16,384바이트 제한이 있는데, app.py가 커지면서(로그인서버 라우트
-  # 추가 등) 이 한도를 넘어서게 됨. base64gzip()으로 압축해서 넘기면 cloud-init이 부팅 시
-  # 자동으로 압축을 풀어 실행함 — 앞으로 코드가 더 늘어나도 여유가 생기는 표준적인 해결법.
-  # (user_data와 user_data_base64는 동시에 쓸 수 없어 user_data_base64로 전환)
   user_data_base64 = base64gzip(templatefile("${path.module}/templates/user_data_app.sh.tpl", {
-    app_code    = file("${path.module}/app.py")
-    db_host     = aws_db_instance.login_db.address
-    db_name     = aws_db_instance.login_db.db_name
-    db_user     = aws_db_instance.login_db.username
-    db_password = random_password.db_master_password.result
-    # /authorize가 로그인 시도 자체의 위험도를 Lambda에 직접 물어볼 때 필요한 값
-    # (Worker를 거치지 않고 직접 호출 — 기존 /evaluate 공유 비밀키 인증 그대로 재사용)
-    pdp_evaluate_url        = "${aws_apigatewayv2_stage.pdp_stage.invoke_url}evaluate"
-    evaluate_shared_secret  = var.evaluate_shared_secret
-    domain_name             = var.domain_name
-    # /token이 요청자(Cloudflare Access)를 검증할 때 대조할 값 — 아래 main.tf의
-    # cloudflare_zero_trust_access_identity_provider 등록 설정과 반드시 같은 값이어야 함
-    oidc_client_id          = var.oidc_client_id
-    oidc_client_secret      = var.oidc_client_secret
+    app_code = file("${path.module}/portal_app.py")
   }))
 
   tags = {
-    Name = "ZT-App-Server"
+    Name = "ZT-Portal-Server"
   }
 
   lifecycle {

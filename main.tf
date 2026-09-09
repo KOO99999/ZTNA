@@ -34,7 +34,7 @@ provider "cloudflare" {
 #   지켜도 로그인서버 자신은 보호 대상 밖에 있어 "자기 자신을 지키는 문제"가 원천 차단됨)
 # ==========================================
 locals {
-  login_domain = "login.${var.domain_name}"
+  auth_domain = "auth.${var.domain_name}"
 
   dev_team_emails       = ["employee01@xmcda.store", "employee02@xmcda.store", "employee03@xmcda.store", "employee04@xmcda.store"]
   marketing_team_emails = ["employee05@xmcda.store", "employee06@xmcda.store", "employee07@xmcda.store"]
@@ -219,9 +219,9 @@ resource "cloudflare_zero_trust_access_identity_provider" "login_server" {
   config {
     client_id     = var.oidc_client_id
     client_secret = var.oidc_client_secret
-    auth_url      = "https://${local.login_domain}/authorize"
-    token_url     = "https://${local.login_domain}/token"
-    certs_url     = "https://${local.login_domain}/.well-known/jwks.json"
+    auth_url      = "https://${local.auth_domain}/authorize"
+    token_url     = "https://${local.auth_domain}/token"
+    certs_url     = "https://${local.auth_domain}/.well-known/jwks.json"
     scopes        = ["openid", "email"]
   }
 }
@@ -435,9 +435,13 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "web_tunnel_config" {
   tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.id
 
   config {
+    # auth.xmcda.store는 nginx를 거치지 않고 auth_server로 곧장 연결됨.
+    # (nginx가 도메인 구분 없이 모든 경로를 app_server로 넘기던 구조 때문에, 예전엔
+    # login.xmcda.store/admin으로 Access 보호를 완전히 우회할 수 있는 구멍이 있었음.
+    # auth_server 자체엔 /admin 라우트가 코드에 없어서, 이제 경로가 달라도 원천 차단됨)
     ingress_rule {
-      hostname = local.login_domain
-      service  = "http://localhost:80"
+      hostname = local.auth_domain
+      service  = "http://${aws_instance.auth_server.private_ip}:8080"
     }
     ingress_rule {
       hostname = var.domain_name
@@ -449,9 +453,9 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "web_tunnel_config" {
   }
 }
 
-resource "cloudflare_record" "login_dns" {
+resource "cloudflare_record" "auth_dns" {
   zone_id = var.cloudflare_zone_id
-  name    = "login"
+  name    = "auth"
   type    = "CNAME"
   content = "${cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.id}.cfargotunnel.com"
   proxied = true

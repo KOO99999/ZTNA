@@ -14,6 +14,9 @@ def render_page(title, min_score, content_html, is_public=False):
     else:
         email_str = user_email if user_email else "인증 정보 없음"
         user_status_html = f"🔑 <strong>인증된 관리자 계정:</strong> {email_str}<br>🛡️ <strong>허용 위험점수(이하 통과):</strong> {min_score}점"
+        # 로그아웃: SSO 세션(auth_app.py)과 Cloudflare Access 세션을 순차 정리하기 위해
+        # 반드시 auth.xmcda.store/logout으로 보내야 함 (chained logout, portal_app.py엔 /logout 라우트 없음)
+        user_status_html += '<br><a href="https://auth.xmcda.store/logout">로그아웃</a>'
 
     inactivity_script = """
     <script>
@@ -73,14 +76,14 @@ def render_page(title, min_score, content_html, is_public=False):
 @app.route('/')
 def general():
     html = """
-    <p>누구나 무료로 이용할 수 있는 오픈 서비스 영역입니다.</p>
+    <p>전 직원 공통 포털 홈입니다.</p>
     <ul>
-        <li>인증 절차 없이 즉시 접근 가능</li>
+        <li>Cloudflare Access가 전체 직원(all_employees 그룹) 계정만 통과시킴</li>
         <li>서비스 기본 정보 및 공개 게시판 제공</li>
     </ul>
     <a href="/admin"><button style="background-color: #dc3545;">관리자 콘솔 바로가기</button></a>
     """
-    return render_page("[Public Tier] 일반 대시보드", 0, html, is_public=True)
+    return render_page("[Portal] 전사 공통 대시보드", 0, html, is_public=False)
 
 @app.route('/admin')
 def admin():

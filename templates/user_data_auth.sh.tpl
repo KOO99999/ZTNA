@@ -20,8 +20,25 @@ OIDC_CLIENT_ID=${oidc_client_id}
 OIDC_CLIENT_SECRET=${oidc_client_secret}
 ENV
 
-set -a
-source /home/ubuntu/.env
-set +a
+# --- systemd 서비스로 등록 (기존 nohup 방식 대체) ---
+# - Restart=always: 프로세스가 죽어도 systemd가 자동으로 재시작
+# - WantedBy=multi-user.target + enable: 인스턴스 재부팅 시에도 자동 기동
+cat << 'SERVICE' > /etc/systemd/system/auth-app.service
+[Unit]
+Description=ZT Auth Server (auth_app.py)
+After=network.target
 
-nohup python3 /home/ubuntu/auth_app.py > /home/ubuntu/auth_app.log 2>&1 &
+[Service]
+ExecStart=/usr/bin/python3 /home/ubuntu/auth_app.py
+EnvironmentFile=/home/ubuntu/.env
+WorkingDirectory=/home/ubuntu
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+systemctl daemon-reload
+systemctl enable --now auth-app

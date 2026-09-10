@@ -161,11 +161,13 @@ def finalize_login(email, client_id, redirect_uri, state, response_type, scope, 
     risk_result = evaluate_login_risk(email, {**signals, "security_mfa_passed": totp_ok})
 
     if not risk_result.get("allow", False):
-        print(f"[LOGIN_BLOCKED] identity={email} action={risk_result.get('action')}")
+        print(f"[LOGIN_BLOCKED] identity={email} action={risk_result.get('action')}", flush=True)
         return render_credentials_form(
             client_id, redirect_uri, state, response_type, scope,
             error=f"보안 정책에 의해 로그인이 차단되었습니다 ({risk_result.get('action')})."
         )
+
+    print(f"[LOGIN_ALLOWED] identity={email} totp_ok={totp_ok} (SSO 재사용이면 totp 재입력 없이도 위험판단은 여기서 매번 실행됨)", flush=True)
 
     auth_code = secrets.token_urlsafe(32)
     AUTH_CODES[auth_code] = {"email": email, "expires_at": time.time() + 60}

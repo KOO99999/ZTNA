@@ -72,9 +72,12 @@ export default {
     }
 
     // 2) 응답을 JWT로 서명해서 Access에 돌려줌
+    // [v8, Block 정책 전환] 이 워커는 이제 admin_risk_block(decision="block")의 Include에서
+    // 쓰인다. Block 정책은 "매치되면(success:true) 차단"이므로, 기존과 반대로
+    // "위험(allow===false)할 때 success:true"가 되어야 함 — 안전하면 매치 안 시켜서 통과시킴.
     const privateKey = await importPKCS8(env.PRIVATE_KEY_PEM, 'RS256');
     const responseJwt = await new SignJWT({
-      success: trustResult.allow === true,
+      success: trustResult.allow === false,
       nonce: nonce,
     })
       .setProtectedHeader({ alg: 'RS256', kid: publicJwks.keys[0].kid })

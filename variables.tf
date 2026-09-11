@@ -13,6 +13,15 @@ variable "cloudflare_api_token" {
   sensitive = true
 }
 
+# Worker(ztna-access-evaluator) 배포(wrangler deploy) 전용 토큰.
+# cloudflare_api_token(Access 정책 관리용)과 용도를 분리해 최소 권한 원칙을 API 토큰
+# 레벨까지 일관되게 적용 — 권한 범위: Account > Workers Scripts > Edit, User > User Details > Read
+variable "cloudflare_workers_api_token" {
+  type        = string
+  sensitive   = true
+  description = "Cloudflare Workers 배포 전용 API 토큰 (terraform.tfvars, git 미포함)"
+}
+
 variable "cloudflare_account_id" {
   type = string
 }

@@ -395,6 +395,31 @@ resource "cloudflare_zero_trust_access_policy" "admin_gate_console" {
   # app.py의 /admin 라우트가 로그인 시점/재접속 시 직접 담당하도록 이관.
 }
 
+# [v8, 방향 A] Require 대신 별도의 Deny 정책으로 External Evaluation 재시도.
+# (Cloudflare Terraform Provider의 decision 값은 allow/deny/non_identity/bypass만
+# 허용되며 "block"은 유효하지 않아 "deny"로 수정함 — Cloudflare 대시보드 UI 상의
+# "Block" 액션과 동일한 의미)
+# Access 자체 세션 캐싱(session_duration=24h) 때문에 로그인 이후 재접근 시
+# evaluate_login_risk()가 아예 호출 안 되는 문제(/dev 등에서 실증됨)가, 이 Deny
+# 정책까지는 캐싱과 무관하게 매번 재평가되는지 확인하기 위한 시도.
+# index.js도 이 정책에 맞춰 판단을 뒤집어둠(위험할 때 success:true).
+# 효과 없으면 이 정책은 제거하고 portal_app.py의 각 라우트/before_request에서
+# 직접 Lambda를 호출하는 방향(B)으로 전환.
+resource "cloudflare_zero_trust_access_policy" "admin_risk_block" {
+  application_id = cloudflare_zero_trust_access_application.admin_console.id
+  account_id     = var.cloudflare_account_id
+  name           = "Admin Console - Risk Block"
+  decision       = "deny"
+  precedence     = 2
+
+  include {
+    external_evaluation {
+      evaluate_url = "https://ztna-access-evaluator.xmcda.workers.dev"
+      keys_url     = "https://ztna-access-evaluator.xmcda.workers.dev/keys"
+    }
+  }
+}
+
 resource "cloudflare_zero_trust_access_application" "admin_api" {
   account_id       = var.cloudflare_account_id
   name             = "ZT Admin API (DynamoDB 감사 로그)"

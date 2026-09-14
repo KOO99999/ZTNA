@@ -14,8 +14,14 @@ resource "aws_instance" "web_server" {
   user_data_replace_on_change = true
 
   user_data = templatefile("${path.module}/templates/user_data_web.sh.tpl", {
-    app_private_ip = aws_instance.app_server.private_ip
-    tunnel_token   = cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.tunnel_token
+    app_private_ip  = aws_instance.app_server.private_ip
+    tunnel_token    = cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.tunnel_token
+    # 아래 4개는 cloudflared가 원격(Cloudflare 대시보드)에 설정을 물어보지 않고
+    # 로컬 config.yml만으로 즉시 라우팅하도록 전달하는 값 (503 재발 방지, 변경7 참고)
+    tunnel_id        = cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.id
+    auth_domain      = local.auth_domain
+    auth_private_ip  = aws_instance.auth_server.private_ip
+    domain_name      = var.domain_name
   })
 
   tags = {

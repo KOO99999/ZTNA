@@ -385,14 +385,39 @@ resource "cloudflare_zero_trust_access_policy" "admin_gate_console" {
   account_id     = var.cloudflare_account_id
   name           = "Admin Console - Admins Only"
   decision       = "allow"
-  precedence     = 1
+  precedence     = 2
 
   include {
     group = [cloudflare_zero_trust_access_group.admins.id]
   }
-  # External Evaluation(위험점수 게이트)은 Cloudflare Access의 Require 위치에서
-  # 원인불명 오류로 항상 거부되는 현상이 확인되어 제거함. 위험점수 재확인은
-  # app.py의 /admin 라우트가 로그인 시점/재접속 시 직접 담당하도록 이관.
+}
+
+# [방향 A, 9차 세션 확정] External Evaluation(위험점수 게이트)을 Require 대신
+# 별도의 Deny 정책으로 재시도해 성공함. 원인은 정책 순서(precedence) — Access는
+# 정책을 위→아래로 평가하다 먼저 매치되는 정책에서 확정하고 멈추므로, Allow(위)가
+# Deny(아래)보다 먼저면 그룹만 맞아도 Deny까지 평가가 안 됨. 그래서 이 Deny 정책을
+# precedence=1(Allow보다 먼저)로 두어, 그룹 여부와 무관하게 위험판단이 항상 먼저
+# 실행되도록 함. index.js도 이 정책에 맞춰 판단을 뒤집어둠(위험할 때 success:true).
+# decision 값은 Cloudflare Terraform Provider가 "block"을 지원하지 않아 "deny" 사용
+# (대시보드 UI의 "Block" 액션과 동일한 의미).
+#
+# 검증: wrangler tail로 관리자 계정 로그인 시 Worker→Lambda가 실제 호출되고
+# trustResult가 정상 반환되는 것까지 확인 완료(세션을 완전히 지운 뒤 재로그인 시나리오).
+# 단, 세션이 살아있는 채로 다른 페이지로 이동하는 경우(§9 캐싱 시나리오)는 아직
+# 재검증 전이며, /dev·/marketing·/hr에는 아직 미적용 — 다음 세션 최우선 작업.
+resource "cloudflare_zero_trust_access_policy" "admin_risk_block" {
+  application_id = cloudflare_zero_trust_access_application.admin_console.id
+  account_id     = var.cloudflare_account_id
+  name           = "Admin Console - Risk Block"
+  decision       = "deny"
+  precedence     = 1
+
+  include {
+    external_evaluation {
+      evaluate_url = "https://ztna-access-evaluator.xmcda.workers.dev"
+      keys_url     = "https://ztna-access-evaluator.xmcda.workers.dev/keys"
+    }
+  }
 }
 
 resource "cloudflare_zero_trust_access_application" "admin_api" {

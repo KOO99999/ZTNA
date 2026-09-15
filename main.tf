@@ -313,14 +313,21 @@ resource "cloudflare_zero_trust_access_application" "dev" {
   session_duration           = "24h"
   allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   auto_redirect_to_identity  = true
+
+  # [통일 관리 방식 재시도] Deny(risk_block_shared)와 Allow(dev_gate) 둘 다 이 리스트 하나로만 관리함(관리 방식 섞음 방지).
+  # 리스트 순서 = precedence (먼저 = Deny 먼저 평가)
+  policies = [
+    cloudflare_zero_trust_access_policy.risk_block_shared.id,
+    cloudflare_zero_trust_access_policy.dev_gate.id,
+  ]
 }
 
+# [통일 관리 방식 재시도] application_id를 빼서 이것도 재사용형 정책으로 전환.
+# precedence는 위 dev 앱의 policies 리스트 순서가 결정하며, 여기서 명시하면 중복 지정이 되므로 빼도 됨.
 resource "cloudflare_zero_trust_access_policy" "dev_gate" {
-  application_id = cloudflare_zero_trust_access_application.dev.id
-  account_id     = var.cloudflare_account_id
-  name           = "Dev - Dev Team Only"
-  decision       = "allow"
-  precedence     = 1
+  account_id = var.cloudflare_account_id
+  name       = "Dev - Dev Team Only"
+  decision   = "allow"
   include {
     group = [cloudflare_zero_trust_access_group.dev_team.id]
   }
@@ -421,6 +428,25 @@ resource "cloudflare_zero_trust_access_policy" "admin_risk_block" {
       evaluate_url = "https://ztna-access-evaluator.xmcda.workers.dev"
       keys_url     = "https://ztna-access-evaluator.xmcda.workers.dev/keys"
     }
+  }
+}
+
+# [파일럿 검증용] /dev에만 먼저 적용해볼 계정 레벨 진정책(Reusable Policy) - application_id 없음
+# 검증 완료 후 marketing/hr/admin로 확장 예정
+resource "cloudflare_zero_trust_access_policy" "risk_block_shared" {
+  account_id = var.cloudflare_account_id
+  name       = "Global - Risk Block (External Evaluation)"
+  decision   = "deny"
+
+  include {
+    external_evaluation {
+      evaluate_url = "https://ztna-access-evaluator.xmcda.workers.dev"
+      keys_url     = "https://ztna-access-evaluator.xmcda.workers.dev/keys"
+    }
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 

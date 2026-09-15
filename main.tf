@@ -222,7 +222,7 @@ resource "cloudflare_zero_trust_access_identity_provider" "login_server" {
     auth_url      = "https://${local.auth_domain}/authorize"
     token_url     = "https://${local.auth_domain}/token"
     certs_url     = "https://${local.auth_domain}/.well-known/jwks.json"
-    scopes        = ["openid", "email"]
+    scopes        = ["openid", "email", "profile"]
   }
 }
 
@@ -292,14 +292,18 @@ resource "cloudflare_zero_trust_access_application" "portal" {
   session_duration           = "24h"
   allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   auto_redirect_to_identity  = true
+
+  # [통일 관리 방식 확장] 로그인 필수 + 세션 위험화 가능성은 다른 페이지와 동일해 risk_block_shared 추가.
+  policies = [
+    cloudflare_zero_trust_access_policy.risk_block_shared.id,
+    cloudflare_zero_trust_access_policy.portal_gate.id,
+  ]
 }
 
 resource "cloudflare_zero_trust_access_policy" "portal_gate" {
-  application_id = cloudflare_zero_trust_access_application.portal.id
-  account_id     = var.cloudflare_account_id
-  name           = "Portal - All Employees"
-  decision       = "allow"
-  precedence     = 1
+  account_id = var.cloudflare_account_id
+  name       = "Portal - All Employees"
+  decision   = "allow"
   include {
     group = [cloudflare_zero_trust_access_group.all_employees.id]
   }
@@ -341,14 +345,17 @@ resource "cloudflare_zero_trust_access_application" "marketing" {
   session_duration           = "24h"
   allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   auto_redirect_to_identity  = true
+
+  policies = [
+    cloudflare_zero_trust_access_policy.risk_block_shared.id,
+    cloudflare_zero_trust_access_policy.marketing_gate.id,
+  ]
 }
 
 resource "cloudflare_zero_trust_access_policy" "marketing_gate" {
-  application_id = cloudflare_zero_trust_access_application.marketing.id
-  account_id     = var.cloudflare_account_id
-  name           = "Marketing - Marketing Team Only"
-  decision       = "allow"
-  precedence     = 1
+  account_id = var.cloudflare_account_id
+  name       = "Marketing - Marketing Team Only"
+  decision   = "allow"
   include {
     group = [cloudflare_zero_trust_access_group.marketing_team.id]
   }
@@ -362,14 +369,17 @@ resource "cloudflare_zero_trust_access_application" "hr" {
   session_duration           = "24h"
   allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   auto_redirect_to_identity  = true
+
+  policies = [
+    cloudflare_zero_trust_access_policy.risk_block_shared.id,
+    cloudflare_zero_trust_access_policy.hr_gate.id,
+  ]
 }
 
 resource "cloudflare_zero_trust_access_policy" "hr_gate" {
-  application_id = cloudflare_zero_trust_access_application.hr.id
-  account_id     = var.cloudflare_account_id
-  name           = "HR - HR Team Only"
-  decision       = "allow"
-  precedence     = 1
+  account_id = var.cloudflare_account_id
+  name       = "HR - HR Team Only"
+  decision   = "allow"
   include {
     group = [cloudflare_zero_trust_access_group.hr_team.id]
   }
@@ -385,54 +395,25 @@ resource "cloudflare_zero_trust_access_application" "admin_console" {
   allowed_idps     = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   # 선택지가 하나뿐이니 "로그인 방법 선택" 화면 없이 바로 우리 로그인서버로 리다이렉트
   auto_redirect_to_identity = true
-
-  # [App Launcher 가설 검증용] SSO 로그인 시 App Launcher가 이 앱을 미리 평가해
-  # 관계없는 위험판단 호출이 같이 일어나는지 테스트
   app_launcher_visible = false
+
+  # [통일 관리 방식으로 전환] risk_block_shared를 dev/marketing/hr와 동일한 방식으로 적용. 기존 admin_risk_block(전용)은 제거.
+  policies = [
+    cloudflare_zero_trust_access_policy.risk_block_shared.id,
+    cloudflare_zero_trust_access_policy.admin_gate_console.id,
+  ]
 }
 
 resource "cloudflare_zero_trust_access_policy" "admin_gate_console" {
-  application_id = cloudflare_zero_trust_access_application.admin_console.id
-  account_id     = var.cloudflare_account_id
-  name           = "Admin Console - Admins Only"
-  decision       = "allow"
-  precedence     = 2
+  account_id = var.cloudflare_account_id
+  name       = "Admin Console - Admins Only"
+  decision   = "allow"
 
   include {
     group = [cloudflare_zero_trust_access_group.admins.id]
   }
 }
 
-# [방향 A, 9차 세션 확정] External Evaluation(위험점수 게이트)을 Require 대신
-# 별도의 Deny 정책으로 재시도해 성공함. 원인은 정책 순서(precedence) — Access는
-# 정책을 위→아래로 평가하다 먼저 매치되는 정책에서 확정하고 멈추므로, Allow(위)가
-# Deny(아래)보다 먼저면 그룹만 맞아도 Deny까지 평가가 안 됨. 그래서 이 Deny 정책을
-# precedence=1(Allow보다 먼저)로 두어, 그룹 여부와 무관하게 위험판단이 항상 먼저
-# 실행되도록 함. index.js도 이 정책에 맞춰 판단을 뒤집어둠(위험할 때 success:true).
-# decision 값은 Cloudflare Terraform Provider가 "block"을 지원하지 않아 "deny" 사용
-# (대시보드 UI의 "Block" 액션과 동일한 의미).
-#
-# 검증: wrangler tail로 관리자 계정 로그인 시 Worker→Lambda가 실제 호출되고
-# trustResult가 정상 반환되는 것까지 확인 완료(세션을 완전히 지운 뒤 재로그인 시나리오).
-# 단, 세션이 살아있는 채로 다른 페이지로 이동하는 경우(§9 캐싱 시나리오)는 아직
-# 재검증 전이며, /dev·/marketing·/hr에는 아직 미적용 — 다음 세션 최우선 작업.
-resource "cloudflare_zero_trust_access_policy" "admin_risk_block" {
-  application_id = cloudflare_zero_trust_access_application.admin_console.id
-  account_id     = var.cloudflare_account_id
-  name           = "Admin Console - Risk Block"
-  decision       = "deny"
-  precedence     = 1
-
-  include {
-    external_evaluation {
-      evaluate_url = "https://ztna-access-evaluator.xmcda.workers.dev"
-      keys_url     = "https://ztna-access-evaluator.xmcda.workers.dev/keys"
-    }
-  }
-}
-
-# [파일럿 검증용] /dev에만 먼저 적용해볼 계정 레벨 진정책(Reusable Policy) - application_id 없음
-# 검증 완료 후 marketing/hr/admin로 확장 예정
 resource "cloudflare_zero_trust_access_policy" "risk_block_shared" {
   account_id = var.cloudflare_account_id
   name       = "Global - Risk Block (External Evaluation)"
@@ -459,14 +440,17 @@ resource "cloudflare_zero_trust_access_application" "admin_api" {
   allowed_idps     = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   auto_redirect_to_identity = true
   app_launcher_visible = false
+
+  policies = [
+    cloudflare_zero_trust_access_policy.risk_block_shared.id,
+    cloudflare_zero_trust_access_policy.admin_gate_api.id,
+  ]
 }
 
 resource "cloudflare_zero_trust_access_policy" "admin_gate_api" {
-  application_id = cloudflare_zero_trust_access_application.admin_api.id
-  account_id     = var.cloudflare_account_id
-  name           = "Admin API - Admins Only"
-  decision       = "allow"
-  precedence     = 1
+  account_id = var.cloudflare_account_id
+  name       = "Admin API - Admins Only"
+  decision   = "allow"
 
   include {
     group = [cloudflare_zero_trust_access_group.admins.id]

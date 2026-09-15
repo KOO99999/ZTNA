@@ -378,6 +378,10 @@ resource "cloudflare_zero_trust_access_application" "admin_console" {
   allowed_idps     = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   # 선택지가 하나뿐이니 "로그인 방법 선택" 화면 없이 바로 우리 로그인서버로 리다이렉트
   auto_redirect_to_identity = true
+
+  # [App Launcher 가설 검증용] SSO 로그인 시 App Launcher가 이 앱을 미리 평가해
+  # 관계없는 위험판단 호출이 같이 일어나는지 테스트
+  app_launcher_visible = false
 }
 
 resource "cloudflare_zero_trust_access_policy" "admin_gate_console" {
@@ -428,6 +432,7 @@ resource "cloudflare_zero_trust_access_application" "admin_api" {
   session_duration = "24h"
   allowed_idps     = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   auto_redirect_to_identity = true
+  app_launcher_visible = false
 }
 
 resource "cloudflare_zero_trust_access_policy" "admin_gate_api" {

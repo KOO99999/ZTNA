@@ -46,6 +46,13 @@ export default {
     // (success:true만으로는 부족함 - Cloudflare External Evaluation 스펙)
     const nonce = accessPayload.nonce;
 
+    // night_access: 요청 시각(KST) 기준 22시~06시 사이면 야간 접속으로 판단.
+    // 1단계 구현: 전 직원 공통 고정 기준(Cloudflare 데이터 미사용, 순수 Date 계산).
+    // 추후 role별 가정값 -> 실측 이력 기반 개인화로 단계적 고도화 예정.
+    const now = new Date();
+    const kstHour = (now.getUTCHours() + 9) % 24;
+    const isNightAccess = kstHour >= 22 || kstHour < 6;
+
     // 1) 우리 Trust Score Engine(Lambda) 호출
     let trustResult;
     try {
@@ -60,11 +67,12 @@ export default {
         body: JSON.stringify({
           identity: identity,
           session_id: accessPayload.session_id || crypto.randomUUID(),
+          night_access: isNightAccess,
           // TODO: 실제로는 클라이언트 IP/시간대 등 위협 신호를 여기서 함께 실어 보내야 함
         }),
       });
       trustResult = await lambdaResp.json();
-      console.log('[DEBUG] identity:', identity, 'nonce:', nonce, 'trustResult:', JSON.stringify(trustResult));
+      console.log('[DEBUG] identity:', identity, 'nonce:', nonce, 'night_access:', isNightAccess, 'trustResult:', JSON.stringify(trustResult));
     } catch (e) {
       // Lambda 호출 자체가 실패하면 Fail-Closed (5조 피드백 반영 - admin 등급 기준)
       console.log('[DEBUG] lambda call failed:', e.message);

@@ -46,3 +46,17 @@ output "oidc_client_secret" {
   sensitive   = true
   description = "다음 단계(cloudflare_zero_trust_access_identity_provider 등록)에 그대로 넣을 client_secret"
 }
+
+# --- destroy/apply 이후 .env(DB_HOST/DB_PASSWORD) 재구성 시 값을 쉽게 조회하기 위한 output ---
+# 리소스 이름은 database.tf 기준 aws_db_instance.login_db, random_password.db_master_password.
+# (DB_NAME="login_server", DB_USER="zt_admin"은 고정값이라 별도 output 불필요)
+output "db_host" {
+  value       = aws_db_instance.login_db.address
+  description = "AWS RDS 엔드포인트 주소 (포트 제외, .env의 DB_HOST에 그대로 사용)"
+}
+
+output "db_password" {
+  value       = random_password.db_master_password.result
+  sensitive   = true
+  description = "AWS RDS 마스터 패스워드 (.env의 DB_PASSWORD에 그대로 사용). terraform output -raw db_password로 조회"
+}

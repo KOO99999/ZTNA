@@ -3,6 +3,7 @@ import os
 import time
 import uuid
 import boto3
+from datetime import datetime, timedelta
 
 dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
 table = dynamodb.Table('risk_score_log')
@@ -10,6 +11,9 @@ table = dynamodb.Table('risk_score_log')
 # /evaluate가 인증 없이 URL만 알면 호출되는 문제 보완용.
 # Terraform(main.tf)이 random_password로 생성해 Lambda 환경변수로 주입한 값과 대조한다.
 SHARED_SECRET = os.environ.get("EVALUATE_SHARED_SECRET")
+
+# 이 시스템의 "본거지" 국가. unknown_location 판정 기준값.
+HOME_COUNTRY = "KR"
 
 # v10: 전체 배점 2배 확대 (임계값·마진·조합보너스·시간감쇠 포함 일관 적용)
 #   - v9까지: night_access=10 ~ waf_sqli=47, 임계값 20, 마진 10 (재인증 구간 20~30)
@@ -68,6 +72,32 @@ def lambda_handler(event, context):
             body = {}
     elif isinstance(event, dict):
         body = event
+
+    # --- 0. 원본 신호(request_timestamp, geo_country) 판정 ---
+    # Worker(index.js)는 판단 없이 원본 데이터만 전달하고, "야간인지/위치가
+    # 이상한지"에 대한 실제 판정은 여기(PDP)에서 전담한다. 판정 결과를
+    # body에 boolean으로 채워넣으면, 아래 §1의 RISK_MATRIX 루프가
+    # body.get(factor) 형태로 그대로 읽어간다.
+
+    # night_access: 요청 시각(KST) 기준 22시~06시 사이면 야간 접속으로 판단.
+    # 1단계 구현: 전 직원 공통 고정 기준(전 직원 동일 적용).
+    # 추후 role별 가정값 -> 실측 이력 기반 개인화로 단계적 고도화 예정.
+    request_timestamp = body.get("request_timestamp")
+    if request_timestamp:
+        try:
+            dt_utc = datetime.fromisoformat(request_timestamp.replace("Z", "+00:00"))
+            kst_hour = (dt_utc + timedelta(hours=9)).hour
+            if kst_hour >= 22 or kst_hour < 6:
+                body["night_access"] = True
+        except Exception as e:
+            print("night_access 판정 중 시각 파싱 오류:", str(e))
+
+    # unknown_location: Cloudflare Access가 제공하는 geo.country가 HOME_COUNTRY(KR)와
+    # 다르면 위치 이상으로 판단. geo_country가 없는 경우(누락/알 수 없음)는 오탐 방지를
+    # 위해 위험으로 간주하지 않음.
+    geo_country = body.get("geo_country")
+    if geo_country is not None and geo_country != HOME_COUNTRY:
+        body["unknown_location"] = True
 
     risk_score = 0             # 0(완전 안전)에서 시작, 위험할수록 더함. 상한 없음
     reasons = []

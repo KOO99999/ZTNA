@@ -6,6 +6,12 @@
  * {success: true/false} 형태로 서명해서 Access에 돌려준다.
  *
  * GET /keys 는 Access가 이 워커의 서명을 검증할 때 쓰는 공개키(JWKS)를 제공한다.
+ *
+ * [설계 원칙] 이 워커는 판단(PDP) 로직을 갖지 않는다. Access가 준 원본 데이터
+ * (요청 시각, geo 국가코드 등)를 그대로 Lambda에 전달만 하고, "야간 접속인지",
+ * "위치가 이상한지" 같은 실제 판정은 전부 risk_score_engine.py(Lambda)가 담당한다.
+ * 이렇게 판정 로직을 한 곳(Lambda)에 모아두면, 판정 기준이 바뀔 때 이 워커를
+ * 재배포할 필요 없이 Lambda 코드만 수정하면 된다.
  */
 import { SignJWT, importPKCS8 } from 'jose';
 import publicJwks from '../public-jwks.json';
@@ -46,12 +52,9 @@ export default {
     // (success:true만으로는 부족함 - Cloudflare External Evaluation 스펙)
     const nonce = accessPayload.nonce;
 
-    // night_access: 요청 시각(KST) 기준 22시~06시 사이면 야간 접속으로 판단.
-    // 1단계 구현: 전 직원 공통 고정 기준(Cloudflare 데이터 미사용, 순수 Date 계산).
-    // 추후 role별 가정값 -> 실측 이력 기반 개인화로 단계적 고도화 예정.
-    const now = new Date();
-    const kstHour = (now.getUTCHours() + 9) % 24;
-    const isNightAccess = kstHour >= 22 || kstHour < 6;
+    // 판단 없이 원본 값만 추출 (야간 여부/위치 이상 여부 판정은 Lambda가 담당)
+    const requestTimestamp = new Date().toISOString();
+    const geoCountry = accessPayload.identity?.geo?.country || null;
 
     // 1) 우리 Trust Score Engine(Lambda) 호출
     let trustResult;
@@ -67,12 +70,15 @@ export default {
         body: JSON.stringify({
           identity: identity,
           session_id: accessPayload.session_id || crypto.randomUUID(),
-          night_access: isNightAccess,
-          // TODO: 실제로는 클라이언트 IP/시간대 등 위협 신호를 여기서 함께 실어 보내야 함
+          request_timestamp: requestTimestamp,
+          geo_country: geoCountry,
+          // TODO: 실제로는 클라이언트 IP 등 추가 위협 신호도 여기서 함께 실어 보내야 함
         }),
       });
       trustResult = await lambdaResp.json();
-      console.log('[DEBUG] identity:', identity, 'nonce:', nonce, 'night_access:', isNightAccess, 'trustResult:', JSON.stringify(trustResult));
+      // 로그 확인 편의용 KST 표시 (Lambda로 보내는 실제 값은 위에서 UTC로 유지됨)
+      const kstDisplay = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
+      console.log('[DEBUG] identity:', identity, 'nonce:', nonce, 'request_timestamp(UTC):', requestTimestamp, 'request_timestamp(KST):', kstDisplay, 'geo_country:', geoCountry, 'trustResult:', JSON.stringify(trustResult));
     } catch (e) {
       // Lambda 호출 자체가 실패하면 Fail-Closed (5조 피드백 반영 - admin 등급 기준)
       console.log('[DEBUG] lambda call failed:', e.message);

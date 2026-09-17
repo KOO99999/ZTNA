@@ -11,3 +11,4 @@ node_modules/
 account/
 access_worker/wrangler.toml
 app.py
+__pycache__

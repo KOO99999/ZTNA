@@ -35,6 +35,8 @@ tunnel: ${tunnel_id}
 ingress:
   - hostname: ${auth_domain}
     service: http://${auth_private_ip}:8080
+  - hostname: admin.${domain_name}
+    service: http://localhost:80
   - hostname: ${domain_name}
     service: http://localhost:80
   - service: http_status:404

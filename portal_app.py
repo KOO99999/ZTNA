@@ -75,18 +75,24 @@ def render_page(title, min_score, content_html, is_public=False):
 
 @app.route('/')
 def general():
+    # [정리] admin.xmcda.store로 들어온 요청은 여기서 관리자 콘솔을 보여준다.
+    # 서브도메인 자체가 "어느 건물이냐"를 정하니, 그 건물의 root('/')가 관리자
+    # 페이지가 되는 게 자연스러움(admin.example.com/admin처럼 경로를 또 붙이는 건
+    # 불필요한 중복). Flask는 기본적으로 도메인을 구분 안 해서, 이 체크를 직접 함.
+    if request.host.startswith('admin.'):
+        return admin_console()
+
     html = """
     <p>전 직원 공통 포털 홈입니다.</p>
     <ul>
         <li>Cloudflare Access가 전체 직원(all_employees 그룹) 계정만 통과시킴</li>
         <li>서비스 기본 정보 및 공개 게시판 제공</li>
     </ul>
-    <a href="/admin"><button style="background-color: #dc3545;">관리자 콘솔 바로가기</button></a>
+    <a href="https://admin.xmcda.store"><button style="background-color: #dc3545;">관리자 콘솔 바로가기</button></a>
     """
     return render_page("[Portal] 전사 공통 대시보드", 0, html, is_public=False)
 
-@app.route('/admin')
-def admin():
+def admin_console():
     html = """
     <p><strong>⚠️ 관리자 전용 영역입니다.</strong></p>
     <p><small>💡 15분간 아무런 활동이 없으면 신뢰 점수 Decay 정책에 따라 자동 세션 만료 및 재인증이 유도됩니다.</small></p>
@@ -122,6 +128,11 @@ def hr_page():
 
 @app.route('/api/db-data')
 def get_db_data():
+    # [보안] admin과 동일한 이유 - admin_api Access 앱도 admin.xmcda.store 아래로
+    # 옮겼으므로, xmcda.store/api/db-data로 직접 오는 요청은 여기서 거부.
+    if not request.host.startswith('admin.'):
+        return jsonify({"status": "Denied", "message": "잘못된 경로입니다."}), 404
+
     data_type = request.args.get('type')
     user_email = request.headers.get('Cf-Access-Authenticated-User-Email')
 

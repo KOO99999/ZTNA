@@ -388,7 +388,12 @@ resource "cloudflare_zero_trust_access_policy" "hr_gate" {
 resource "cloudflare_zero_trust_access_application" "admin_console" {
   account_id       = var.cloudflare_account_id
   name             = "ZT Admin Console"
-  domain           = "${var.domain_name}/admin"
+  # [실험] 경로 기반(xmcda.store/admin)에서 서브도메인 기반으로 변경.
+  # 경로 기반 구조에서는 CF_AppSession이 도메인 전체(xmcda.store)로 공유돼,
+  # /dev·/marketing처럼 임계값이 느슨한 형제 앱의 통과 판정이 /admin에도 새어들어와
+  # 위험판단이 무력화되는 문제가 있었음(path_cookie_attribute로도 해결 안 됨).
+  # 서브도메인은 브라우저 입장에서 완전히 다른 origin이라 이 문제가 구조적으로 발생하지 않음.
+  domain           = "admin.${var.domain_name}"
   type             = "self_hosted"
   session_duration = "24h"
   # 이메일 OTP 선택지를 없애고, 이 앱은 우리 로그인서버(TOTP 2단계)로만 로그인 가능하게 제한
@@ -492,7 +497,10 @@ resource "cloudflare_zero_trust_access_policy" "risk_block_shared" {
 resource "cloudflare_zero_trust_access_application" "admin_api" {
   account_id       = var.cloudflare_account_id
   name             = "ZT Admin API (DynamoDB 감사 로그)"
-  domain           = "${var.domain_name}/api/db-data"
+  # [실험] admin_console과 함께 admin 서브도메인으로 이동.
+  # portal_app.py의 /admin 페이지가 fetch('/api/db-data?...')를 상대경로로 호출하므로,
+  # /admin만 옮기고 이 API를 기존 도메인에 남겨두면 그 호출이 엉뚱한 곳으로 가서 깨짐.
+  domain           = "admin.${var.domain_name}/api/db-data"
   type             = "self_hosted"
   session_duration = "24h"
   allowed_idps     = [cloudflare_zero_trust_access_identity_provider.login_server.id]
@@ -546,6 +554,10 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "web_tunnel_config" {
       service  = "http://${aws_instance.auth_server.private_ip}:8080"
     }
     ingress_rule {
+      hostname = "admin.${var.domain_name}"
+      service  = "http://localhost:80"
+    }
+    ingress_rule {
       hostname = var.domain_name
       service  = "http://localhost:80"
     }
@@ -567,6 +579,18 @@ resource "cloudflare_record" "auth_dns" {
 resource "cloudflare_record" "web_app_dns" {
   zone_id = var.cloudflare_zone_id
   name    = var.domain_name
+  type    = "CNAME"
+  content = "${cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.id}.cfargotunnel.com"
+  proxied = true
+  ttl     = 1
+}
+
+# [실험] admin_console/admin_api를 서브도메인으로 분리하면서 추가.
+# 같은 터널(web_tunnel)을 그대로 쓰고, 실제 경로 분기는 EC2 쪽 cloudflared
+# 로컬 config.yml(user_data_web_sh.tpl)의 hostname 규칙이 담당함.
+resource "cloudflare_record" "admin_dns" {
+  zone_id = var.cloudflare_zone_id
+  name    = "admin"
   type    = "CNAME"
   content = "${cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.id}.cfargotunnel.com"
   proxied = true

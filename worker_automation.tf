@@ -18,9 +18,13 @@ resource "local_file" "worker_wrangler_toml" {
 }
 
 resource "null_resource" "deploy_worker" {
-  # LAMBDA_EVALUATE_URL 값이 바뀔 때만(=API Gateway가 재생성됐을 때만) 재배포 트리거
+  # LAMBDA_EVALUATE_URL 값이 바뀌거나(=API Gateway 재생성) index.js 내용 자체가 바뀔 때 재배포 트리거.
+  # [수정] 기존엔 wrangler_toml_content만 트리거라, index.js를 고쳐도 wrangler.toml이 안 바뀌면
+  # terraform apply를 돌려도 재배포가 스킵되는 문제가 있었음(RESOURCE_THRESHOLDS 실접속 검증 중 발견 -
+  # /admin 접속에도 resource_path가 계속 null로 찍혀 구버전 index.js가 그대로 떠있던 게 원인).
   triggers = {
     wrangler_toml_content = local_file.worker_wrangler_toml.content
+    index_js_hash         = filemd5("${path.module}/access_worker/src/index.js")
   }
 
   provisioner "local-exec" {

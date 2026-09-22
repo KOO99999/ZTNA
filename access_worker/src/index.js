@@ -19,6 +19,19 @@ import publicJwks from '../public-jwks.json';
 // LAMBDA_EVALUATE_URL은 wrangler.toml의 [vars]에서 관리 (destroy/apply로 API Gateway URL이
 // 바뀌어도 이 파일은 안 건드리고 wrangler.toml 값만 고치면 되도록 분리)
 
+// [RESOURCE_THRESHOLDS] Access JWT의 request_url("도메인/경로" 형태, 예: "xmcda.store/admin")에서
+// 경로 부분만 뽑아낸다. 판단(이 경로가 얼마나 민감한지)은 하지 않고 원본 경로만 그대로
+// 전달한다 — night_access/unknown_location과 동일하게, 실제 판정은 Lambda(PDP)가 전담.
+function extractResourcePath(requestUrl) {
+  if (!requestUrl) return null;
+  try {
+    const parsed = new URL('https://' + requestUrl);
+    return parsed.pathname || '/';
+  } catch (e) {
+    return null;
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -55,6 +68,7 @@ export default {
     // 판단 없이 원본 값만 추출 (야간 여부/위치 이상 여부 판정은 Lambda가 담당)
     const requestTimestamp = new Date().toISOString();
     const geoCountry = accessPayload.identity?.geo?.country || null;
+    const resourcePath = extractResourcePath(accessPayload.request_url);
 
     // 1) 우리 Trust Score Engine(Lambda) 호출
     let trustResult;
@@ -72,13 +86,14 @@ export default {
           session_id: accessPayload.session_id || crypto.randomUUID(),
           request_timestamp: requestTimestamp,
           geo_country: geoCountry,
+          resource_path: resourcePath,
           // TODO: 실제로는 클라이언트 IP 등 추가 위협 신호도 여기서 함께 실어 보내야 함
         }),
       });
       trustResult = await lambdaResp.json();
       // 로그 확인 편의용 KST 표시 (Lambda로 보내는 실제 값은 위에서 UTC로 유지됨)
       const kstDisplay = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
-      console.log('[DEBUG] identity:', identity, 'nonce:', nonce, 'request_timestamp(UTC):', requestTimestamp, 'request_timestamp(KST):', kstDisplay, 'geo_country:', geoCountry, 'trustResult:', JSON.stringify(trustResult));
+      console.log('[DEBUG] identity:', identity, 'nonce:', nonce, 'request_timestamp(UTC):', requestTimestamp, 'request_timestamp(KST):', kstDisplay, 'geo_country:', geoCountry, 'resource_path:', resourcePath, 'trustResult:', JSON.stringify(trustResult));
     } catch (e) {
       // Lambda 호출 자체가 실패하면 Fail-Closed (5조 피드백 반영 - admin 등급 기준)
       console.log('[DEBUG] lambda call failed:', e.message);

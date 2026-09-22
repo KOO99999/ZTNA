@@ -42,8 +42,46 @@ COMBINATION_RULES = [
     (("brute_force", "threat_intel_match"), 20, "interaction_bruteforce_threatintel"),
 ]
 
-RISK_THRESHOLD = 40            # 이 값 이하면 허용
-STEP_UP_MARGIN = 20            # RISK_THRESHOLD ~ +MARGIN 구간을 "경계구간"(Step-up MFA)으로 간주
+# [v11] 자원 민감도별 임계값(RESOURCE_THRESHOLDS)
+#   그동안 RISK_THRESHOLD(40) 하나를 모든 자원(/admin, /dev 등)에 동일하게 적용해왔음.
+#   NIST SP 800-207의 "자원 민감도에 따라 판정 기준선을 차등화해야 한다"는 원칙에 따라,
+#   자원별로 임계값을 다르게 적용하도록 확장. 숫자(20/40/60) 자체는 상대적 위계(관리자
+#   자원이 가장 엄격, 일반 자원이 가장 느슨)만 반영한 팀 판단이며 절대적 근거는 없음 —
+#   이 분야(제로트러스트 임계값 결정) 자체가 학계에서도 "표준화된 도출 방법이 없다"고
+#   인정하는 공백 지점이라는 점을 보고서에 명시할 것.
+#   STEP_UP_MARGIN은 자원별로 따로 두지 않고 "임계값+20" 규칙 하나로 통일 (고정폭 유지 결정).
+RESOURCE_THRESHOLDS = {
+    "/admin": 20,
+    "/api/db-data": 20,
+    "/hr": 40,
+    "/dev": 60,
+    "/marketing": 60,
+    "/": 60,
+}
+DEFAULT_THRESHOLD = 40         # resource_path가 없거나(구버전 호출 등) 목록에 없는 자원 -> 기존 RISK_THRESHOLD와 동일값으로 안전 처리
+
+STEP_UP_MARGIN = 20            # 임계값 ~ +MARGIN 구간을 "경계구간"(Step-up MFA)으로 간주 (자원 무관 고정폭)
+
+
+def get_resource_threshold(resource_path):
+    """resource_path(예: '/admin', '/api/db-data?type=x')에 맞는 임계값을 조회.
+    - 정확히 일치하면 그 값을 사용
+    - 하위 경로(예: '/admin/users')는 가장 긴 접두어가 일치하는 항목을 사용
+    - 둘 다 없으면 DEFAULT_THRESHOLD로 안전 처리 (기존 동작과 동일)
+    """
+    if not resource_path:
+        return DEFAULT_THRESHOLD
+
+    normalized = resource_path.split("?")[0].rstrip("/") or "/"
+
+    if normalized in RESOURCE_THRESHOLDS:
+        return RESOURCE_THRESHOLDS[normalized]
+
+    for path in sorted(RESOURCE_THRESHOLDS.keys(), key=len, reverse=True):
+        if path != "/" and normalized.startswith(path):
+            return RESOURCE_THRESHOLDS[path]
+
+    return DEFAULT_THRESHOLD
 
 # 장애 시 정책 참고표 (실제 적용은 PEP/Cloudflare Worker에서 이 값을 조회해 구현)
 FAIL_POLICY = {
@@ -139,17 +177,23 @@ def lambda_handler(event, context):
 
     session_id = body.get("session_id", str(uuid.uuid4()))
 
+    # resource_path: Worker(index.js)가 Access JWT의 request_url을 가공 없이 그대로 전달.
+    # 판단(어떤 임계값을 적용할지)은 여기(PDP)에서 전담 — Worker/PEP는 원본만 넘긴다는
+    # 기존 원칙(night_access/unknown_location과 동일)을 그대로 따름.
+    resource_path = body.get("resource_path")
+    resource_threshold = get_resource_threshold(resource_path)
+
     # 4. 보안 위험이 걸린 세션은 MFA 재인증 전까지 무조건 차단
     if security_penalty_applied and not security_mfa_passed:
         allow_access = False
         action = "block_until_mfa"
-    # 5. 경계구간(RISK_THRESHOLD ~ +STEP_UP_MARGIN)은 즉시 차단 대신 Adaptive MFA 요구
-    elif RISK_THRESHOLD < risk_score <= RISK_THRESHOLD + STEP_UP_MARGIN:
+    # 5. 경계구간(자원별 임계값 ~ +STEP_UP_MARGIN)은 즉시 차단 대신 Adaptive MFA 요구
+    elif resource_threshold < risk_score <= resource_threshold + STEP_UP_MARGIN:
         allow_access = False
         action = "step_up_mfa_required"
-        print(f"[SOC_ALERT] identity={body.get('identity','unknown')} risk_score={risk_score} action={action}")
+        print(f"[SOC_ALERT] identity={body.get('identity','unknown')} risk_score={risk_score} resource_path={resource_path} threshold={resource_threshold} action={action}")
     else:
-        allow_access = (risk_score <= RISK_THRESHOLD)
+        allow_access = (risk_score <= resource_threshold)
         action = "allow" if allow_access else "block"
 
     try:
@@ -161,7 +205,9 @@ def lambda_handler(event, context):
                 'reasons': reasons,
                 'allow': allow_access,
                 'action': action,
-                'identity': body.get('identity', 'unknown')
+                'identity': body.get('identity', 'unknown'),
+                'resource_path': resource_path or 'unknown',
+                'resource_threshold': resource_threshold
             }
         )
     except Exception as e:
@@ -176,6 +222,8 @@ def lambda_handler(event, context):
             "score": risk_score,
             "action": action,
             "reasons": reasons,
-            "session_id": session_id
+            "session_id": session_id,
+            "resource_path": resource_path,
+            "resource_threshold": resource_threshold
         })
     }

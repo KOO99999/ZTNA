@@ -152,6 +152,59 @@ run_case(
     expect_allow=False, expect_action="block"
 )
 
+# --- [v11] RESOURCE_THRESHOLDS 테스트 ---
+# RESOURCE_THRESHOLDS: /admin,/api/db-data=20  /hr=40  /dev,/marketing,/=60  (없으면 DEFAULT_THRESHOLD=40)
+
+run_case(
+    "[RESOURCE_THRESHOLDS] resource_path 없음 -> 기존과 동일하게 DEFAULT_THRESHOLD(40) 적용 (회귀 확인)",
+    {"session_id": "r1", "identity": "hana@test.com", "unknown_location": True},
+    expect_allow=True, expect_action="allow"
+)
+print(">>> 위 s7 케이스(정확히 임계값과 동일)와 동일한 결과여야 정상 - resource_path 없어도 기존 동작 안 깨짐")
+print()
+
+run_case(
+    "[RESOURCE_THRESHOLDS] 목록에 없는 resource_path -> DEFAULT_THRESHOLD(40)로 안전 처리",
+    {"session_id": "r2", "identity": "hana@test.com", "unknown_location": True, "resource_path": "/no-such-page"},
+    expect_allow=True, expect_action="allow"
+)
+
+run_case(
+    "[RESOURCE_THRESHOLDS] /admin(임계값20): unknown_location(40점) 단독 -> 기본(40)이면 통과지만 admin은 Step-up",
+    {"session_id": "r3", "identity": "hana@test.com", "unknown_location": True, "resource_path": "/admin"},
+    expect_allow=False, expect_action="step_up_mfa_required"
+)
+print(">>> 같은 신호(unknown_location)라도 자원이 /admin이면 위 r1과 다르게 걸려야 정상")
+print()
+
+run_case(
+    "[RESOURCE_THRESHOLDS] /admin 하위 경로(/admin/users)도 접두어 매칭으로 동일 임계값(20) 적용",
+    {"session_id": "r4", "identity": "hana@test.com", "unknown_location": True, "resource_path": "/admin/users"},
+    expect_allow=False, expect_action="step_up_mfa_required"
+)
+
+run_case(
+    "[RESOURCE_THRESHOLDS] /dev(임계값60): night_access+unknown_location(60점) -> 기본(40)이면 Step-up이지만 dev는 통과",
+    {"session_id": "r5", "identity": "hana@test.com", "night_access": True, "unknown_location": True, "resource_path": "/dev"},
+    expect_allow=True, expect_action="allow"
+)
+print(">>> 위 s8 케이스(behavioral 조합 60 -> Step-up)와 반대 결과여야 정상 - /dev는 임계값이 높아 더 관대함")
+print()
+
+run_case(
+    "[RESOURCE_THRESHOLDS] /api/db-data(임계값20)에 쿼리스트링이 붙어도 정상 매칭",
+    {"session_id": "r6", "identity": "hana@test.com", "unknown_location": True, "resource_path": "/api/db-data?type=admin_logs"},
+    expect_allow=False, expect_action="step_up_mfa_required"
+)
+
+run_case(
+    "[RESOURCE_THRESHOLDS] security 위험(waf_sqli)은 resource_path와 무관하게 여전히 MFA 전까지 무조건 차단",
+    {"session_id": "r7", "identity": "attacker@test.com", "waf_sqli": True, "resource_path": "/dev"},
+    expect_allow=False, expect_action="block_until_mfa"
+)
+print(">>> /dev는 임계값이 관대해도, security 신호는 §4 로직이 threshold보다 먼저 적용되어야 정상")
+print()
+
 # --- 공유 비밀키 검증 자체 테스트 (헤더 없이/틀린 값으로 호출 시 401) ---
 def run_auth_case(name, headers):
     mock_table.reset_mock()

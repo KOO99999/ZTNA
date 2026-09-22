@@ -397,11 +397,69 @@ resource "cloudflare_zero_trust_access_application" "admin_console" {
   auto_redirect_to_identity = true
   app_launcher_visible = false
 
-  # [통일 관리 방식으로 전환] risk_block_shared를 dev/marketing/hr와 동일한 방식으로 적용. 기존 admin_risk_block(전용)은 제거.
+  # [통일 관리 방식] risk_block_shared를 dev/marketing/hr와 동일하게 적용.
+  # (path_cookie_attribute는 provider v4에 없어서, 아래 enable_path_cookie_attribute에서
+  # Cloudflare API를 직접 호출해 6개 앱 전체에 자동으로 켬 - v5로 프로바이더 업그레이드 없이 처리)
   policies = [
     cloudflare_zero_trust_access_policy.risk_block_shared.id,
     cloudflare_zero_trust_access_policy.admin_gate_console.id,
   ]
+}
+
+# [자동화, 6개 앱 전체] provider(v4)가 path_cookie_attribute를 지원하지 않아서,
+# Cloudflare REST API를 직접 호출해 이 필드만 켠다. GET으로 현재 설정 전체를 가져온 뒤
+# path_cookie_attribute만 덮어써서 그대로 PUT하므로, Terraform이 관리하는 다른 필드
+# (policies 등)는 건드리지 않는다. for_each로 6개 앱을 한 번의 apply로 전부 처리.
+locals {
+  path_cookie_target_apps = {
+    portal        = cloudflare_zero_trust_access_application.portal.id
+    dev           = cloudflare_zero_trust_access_application.dev.id
+    marketing     = cloudflare_zero_trust_access_application.marketing.id
+    hr            = cloudflare_zero_trust_access_application.hr.id
+    admin_console = cloudflare_zero_trust_access_application.admin_console.id
+    admin_api     = cloudflare_zero_trust_access_application.admin_api.id
+  }
+}
+
+resource "null_resource" "enable_path_cookie_attribute" {
+  for_each = local.path_cookie_target_apps
+
+  triggers = {
+    app_id = each.value
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["PowerShell", "-Command"]
+    command     = <<-EOT
+      $ErrorActionPreference = "Stop"
+      $headers = @{
+        "Authorization" = "Bearer ${var.cloudflare_api_token}"
+        "Content-Type"  = "application/json"
+      }
+      $url = "https://api.cloudflare.com/client/v4/accounts/${var.cloudflare_account_id}/access/apps/${each.value}"
+
+      $current = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
+      if (-not $current.success) {
+        Write-Error "[${each.key}] GET 실패: $($current.errors | ConvertTo-Json -Depth 10)"
+      }
+
+      $body = $current.result
+      # 읽기 전용/응답 전용 필드는 PUT 바디에서 제거 (안 지우면 400 에러 날 수 있음)
+      $body.PSObject.Properties.Remove('id')
+      $body.PSObject.Properties.Remove('aud')
+      $body.PSObject.Properties.Remove('created_at')
+      $body.PSObject.Properties.Remove('updated_at')
+
+      $body | Add-Member -NotePropertyName path_cookie_attribute -NotePropertyValue $true -Force
+
+      $json = $body | ConvertTo-Json -Depth 20
+      $result = Invoke-RestMethod -Uri $url -Headers $headers -Method Put -Body $json
+      if (-not $result.success) {
+        Write-Error "[${each.key}] PUT 실패: $($result.errors | ConvertTo-Json -Depth 10)"
+      }
+      Write-Host "[${each.key}] path_cookie_attribute 설정 완료: $($result.result.path_cookie_attribute)"
+    EOT
+  }
 }
 
 resource "cloudflare_zero_trust_access_policy" "admin_gate_console" {

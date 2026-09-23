@@ -124,8 +124,12 @@ export default {
 
     console.log('[DEBUG] outgoing JWT (raw):', responseJwt);
 
-    return new Response(responseJwt, {
-      headers: { 'Content-Type': 'application/jwt' },
+    // [버그수정, 진짜 원인] Access는 응답을 JSON으로 감싸서 {"token": "<jwt>"} 형태로
+    // 받길 기대하는데(공식 예제 코드로 확인됨), 여태까지 JWT 문자열을 그냥 날것으로
+    // 보내고 있었음. Access가 이걸 파싱 못 해서 매번 조용히 "매치 안 됨"으로
+    // 처리되고, Deny 정책이 사실상 한 번도 제대로 적용된 적이 없었던 것으로 보임.
+    return new Response(JSON.stringify({ token: responseJwt }), {
+      headers: { 'Content-Type': 'application/json' },
     });
   },
 };

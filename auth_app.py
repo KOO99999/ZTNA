@@ -7,6 +7,7 @@ import uuid
 import secrets
 import pyotp
 import jwt
+import re
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 import requests
@@ -84,6 +85,18 @@ def evaluate_login_risk(identity, signals):
     except Exception as e:
         print("Lambda 위험점수 평가 실패, fail-closed 처리:", str(e))
         return {"allow": False, "action": "lambda_call_failed"}
+
+
+# SQL 인젝션 패턴 탐지 정규식 및 함수 추가
+SQLI_PATTERN = re.compile(
+    r"(--|;|/\*|\*/|\bUNION\b|\bSELECT\b|\bDROP\b|\bINSERT\b|'\s*OR\s*'|'\s*=\s*')",
+    re.IGNORECASE,
+)
+
+def detect_sqli(value):
+    if not value:
+        return False
+    return bool(SQLI_PATTERN.search(value))
 
 
 _rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -286,6 +299,18 @@ def authorize():
     password = request.form.get('password', '')
     client_ip = request.headers.get('CF-Connecting-IP', request.remote_addr)
 
+    # SQL 인젝션 패턴 사전 검사 및 위험 평가 엔진 호출 추가
+    if detect_sqli(request.form.get('email', '')) or detect_sqli(password):
+        risk_result = evaluate_login_risk(
+            email or 'unknown',
+            {"waf_sqli": True, "security_mfa_passed": False},
+        )
+        print(f"[WAF_BLOCKED] identity={email} action={risk_result.get('action')}", flush=True)
+        return render_credentials_form(
+            client_id, redirect_uri, state, response_type, scope,
+            error="비정상적인 요청이 감지되어 접속이 차단되었습니다."
+        )
+
     account = Account.query.filter_by(email=email).first()
     credentials_ok = bool(account) and check_password_hash(account.password_hash, password)
 
@@ -445,10 +470,6 @@ def logout():
     if sso_token:
         clear_sso_session(sso_token)
 
-    # SSO 세션(sso_session)을 지우는 것만으로는 Cloudflare Access가 별도로 발급한
-    # CF_Authorization 세션까지 지워지지 않음 (IdP 세션과 SP 세션이 분리되어 있기 때문).
-    # Cloudflare Access의 공식 front-channel 로그아웃 엔드포인트(/cdn-cgi/access/logout)로
-    # 리다이렉트시켜 두 세션을 순차적으로 정리한다 (Chained Logout).
     portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
     response = make_response(redirect(f"https://{portal_domain}/cdn-cgi/access/logout"))
     response.delete_cookie(SSO_COOKIE_NAME)

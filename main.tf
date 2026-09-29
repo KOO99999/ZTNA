@@ -420,7 +420,13 @@ resource "cloudflare_zero_trust_access_application" "admin_console" {
   # 서브도메인은 브라우저 입장에서 완전히 다른 origin이라 이 문제가 구조적으로 발생하지 않음.
   domain           = "admin.${var.domain_name}"
   type             = "self_hosted"
-  session_duration = "24h"
+  # [수정] 24시간짜리 세션이 살아있는 동안은 재접속해도 /authorize(로그인서버)를
+  # 아예 안 거쳐서, SSO 재사용 보안수정(brute_force면 강제 재로그인)이 실행될
+  # 기회 자체가 없었음. Access가 세션 중에는 위험을 재평가하지 않는다는 한계
+  # (§5-4, B 계층 미구현)를 근본적으로 없앨 방법은 없어서, 재평가 주기를 강제로
+  # 자주 만드는 임시 조치로 짧게 줄임. 완전한 해결은 아니고, B 계층이 생기면
+  # 그때 다시 조정 필요.
+  session_duration = "15m"
   # 이메일 OTP 선택지를 없애고, 이 앱은 우리 로그인서버(TOTP 2단계)로만 로그인 가능하게 제한
   allowed_idps     = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   # 선택지가 하나뿐이니 "로그인 방법 선택" 화면 없이 바로 우리 로그인서버로 리다이렉트

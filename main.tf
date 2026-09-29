@@ -314,7 +314,9 @@ resource "cloudflare_zero_trust_access_application" "portal" {
   name                       = "ZT Portal (전사 공통)"
   domain                     = var.domain_name
   type                       = "self_hosted"
-  session_duration           = "24h"
+  # [확대] admin_console에서 검증 완료(§14) - 나머지 5개 앱에도 동일 적용
+  session_duration           = "15m"
+  custom_deny_url            = "https://auth.xmcda.store/stepup"
   allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   auto_redirect_to_identity  = true
 
@@ -339,7 +341,8 @@ resource "cloudflare_zero_trust_access_application" "dev" {
   name                       = "ZT Dev Team"
   domain                     = "${var.domain_name}/dev"
   type                       = "self_hosted"
-  session_duration           = "24h"
+  session_duration           = "15m"
+  custom_deny_url            = "https://auth.xmcda.store/stepup"
   allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   auto_redirect_to_identity  = true
 
@@ -367,7 +370,8 @@ resource "cloudflare_zero_trust_access_application" "marketing" {
   name                       = "ZT Marketing Team"
   domain                     = "${var.domain_name}/marketing"
   type                       = "self_hosted"
-  session_duration           = "24h"
+  session_duration           = "15m"
+  custom_deny_url            = "https://auth.xmcda.store/stepup"
   allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   auto_redirect_to_identity  = true
 
@@ -391,7 +395,8 @@ resource "cloudflare_zero_trust_access_application" "hr" {
   name                       = "ZT HR Team"
   domain                     = "${var.domain_name}/hr"
   type                       = "self_hosted"
-  session_duration           = "24h"
+  session_duration           = "15m"
+  custom_deny_url            = "https://auth.xmcda.store/stepup"
   allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   auto_redirect_to_identity  = true
 
@@ -543,7 +548,12 @@ resource "cloudflare_zero_trust_access_application" "admin_api" {
   # /admin만 옮기고 이 API를 기존 도메인에 남겨두면 그 호출이 엉뚱한 곳으로 가서 깨짐.
   domain           = "admin.${var.domain_name}/api/db-data"
   type             = "self_hosted"
-  session_duration = "24h"
+  # [확대, 부분적용] session_duration만 15분으로 줄임. custom_deny_url은 일부러 안 넣음 -
+  # 이 앱은 페이지 이동이 아니라 portal_app.py가 fetch()로 상대경로 호출하는 API라서,
+  # HTML 재인증 페이지로 리다이렉트시키면 JS의 JSON 파싱이 깨짐. §7 미결정 항목
+  # ("/api/db-data step-up 재인증")과 같은 문제 - B 계층에서 fetch 응답 자체에
+  # "재인증 필요" 신호를 담아 처리하는 방식으로 다시 설계 필요.
+  session_duration = "15m"
   allowed_idps     = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   auto_redirect_to_identity = true
   app_launcher_visible = false

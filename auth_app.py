@@ -494,8 +494,14 @@ def render_stepup_success(return_url):
 def _resolve_return_url():
     portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
     referrer = request.referrer or ''
+    # [확대] admin 서브도메인만 알아보던 걸, custom_deny_url을 새로 붙인 5개 앱
+    # (portal/dev/marketing/hr/admin_console) 전부 인식하도록 확장. admin_api는
+    # fetch 호출용이라 애초에 여기로 올 일이 없음(위 admin_api 정의 주석 참고).
     if f'admin.{portal_domain}' in referrer:
         return f'https://admin.{portal_domain}'
+    for path in ('/dev', '/marketing', '/hr'):
+        if f'{portal_domain}{path}' in referrer:
+            return f'https://{portal_domain}{path}'
     return f'https://{portal_domain}'
 
 

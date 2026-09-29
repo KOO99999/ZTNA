@@ -403,7 +403,7 @@ def authorize_verify_totp():
 # main.tf의 커스텀 거부 URL 설정에 달려있고, External Evaluation 거부에도 그 설정이
 # 적용되는지 문서로 확인되지 않아 직접 테스트가 필요함. 안 되더라도 이 주소를 알고
 # 있으면 수동으로 접속해 재인증할 수 있음.
-def render_stepup_form(error=None, locked=False):
+def render_stepup_form(return_url, error=None, locked=False):
     error_html = f'<p style="color:#dc3545;"><strong>{error}</strong></p>' if error else ""
     disabled = "disabled" if locked else ""
     return f"""
@@ -427,6 +427,7 @@ def render_stepup_form(error=None, locked=False):
             <p style="font-size:0.9em; color:#555;">보안 정책에 따라 2단계 인증을 한 번 더 확인합니다.</p>
             {error_html}
             <form method="POST" action="/stepup">
+                <input type="hidden" name="return_url" value="{return_url}">
                 <label>TOTP 코드 (또는 백업코드)</label>
                 <input type="text" name="totp_code" required autofocus {disabled}>
                 <button type="submit" {disabled}>인증</button>
@@ -437,53 +438,71 @@ def render_stepup_form(error=None, locked=False):
     """
 
 
-def render_stepup_success():
-    return """
+def render_stepup_success(return_url):
+    return f"""
     <!DOCTYPE html>
     <html>
     <head>
         <meta charset="utf-8">
         <title>인증 완료 - ZT Login Server</title>
         <style>
-            body { font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }
-            .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 400px; margin: 60px auto; text-align: center; }
+            body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
+            .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 400px; margin: 60px auto; text-align: center; }}
         </style>
     </head>
     <body>
         <div class="card">
             <h2>✅ 인증되었습니다</h2>
-            <p style="font-size:0.9em; color:#555;">원래 접속하려던 페이지로 다시 이동해서 시도해주세요.</p>
-            <a href="https://xmcda.store">포털로 이동</a>
+            <p style="font-size:0.9em; color:#555;">잠시 후 원래 접속하려던 페이지로 이동합니다.</p>
+            <a href="{return_url}">지금 바로 이동</a>
         </div>
+        <script>
+          setTimeout(function() {{ window.location.href = "{return_url}"; }}, 1500);
+        </script>
     </body>
     </html>
     """
+
+
+# [기능추가] Access의 커스텀 거부 URL 리다이렉트에는 "원래 어디로 가려 했는지"를 담은
+# 신뢰할 만한 값이 실려온다는 근거를 문서로 확인하지 못해서, 그 대신 브라우저가 이
+# 페이지로 넘어오기 직전 있었던 곳(Referer 헤더)을 근거로 추정한다. 확실한 값은 아니라서
+# 우리가 아는 앱 도메인(admin 서브도메인)에 해당할 때만 그리로 보내고, 그 외에는 항상
+# 안전한 기본값(포털 홈)으로 보낸다.
+def _resolve_return_url():
+    portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
+    referrer = request.referrer or ''
+    if f'admin.{portal_domain}' in referrer:
+        return f'https://admin.{portal_domain}'
+    return f'https://{portal_domain}'
 
 
 @app.route('/stepup', methods=['GET'])
 def stepup():
     sso_token = request.cookies.get(SSO_COOKIE_NAME)
     email = get_sso_session_email(sso_token) if sso_token else None
+    return_url = _resolve_return_url()
     if not email:
         return """
         <p>로그인이 필요합니다. <a href="https://xmcda.store">포털에서 다시 로그인해주세요</a>.</p>
         """
     if check_brute_force(email):
-        return render_stepup_form(error="시도 횟수를 초과했습니다. 15분 후 다시 시도해주세요.", locked=True)
-    return render_stepup_form()
+        return render_stepup_form(return_url, error="시도 횟수를 초과했습니다. 15분 후 다시 시도해주세요.", locked=True)
+    return render_stepup_form(return_url)
 
 
 @app.route('/stepup', methods=['POST'])
 def stepup_verify():
     sso_token = request.cookies.get(SSO_COOKIE_NAME)
     email = get_sso_session_email(sso_token) if sso_token else None
+    return_url = request.form.get('return_url') or _resolve_return_url()
     if not email:
         return """
         <p>로그인이 필요합니다. <a href="https://xmcda.store">포털에서 다시 로그인해주세요</a>.</p>
         """
 
     if check_brute_force(email):
-        return render_stepup_form(error="시도 횟수를 초과했습니다. 15분 후 다시 시도해주세요.", locked=True)
+        return render_stepup_form(return_url, error="시도 횟수를 초과했습니다. 15분 후 다시 시도해주세요.", locked=True)
 
     totp_input = request.form.get('totp_code', '').strip()
     client_ip = request.headers.get('CF-Connecting-IP', request.remote_addr)
@@ -505,13 +524,13 @@ def stepup_verify():
         # check_brute_force(15분에 5회) 잠금을 새 코드 없이 그대로 재사용한다.
         db.session.add(LoginFailure(email=email, ip_address=client_ip))
         db.session.commit()
-        return render_stepup_form(error="TOTP 코드(또는 백업코드)가 올바르지 않습니다.")
+        return render_stepup_form(return_url, error="TOTP 코드(또는 백업코드)가 올바르지 않습니다.")
 
     record_result = evaluate_login_risk(email, {"mfa_reauth": True})
     if not record_result.get("recorded"):
         print(f"[STEPUP_RECORD_FAILED] identity={email} - mfa_verified 기록 실패, Lambda/DynamoDB 확인 필요", flush=True)
 
-    return render_stepup_success()
+    return render_stepup_success(return_url)
 
 
 @app.route('/token', methods=['POST'])

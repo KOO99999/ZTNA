@@ -10,6 +10,7 @@ import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 import requests
+import re
 
 app = Flask(__name__)
 
@@ -86,6 +87,20 @@ def evaluate_login_risk(identity, signals):
         return {"allow": False, "action": "lambda_call_failed"}
 
 
+# [팀원 추가, 병합] SQL 인젝션 패턴 탐지 - waf_sqli 신호를 처음으로 실제 코드에 연결.
+# WAF가 아니라 로그인 폼 입력값 자체에서 패턴을 감지하는 방식으로 "WAF는 JWT를
+# 파싱하지 않는다"는 기존 미해결 문제(§3-3-1)를 우회 해결함.
+SQLI_PATTERN = re.compile(
+    r"(--|;|/\*|\*/|\bUNION\b|\bSELECT\b|\bDROP\b|\bINSERT\b|'\s*OR\s*'|'\s*=\s*')",
+    re.IGNORECASE,
+)
+
+def detect_sqli(value):
+    if not value:
+        return False
+    return bool(SQLI_PATTERN.search(value))
+
+
 _rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 JWT_PRIVATE_KEY = _rsa_key.private_bytes(
     encoding=serialization.Encoding.PEM,
@@ -153,10 +168,11 @@ def check_brute_force(email):
 
 def finalize_login(email, client_id, redirect_uri, state, response_type, scope, totp_ok):
     brute_force_flag = check_brute_force(email)
-    current_hour_utc = time.gmtime().tm_hour
+    # [정리] 예전에는 여기서 night_access를 직접 계산(UTC 0~4시 = 한국 낮 9~14시라 반대로
+    # 동작하는 오류가 있었음)했으나, 야간 판정은 Lambda가 요청 시각(KST 22~06시)으로
+    # 전담하는 구조(PDP 일원화)이므로 로그인 서버는 자기만 아는 신호(brute_force)만 보낸다.
     signals = {
         "brute_force": brute_force_flag,
-        "night_access": current_hour_utc < 5,
     }
     risk_result = evaluate_login_risk(email, {**signals, "security_mfa_passed": totp_ok})
 
@@ -272,7 +288,22 @@ def authorize():
         sso_token = request.cookies.get(SSO_COOKIE_NAME)
         sso_email = get_sso_session_email(sso_token) if sso_token else None
         if sso_email:
-            return finalize_login(sso_email, client_id, redirect_uri, state, response_type, scope, totp_ok=True)
+            # [보안수정] 기존에는 SSO 세션이 살아있으면 무조건 totp_ok=True로 처리해서,
+            # brute_force(무차별 대입 의심)가 걸린 계정도 TOTP를 실제로 다시 입력하지 않고
+            # 페이지 접속만으로 위험도가 리셋되는 구멍이 있었음. brute_force는 "진짜 주인이
+            # TOTP로 증명해야만 풀리는" 신호이므로, 이 경우엔 SSO 재사용을 막고
+            # 비밀번호+TOTP를 처음부터 다시 입력하게 한다.
+            if check_brute_force(sso_email):
+                clear_sso_session(sso_token)
+                response = make_response(render_credentials_form(
+                    client_id, redirect_uri, state, response_type, scope,
+                    error="보안상 재인증이 필요합니다. 비밀번호와 2단계 인증을 다시 입력해주세요."
+                ))
+                response.delete_cookie(SSO_COOKIE_NAME)
+                return response
+            # brute_force가 없으면 SSO 재사용은 그대로 허용하되, 이번 접속에서 TOTP를
+            # 실제로 입력한 게 아니므로 totp_ok는 False로 정직하게 전달한다.
+            return finalize_login(sso_email, client_id, redirect_uri, state, response_type, scope, totp_ok=False)
 
         return render_credentials_form(client_id, redirect_uri, state, response_type, scope)
 
@@ -285,6 +316,18 @@ def authorize():
     email = request.form.get('email', '').strip().lower()
     password = request.form.get('password', '')
     client_ip = request.headers.get('CF-Connecting-IP', request.remote_addr)
+
+    # [팀원 추가, 병합] SQL 인젝션 패턴 사전 검사 - 자격증명 확인보다 먼저 걸러냄
+    if detect_sqli(email) or detect_sqli(password):
+        risk_result = evaluate_login_risk(
+            email or 'unknown',
+            {"waf_sqli": True, "security_mfa_passed": False},
+        )
+        print(f"[WAF_BLOCKED] identity={email} action={risk_result.get('action')}", flush=True)
+        return render_credentials_form(
+            client_id, redirect_uri, state, response_type, scope,
+            error="비정상적인 요청이 감지되어 접속이 차단되었습니다."
+        )
 
     account = Account.query.filter_by(email=email).first()
     credentials_ok = bool(account) and check_password_hash(account.password_hash, password)
@@ -348,6 +391,127 @@ def authorize_verify_totp():
         email, entry["client_id"], entry["redirect_uri"], entry["state"],
         entry["response_type"], entry["scope"], totp_ok=True,
     )
+
+
+# [step-up 재인증] Access가 경계구간(위험점수는 애매한데 완전 차단은 아닌 구간)에서
+# 막았을 때 안내되는 재인증 전용 페이지. 비밀번호는 다시 안 묻고(이미 로그인된 사람이
+# 맞다는 전제) TOTP만 다시 확인한다. 통과하면 Lambda에 "방금 MFA했다"를 기록해서,
+# 이후 몇 분간(MFA_FRESHNESS_SECONDS, risk_score_engine.py에서 관리) 경계구간을
+# 다시 걸리지 않고 통과하게 한다.
+#
+# [미확인] Cloudflare Access의 거부 화면이 실제로 이 페이지로 안내(리다이렉트)하는지는
+# main.tf의 커스텀 거부 URL 설정에 달려있고, External Evaluation 거부에도 그 설정이
+# 적용되는지 문서로 확인되지 않아 직접 테스트가 필요함. 안 되더라도 이 주소를 알고
+# 있으면 수동으로 접속해 재인증할 수 있음.
+def render_stepup_form(error=None, locked=False):
+    error_html = f'<p style="color:#dc3545;"><strong>{error}</strong></p>' if error else ""
+    disabled = "disabled" if locked else ""
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>추가 인증 - ZT Login Server</title>
+        <style>
+            body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
+            .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 400px; margin: 60px auto; }}
+            input {{ width: 100%; padding: 10px; margin: 6px 0 14px 0; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }}
+            button {{ width: 100%; background: #007bff; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-weight: bold; }}
+            button:disabled {{ background: #aaa; cursor: not-allowed; }}
+            label {{ font-size: 0.9em; color: #555; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h2>추가 인증이 필요합니다</h2>
+            <p style="font-size:0.9em; color:#555;">보안 정책에 따라 2단계 인증을 한 번 더 확인합니다.</p>
+            {error_html}
+            <form method="POST" action="/stepup">
+                <label>TOTP 코드 (또는 백업코드)</label>
+                <input type="text" name="totp_code" required autofocus {disabled}>
+                <button type="submit" {disabled}>인증</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    """
+
+
+def render_stepup_success():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>인증 완료 - ZT Login Server</title>
+        <style>
+            body { font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }
+            .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 400px; margin: 60px auto; text-align: center; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h2>✅ 인증되었습니다</h2>
+            <p style="font-size:0.9em; color:#555;">원래 접속하려던 페이지로 다시 이동해서 시도해주세요.</p>
+            <a href="https://xmcda.store">포털로 이동</a>
+        </div>
+    </body>
+    </html>
+    """
+
+
+@app.route('/stepup', methods=['GET'])
+def stepup():
+    sso_token = request.cookies.get(SSO_COOKIE_NAME)
+    email = get_sso_session_email(sso_token) if sso_token else None
+    if not email:
+        return """
+        <p>로그인이 필요합니다. <a href="https://xmcda.store">포털에서 다시 로그인해주세요</a>.</p>
+        """
+    if check_brute_force(email):
+        return render_stepup_form(error="시도 횟수를 초과했습니다. 15분 후 다시 시도해주세요.", locked=True)
+    return render_stepup_form()
+
+
+@app.route('/stepup', methods=['POST'])
+def stepup_verify():
+    sso_token = request.cookies.get(SSO_COOKIE_NAME)
+    email = get_sso_session_email(sso_token) if sso_token else None
+    if not email:
+        return """
+        <p>로그인이 필요합니다. <a href="https://xmcda.store">포털에서 다시 로그인해주세요</a>.</p>
+        """
+
+    if check_brute_force(email):
+        return render_stepup_form(error="시도 횟수를 초과했습니다. 15분 후 다시 시도해주세요.", locked=True)
+
+    totp_input = request.form.get('totp_code', '').strip()
+    client_ip = request.headers.get('CF-Connecting-IP', request.remote_addr)
+    account = Account.query.filter_by(email=email).first()
+
+    totp_ok = False
+    if account and account.totp_secret and pyotp.TOTP(account.totp_secret).verify(totp_input, valid_window=1):
+        totp_ok = True
+    elif account:
+        for bc in BackupCode.query.filter_by(account_id=account.id, used=False).all():
+            if check_password_hash(bc.code_hash, totp_input):
+                bc.used = True
+                db.session.commit()
+                totp_ok = True
+                break
+
+    if not totp_ok:
+        # [보안] 로그인 실패 기록과 같은 테이블(LoginFailure)에 그대로 남겨서, 기존
+        # check_brute_force(15분에 5회) 잠금을 새 코드 없이 그대로 재사용한다.
+        db.session.add(LoginFailure(email=email, ip_address=client_ip))
+        db.session.commit()
+        return render_stepup_form(error="TOTP 코드(또는 백업코드)가 올바르지 않습니다.")
+
+    record_result = evaluate_login_risk(email, {"mfa_reauth": True})
+    if not record_result.get("recorded"):
+        print(f"[STEPUP_RECORD_FAILED] identity={email} - mfa_verified 기록 실패, Lambda/DynamoDB 확인 필요", flush=True)
+
+    return render_stepup_success()
 
 
 @app.route('/token', methods=['POST'])

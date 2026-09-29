@@ -66,6 +66,31 @@ resource "aws_dynamodb_table" "risk_score_log" {
   }
 }
 
+# [step-up 재인증] "이 사용자가 최근에 MFA를 통과했다"는 사실만 담는 짧은 수명의 기록.
+# User Risk(관리자가 풀어주는 누적 위험 상태, 미구현)와는 다른 층 - 이건 인증이 얼마나
+# 최근인가만 나타냄. identity를 파티션 키로 써서 사용자별로 자동 분리되고, TTL로
+# expires_at이 지난 항목은 AWS가 자동으로 정리한다(정리 시점은 수 분~수 시간 지연될
+# 수 있음 - Lambda가 expires_at을 직접 비교해서 판단하므로 정리 지연이 보안에 영향 없음).
+resource "aws_dynamodb_table" "mfa_verified" {
+  name         = "mfa_verified"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "identity"
+
+  attribute {
+    name = "identity"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  tags = {
+    Environment = "ZeroTrust-Project"
+  }
+}
+
 # ==========================================
 # 2. AWS IAM Role (EC2 DynamoDB 읽기 권한)
 # ==========================================
@@ -401,6 +426,11 @@ resource "cloudflare_zero_trust_access_application" "admin_console" {
   # 선택지가 하나뿐이니 "로그인 방법 선택" 화면 없이 바로 우리 로그인서버로 리다이렉트
   auto_redirect_to_identity = true
   app_launcher_visible = false
+  # [step-up 재인증, 검증 필요] External Evaluation(위험판단)은 그룹 소속 같은
+  # "신원 기반" 규칙이 아니라 "비신원 기반" 규칙으로 분류됨. 이 필드가 그 경우의 거부
+  # 화면을 대신하는 리다이렉트인데, 실제로 External Evaluation 거부에도 적용되는지는
+  # 문서로 확인 안 됨 - admin_console에서 먼저 실접속으로 검증 후 나머지 앱에 확대.
+  custom_non_identity_deny_url = "https://auth.xmcda.store/stepup"
 
   # [통일 관리 방식] risk_block_shared를 dev/marketing/hr와 동일하게 적용.
   # (path_cookie_attribute는 provider v4에 없어서, 아래 enable_path_cookie_attribute에서

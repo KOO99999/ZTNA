@@ -13,16 +13,25 @@ os.environ["EVALUATE_SHARED_SECRET"] = "test-secret-local-only"
 
 sys.modules['boto3'] = MagicMock()
 import boto3
-mock_table = MagicMock()
-boto3.resource.return_value.Table.return_value = mock_table
+mock_table = MagicMock()       # risk_score_log
+mock_mfa_table = MagicMock()   # [step-up] mfa_verified - 별도 mock, 기본은 기록 없음(get_item 결과 없음)으로 둠
+
+def _table_side_effect(name):
+    return mock_mfa_table if name == 'mfa_verified' else mock_table
+
+boto3.resource.return_value.Table.side_effect = _table_side_effect
 
 sys.path.insert(0, '.')
 import risk_score_engine as engine
 
 TEST_HEADERS = {"x-evaluate-secret": "test-secret-local-only"}
 
-def run_case(name, body, expect_allow=None, expect_action=None):
+def run_case(name, body, expect_allow=None, expect_action=None, mfa_record=None):
     mock_table.reset_mock()
+    mock_mfa_table.reset_mock()
+    # 기본값: mfa_verified 기록 없음. mfa_record를 넘기면 그 내용으로 get_item이 응답하게 함
+    # (예: {"identity": "...", "expires_at": now+600} 처럼 이미 저장돼있던 상황을 흉내)
+    mock_mfa_table.get_item.return_value = {"Item": mfa_record} if mfa_record else {}
     result_raw = engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps(body)}, None)
     result = json.loads(result_raw["body"])
     ok_allow = (expect_allow is None) or (result["allow"] == expect_allow)
@@ -205,7 +214,54 @@ run_case(
 print(">>> /dev는 임계값이 관대해도, security 신호는 §4 로직이 threshold보다 먼저 적용되어야 정상")
 print()
 
-# --- 공유 비밀키 검증 자체 테스트 (헤더 없이/틀린 값으로 호출 시 401) ---
+# --- [step-up 재인증] mfa_verified 기록 관련 테스트 ---
+
+mock_table.reset_mock()
+mock_mfa_table.reset_mock()
+_mfa_reauth_result = json.loads(engine.lambda_handler(
+    {"headers": TEST_HEADERS, "body": json.dumps({"identity": "hana@test.com", "mfa_reauth": True})}, None
+)["body"])
+print(f"[{'PASS' if _mfa_reauth_result.get('recorded') is True else 'FAIL'}] [step-up] mfa_reauth 응답에 recorded:true 포함")
+print(f"    -> {_mfa_reauth_result}")
+print(f"    -> mfa_verified put_item 호출됨: {mock_mfa_table.put_item.called}")
+print()
+
+run_case(
+    "[step-up] 경계구간인데 mfa_verified 기록 없음 -> 기존과 동일하게 step_up_mfa_required (회귀 확인)",
+    {"session_id": "m1", "identity": "hana@test.com", "night_access": True, "unknown_location": True},
+    expect_allow=False, expect_action="step_up_mfa_required"
+)
+print(">>> 위 s8 케이스와 동일한 결과여야 정상 - mfa_verified 기록이 없으면 기존 동작 그대로")
+print()
+
+run_case(
+    "[step-up] 경계구간 + 5분 전 mfa_verified 기록(유효) -> step_up_mfa_verified로 통과",
+    {"session_id": "m2", "identity": "hana@test.com", "night_access": True, "unknown_location": True},
+    expect_allow=True, expect_action="step_up_mfa_verified",
+    mfa_record={"identity": "hana@test.com", "verified_at": now - 300, "expires_at": now + 300}
+)
+print(">>> reasons에 recent_mfa_reauth_verified가 있어야 정상")
+print()
+
+run_case(
+    "[step-up] 경계구간 + 15분 전 mfa_verified 기록(10분 초과, 만료) -> 다시 step_up_mfa_required",
+    {"session_id": "m3", "identity": "hana@test.com", "night_access": True, "unknown_location": True},
+    expect_allow=False, expect_action="step_up_mfa_required",
+    mfa_record={"identity": "hana@test.com", "verified_at": now - 900, "expires_at": now - 300}
+)
+print(">>> expires_at이 지난 기록은 무시되고 다시 막혀야 정상")
+print()
+
+run_case(
+    "[step-up] 차단 구간(임계값+마진 초과)은 mfa_verified 기록이 있어도 그대로 차단",
+    {"session_id": "m4", "identity": "attacker@test.com", "unknown_location": True, "waf_sqli": True},
+    expect_allow=False, expect_action="block_until_mfa",
+    mfa_record={"identity": "attacker@test.com", "verified_at": now - 60, "expires_at": now + 540}
+)
+print(">>> step-up 재인증은 경계구간에만 적용됨 - security 신호로 인한 차단은 무관하게 그대로여야 정상")
+print()
+
+
 def run_auth_case(name, headers):
     mock_table.reset_mock()
     result_raw = engine.lambda_handler(

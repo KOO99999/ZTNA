@@ -7,6 +7,13 @@ from datetime import datetime, timedelta
 
 dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
 table = dynamodb.Table('risk_score_log')
+mfa_table = dynamodb.Table('mfa_verified')
+
+# [step-up 재인증] MFA 재인증 기록의 유효 시간. 팀이 정한 값이며 표준에 정해진 수치는
+# 아님(RFC 9470/NIST 800-63B 모두 "얼마나 최근이어야 하는가"의 구체적 숫자는 구현자에게
+# 맡김). 로그인 시점 평가만 있는 지금 구조 기준으로 정한 값 - 세션 중 재평가(B 계층)가
+# 생기면 그 재평가 주기와 맞춰 다시 조정 필요.
+MFA_FRESHNESS_SECONDS = 600
 
 # /evaluate가 인증 없이 URL만 알면 호출되는 문제 보완용.
 # Terraform(main.tf)이 random_password로 생성해 Lambda 환경변수로 주입한 값과 대조한다.
@@ -111,6 +118,29 @@ def lambda_handler(event, context):
     elif isinstance(event, dict):
         body = event
 
+    # [step-up 재인증] 로그인 서버(auth_app.py)의 /stepup이 TOTP 재인증에 성공했을 때
+    # 보내는 전용 호출. 위험점수는 계산하지 않고 "이 사용자가 방금 MFA를 통과했다"는
+    # 사실만 기록한 뒤 바로 반환한다. User Risk(관리자가 풀어주는 누적 위험 상태)와는
+    # 다른 층 - 이건 "인증이 얼마나 최근인가"만 나타내는 짧은 수명의 기록임.
+    if body.get("mfa_reauth"):
+        identity = body.get("identity", "unknown")
+        now_ts = int(time.time())
+        try:
+            mfa_table.put_item(Item={
+                "identity": identity,
+                "verified_at": now_ts,
+                "expires_at": now_ts + MFA_FRESHNESS_SECONDS,
+            })
+            recorded = True
+        except Exception as e:
+            print("mfa_verified 기록 실패:", str(e))
+            recorded = False
+        return {
+            "statusCode": 200 if recorded else 500,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"recorded": recorded})
+        }
+
     # --- 0. 원본 신호(request_timestamp, geo_country) 판정 ---
     # Worker(index.js)는 판단 없이 원본 데이터만 전달하고, "야간인지/위치가
     # 이상한지"에 대한 실제 판정은 여기(PDP)에서 전담한다. 판정 결과를
@@ -187,11 +217,28 @@ def lambda_handler(event, context):
     if security_penalty_applied and not security_mfa_passed:
         allow_access = False
         action = "block_until_mfa"
-    # 5. 경계구간(자원별 임계값 ~ +STEP_UP_MARGIN)은 즉시 차단 대신 Adaptive MFA 요구
+    # 5. 경계구간(자원별 임계값 ~ +STEP_UP_MARGIN)은 즉시 차단 대신 Adaptive MFA 요구.
+    #    단, 최근 MFA_FRESHNESS_SECONDS 이내에 /stepup에서 재인증한 기록이 있으면
+    #    이미 최근성이 증명된 것으로 보고 통과시킨다.
     elif resource_threshold < risk_score <= resource_threshold + STEP_UP_MARGIN:
-        allow_access = False
-        action = "step_up_mfa_required"
-        print(f"[SOC_ALERT] identity={body.get('identity','unknown')} risk_score={risk_score} resource_path={resource_path} threshold={resource_threshold} action={action}")
+        identity = body.get("identity", "unknown")
+        mfa_fresh = False
+        if identity != "unknown":
+            try:
+                mfa_item = mfa_table.get_item(Key={"identity": identity}).get("Item")
+                if mfa_item and mfa_item.get("expires_at", 0) > current_time:
+                    mfa_fresh = True
+            except Exception as e:
+                print("mfa_verified 조회 실패:", str(e))
+
+        if mfa_fresh:
+            allow_access = True
+            action = "step_up_mfa_verified"
+            reasons.append("recent_mfa_reauth_verified")
+        else:
+            allow_access = False
+            action = "step_up_mfa_required"
+            print(f"[SOC_ALERT] identity={body.get('identity','unknown')} risk_score={risk_score} resource_path={resource_path} threshold={resource_threshold} action={action}")
     else:
         allow_access = (risk_score <= resource_threshold)
         action = "allow" if allow_access else "block"

@@ -156,14 +156,22 @@ def clear_sso_session(token):
     SSO_SESSIONS.pop(token, None)
 
 
+# [잠금 정책] 5분 안에 5번 실패하면 잠금. 15분에서 5분으로 단축(팀 판단, 표준값 아님).
+# 창(윈도우) 자체를 5분으로 줄였기 때문에, 계속 틀리지만 않으면 마지막 실패로부터
+# 5분이 지나는 순간 자동으로 풀림(별도 "잠금 해제 시각"을 안 둬도 됨).
+BRUTE_FORCE_WINDOW_MINUTES = 5
+BRUTE_FORCE_THRESHOLD = 5
+BRUTE_FORCE_LOCKOUT_MINUTES = BRUTE_FORCE_WINDOW_MINUTES  # 안내 문구용
+
+
 def check_brute_force(email):
     from datetime import datetime, timedelta
-    fifteen_min_ago = datetime.utcnow() - timedelta(minutes=15)
+    window_start = datetime.utcnow() - timedelta(minutes=BRUTE_FORCE_WINDOW_MINUTES)
     recent_failures = LoginFailure.query.filter(
         LoginFailure.email == email,
-        LoginFailure.attempted_at >= fifteen_min_ago,
+        LoginFailure.attempted_at >= window_start,
     ).count()
-    return recent_failures >= 5
+    return recent_failures >= BRUTE_FORCE_THRESHOLD
 
 
 def finalize_login(email, client_id, redirect_uri, state, response_type, scope, totp_ok):
@@ -340,6 +348,19 @@ def authorize():
             error="이메일 또는 비밀번호가 올바르지 않습니다."
         )
 
+    # [방식변경] 예전엔 비밀번호가 맞으면 brute_force 여부와 무관하게 TOTP 화면으로
+    # 보내고, 걸린 경우 문구만 다르게 표시했음. 근데 이 시점엔 공격자가 비밀번호를
+    # 이미 맞힌 상태라 TOTP 화면 자체는 공격자든 주인이든 똑같이 겪는 절차라
+    # "추가 인증"으로서 실질적 의미가 없었음(업계도 MFA를 더 요구하기보다, 비밀번호가
+    # 맞아도 이 시점에 바로 잠그는 lockout 방식을 표준으로 씀 - Microsoft Entra ID,
+    # SecureAuth 등). 그래서 비밀번호가 맞았어도 brute_force면 TOTP 화면 자체를
+    # 안 보여주고 여기서 바로 막는다.
+    if check_brute_force(email):
+        return render_credentials_form(
+            client_id, redirect_uri, state, response_type, scope,
+            error=f"로그인 시도가 너무 많습니다. {BRUTE_FORCE_LOCKOUT_MINUTES}분 후 다시 시도해주세요."
+        )
+
     if not account.totp_enabled:
         return finalize_login(email, client_id, redirect_uri, state, response_type, scope, totp_ok=True)
 
@@ -354,6 +375,7 @@ def authorize():
         "scope": scope,
     }
     return render_totp_form(challenge_id)
+
 
 
 @app.route('/authorize/verify-totp', methods=['POST'])
@@ -487,7 +509,7 @@ def stepup():
         <p>로그인이 필요합니다. <a href="https://xmcda.store">포털에서 다시 로그인해주세요</a>.</p>
         """
     if check_brute_force(email):
-        return render_stepup_form(return_url, error="시도 횟수를 초과했습니다. 15분 후 다시 시도해주세요.", locked=True)
+        return render_stepup_form(return_url, error=f"시도 횟수를 초과했습니다. {BRUTE_FORCE_LOCKOUT_MINUTES}분 후 다시 시도해주세요.", locked=True)
     return render_stepup_form(return_url)
 
 
@@ -502,7 +524,7 @@ def stepup_verify():
         """
 
     if check_brute_force(email):
-        return render_stepup_form(return_url, error="시도 횟수를 초과했습니다. 15분 후 다시 시도해주세요.", locked=True)
+        return render_stepup_form(return_url, error=f"시도 횟수를 초과했습니다. {BRUTE_FORCE_LOCKOUT_MINUTES}분 후 다시 시도해주세요.", locked=True)
 
     totp_input = request.form.get('totp_code', '').strip()
     client_ip = request.headers.get('CF-Connecting-IP', request.remote_addr)
@@ -521,7 +543,7 @@ def stepup_verify():
 
     if not totp_ok:
         # [보안] 로그인 실패 기록과 같은 테이블(LoginFailure)에 그대로 남겨서, 기존
-        # check_brute_force(15분에 5회) 잠금을 새 코드 없이 그대로 재사용한다.
+        # check_brute_force(5분에 5회) 잠금을 새 코드 없이 그대로 재사용한다.
         db.session.add(LoginFailure(email=email, ip_address=client_ip))
         db.session.commit()
         return render_stepup_form(return_url, error="TOTP 코드(또는 백업코드)가 올바르지 않습니다.")

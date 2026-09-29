@@ -430,7 +430,12 @@ resource "cloudflare_zero_trust_access_application" "admin_console" {
   # "신원 기반" 규칙이 아니라 "비신원 기반" 규칙으로 분류됨. 이 필드가 그 경우의 거부
   # 화면을 대신하는 리다이렉트인데, 실제로 External Evaluation 거부에도 적용되는지는
   # 문서로 확인 안 됨 - admin_console에서 먼저 실접속으로 검증 후 나머지 앱에 확대.
-  custom_non_identity_deny_url = "https://auth.xmcda.store/stepup"
+  # [수정, 실접속 검증됨] 문서상으로는 External Evaluation이 "비신원 기반" 규칙으로
+  # 분류돼 custom_non_identity_deny_url을 써야 할 것 같았으나, 실제로는 반영이 안 됐고
+  # 대시보드에서 "Identity failure block page"를 Redirect URL로 바꾸니 정상 동작함을
+  # 실접속으로 확인함. 왜 이렇게 분류되는지 문서로 확정된 근거는 없음 - 정직하게 실험
+  # 결과만 반영.
+  custom_deny_url = "https://auth.xmcda.store/stepup"
 
   # [통일 관리 방식] risk_block_shared를 dev/marketing/hr와 동일하게 적용.
   # (path_cookie_attribute는 provider v4에 없어서, 아래 enable_path_cookie_attribute에서

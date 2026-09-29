@@ -609,12 +609,42 @@ def logout():
     if sso_token:
         clear_sso_session(sso_token)
 
-    # SSO 세션(sso_session)을 지우는 것만으로는 Cloudflare Access가 별도로 발급한
-    # CF_Authorization 세션까지 지워지지 않음 (IdP 세션과 SP 세션이 분리되어 있기 때문).
-    # Cloudflare Access의 공식 front-channel 로그아웃 엔드포인트(/cdn-cgi/access/logout)로
-    # 리다이렉트시켜 두 세션을 순차적으로 정리한다 (Chained Logout).
+    # [버그수정] 예전엔 xmcda.store 루트의 /cdn-cgi/access/logout 하나만 호출했는데,
+    # (1) path_cookie_attribute로 6개 앱의 세션 쿠키가 경로별로 분리돼 있고
+    # (2) admin_console/admin_api는 admin.xmcda.store라는 별도 서브도메인이라
+    # 이 한 번의 호출로는 다른 앱들의 세션이 전혀 지워지지 않고 남아있었음
+    # (admin.xmcda.store가 로그아웃 후에도 재인증 없이 그대로 통과되던 원인).
+    # xmcda.store와 admin.xmcda.store는 같은 등록 도메인(site)을 공유하는 서브도메인이라
+    # SameSite 쿠키도 같이 전달되는 same-site 관계임을 이용해, 6개 앱의 로그아웃
+    # 엔드포인트를 전부 숨은 이미지 태그로 호출한 뒤 최종 목적지로 이동시킨다.
     portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
-    response = make_response(redirect(f"https://{portal_domain}/cdn-cgi/access/logout"))
+    logout_urls = [
+        f"https://{portal_domain}/cdn-cgi/access/logout",
+        f"https://{portal_domain}/dev/cdn-cgi/access/logout",
+        f"https://{portal_domain}/marketing/cdn-cgi/access/logout",
+        f"https://{portal_domain}/hr/cdn-cgi/access/logout",
+        f"https://admin.{portal_domain}/cdn-cgi/access/logout",
+        f"https://admin.{portal_domain}/api/db-data/cdn-cgi/access/logout",
+    ]
+    logout_pixels = "\n        ".join(
+        f'<img src="{url}" style="display:none" onerror="this.remove()">' for url in logout_urls
+    )
+
+    response = make_response(f"""
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="utf-8"><title>로그아웃 중...</title></head>
+    <body>
+        {logout_pixels}
+        <p>로그아웃 처리 중입니다. 잠시만 기다려주세요...</p>
+        <script>
+          setTimeout(function() {{
+            window.location.href = "https://{portal_domain}/";
+          }}, 1000);
+        </script>
+    </body>
+    </html>
+    """)
     response.delete_cookie(SSO_COOKIE_NAME)
     return response
 

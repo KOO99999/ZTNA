@@ -57,42 +57,67 @@ COMBINATION_RULES = [
 #   이 분야(제로트러스트 임계값 결정) 자체가 학계에서도 "표준화된 도출 방법이 없다"고
 #   인정하는 공백 지점이라는 점을 보고서에 명시할 것.
 #   STEP_UP_MARGIN은 자원별로 따로 두지 않고 "임계값+20" 규칙 하나로 통일 (고정폭 유지 결정).
-RESOURCE_THRESHOLDS = {
-    "/admin": 20,
-    "/api/db-data": 20,
-    "/hr": 40,
-    "/dev": 60,
-    "/marketing": 60,
-    "/": 60,
+# [v12] 경로마다 숫자를 직접 적는 대신 "등급 이름 -> 임계값" 표와 "경로 -> 등급" 표로 분리.
+#   "/hr과 /dev는 같은 기밀 등급"이 코드에 그대로 드러나고, 기준을 바꿀 땐 등급 숫자 하나만 고치면 됨.
+#   등급 분류는 "자원이 흔히 다루는 데이터 종류에 대한 가정"(개인정보, 소스코드/서버 접근 = 기밀)에
+#   따른 팀 판단이며 실제 데이터 분류 체계에 근거한 것이 아님 - 숫자(20/40/60)와 함께 보고서에 명시할 것.
+TIER_THRESHOLDS = {
+    "top_secret": 20,    # 최고기밀: 관리자 콘솔, 감사 로그 API
+    "confidential": 40,  # 기밀: 인사(개인정보), 개발(소스코드/서버 접근)
+    "internal": 60,      # 내부: 마케팅, 포털 공통
 }
+
+RESOURCE_TIERS = {
+    "/admin": "top_secret",
+    "/api/db-data": "top_secret",
+    "/hr": "confidential",
+    "/dev": "confidential",
+    "/marketing": "internal",
+    "/": "internal",
+}
+
+# 기존 코드/테스트가 쓰는 이름 유지 (경로 -> 임계값). 등급표에서 파생되므로 따로 고칠 곳 없음.
+RESOURCE_THRESHOLDS = {path: TIER_THRESHOLDS[tier] for path, tier in RESOURCE_TIERS.items()}
 DEFAULT_THRESHOLD = 40         # resource_path가 없거나(구버전 호출 등) 목록에 없는 자원 -> 기존 RISK_THRESHOLD와 동일값으로 안전 처리
 
 STEP_UP_MARGIN = 20            # 임계값 ~ +MARGIN 구간을 "경계구간"(Step-up MFA)으로 간주 (자원 무관 고정폭)
 
 
-def get_resource_threshold(resource_path):
-    """resource_path(예: '/admin', '/api/db-data?type=x')에 맞는 임계값을 조회.
-    - 정확히 일치하면 그 값을 사용
-    - 하위 경로(예: '/admin/users')는 가장 긴 접두어가 일치하는 항목을 사용
-    - 둘 다 없으면 DEFAULT_THRESHOLD로 안전 처리 (기존 동작과 동일)
+def get_resource_tier(resource_path):
+    """resource_path(예: '/admin', '/api/db-data?type=x')에 맞는 등급 이름을 조회.
+    - 정확히 일치하면 그 등급을 사용
+    - 하위 경로(예: '/admin/users')는 가장 긴 접두어가 일치하는 항목의 등급을 사용
+    - 둘 다 없으면 None (임계값은 DEFAULT_THRESHOLD로 안전 처리)
     """
     if not resource_path:
-        return DEFAULT_THRESHOLD
+        return None
 
     normalized = resource_path.split("?")[0].rstrip("/") or "/"
 
-    if normalized in RESOURCE_THRESHOLDS:
-        return RESOURCE_THRESHOLDS[normalized]
+    if normalized in RESOURCE_TIERS:
+        return RESOURCE_TIERS[normalized]
 
-    for path in sorted(RESOURCE_THRESHOLDS.keys(), key=len, reverse=True):
+    for path in sorted(RESOURCE_TIERS.keys(), key=len, reverse=True):
         if path != "/" and normalized.startswith(path):
-            return RESOURCE_THRESHOLDS[path]
+            return RESOURCE_TIERS[path]
 
-    return DEFAULT_THRESHOLD
+    return None
 
-# 장애 시 정책 참고표 (실제 적용은 PEP/Cloudflare Worker에서 이 값을 조회해 구현)
+
+def get_resource_threshold(resource_path):
+    """등급을 찾으면 그 등급의 임계값, 못 찾으면 DEFAULT_THRESHOLD(기존 동작과 동일)."""
+    tier = get_resource_tier(resource_path)
+    return TIER_THRESHOLDS[tier] if tier else DEFAULT_THRESHOLD
+
+# 장애 시 정책 참고표 (Lambda/DynamoDB에 닿지 못해 판단 자체를 할 수 없을 때).
+# [현재 동작] 전부 차단(fail_closed). Worker(A 계층, index.js)와 portal_app.py(B 계층) 모두
+# 자원 등급과 무관하게, 판단을 못 하면 접근을 막는다. 이 표는 코드가 읽어서 쓰는 값이 아니라
+# 현재 정책을 기록해 둔 참고용이다.
+# [향후 과제] 등급별 차등(예: 낮은 등급은 fail_open)은 아직 적용하지 않았다. 도입하려면
+# Worker와 portal_app.py 양쪽을 함께 바꿔야 하고, 입구(A)가 새 로그인을 막는 이상 효과는
+# 이미 로그인된 세션(최대 15분)에 한정된다.
 FAIL_POLICY = {
-    "general": "fail_open",
+    "general": "fail_closed",
     "admin": "fail_closed",
 }
 
@@ -212,6 +237,7 @@ def lambda_handler(event, context):
     # 기존 원칙(night_access/unknown_location과 동일)을 그대로 따름.
     resource_path = body.get("resource_path")
     resource_threshold = get_resource_threshold(resource_path)
+    resource_tier = get_resource_tier(resource_path)
 
     # 4. 보안 위험이 걸린 세션은 MFA 재인증 전까지 무조건 차단
     if security_penalty_applied and not security_mfa_passed:
@@ -254,7 +280,9 @@ def lambda_handler(event, context):
                 'action': action,
                 'identity': body.get('identity', 'unknown'),
                 'resource_path': resource_path or 'unknown',
-                'resource_threshold': resource_threshold
+                'resource_threshold': resource_threshold,
+                # 호출 출처 구분(A=Worker/로그인서버, B=portal_app.py 세션 중 재확인) - 로그 조회/검증용
+                'source': body.get('source', 'A')
             }
         )
     except Exception as e:
@@ -271,6 +299,7 @@ def lambda_handler(event, context):
             "reasons": reasons,
             "session_id": session_id,
             "resource_path": resource_path,
-            "resource_threshold": resource_threshold
+            "resource_threshold": resource_threshold,
+            "resource_tier": resource_tier
         })
     }

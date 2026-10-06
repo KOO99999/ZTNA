@@ -437,10 +437,6 @@ resource "cloudflare_zero_trust_access_application" "admin_console" {
   # 선택지가 하나뿐이니 "로그인 방법 선택" 화면 없이 바로 우리 로그인서버로 리다이렉트
   auto_redirect_to_identity = true
   app_launcher_visible = false
-  # [step-up 재인증, 검증 필요] External Evaluation(위험판단)은 그룹 소속 같은
-  # "신원 기반" 규칙이 아니라 "비신원 기반" 규칙으로 분류됨. 이 필드가 그 경우의 거부
-  # 화면을 대신하는 리다이렉트인데, 실제로 External Evaluation 거부에도 적용되는지는
-  # 문서로 확인 안 됨 - admin_console에서 먼저 실접속으로 검증 후 나머지 앱에 확대.
   # [수정, 실접속 검증됨] 문서상으로는 External Evaluation이 "비신원 기반" 규칙으로
   # 분류돼 custom_non_identity_deny_url을 써야 할 것 같았으나, 실제로는 반영이 안 됐고
   # 대시보드에서 "Identity failure block page"를 Redirect URL로 바꾸니 정상 동작함을

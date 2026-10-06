@@ -63,3 +63,12 @@ variable "oidc_client_secret" {
   sensitive   = true
   description = "Cloudflare Access가 /token 호출 시 사용할 client_secret (terraform.tfvars 고정값)"
 }
+
+# [임시 확인용] true로 두고 apply하면 portal_app.py에 /debug-headers 라우트가 켜져서, Cloudflare가
+# 붙이는 헤더(CF-IPCountry 등)가 nginx를 거쳐 Flask까지 실제로 도착하는지 눈으로 확인할 수 있음.
+# 확인이 끝나면 반드시 false(기본값)로 되돌려서 다시 apply할 것.
+variable "debug_headers_route" {
+  type        = bool
+  default     = false
+  description = "portal_app.py의 /debug-headers 임시 확인 라우트 활성화 여부 (확인 후 반드시 false)"
+}

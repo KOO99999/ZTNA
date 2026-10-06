@@ -1,6 +1,7 @@
 # ==========================================
 # 11. Portal 티어 EC2 — Flask (포털/부서 페이지/관리자 콘솔)
 #    로그인 로직은 auth_server(ec2_auth.tf)로 분리됨 - 이 서버는 DB 연결이 필요 없음
+#    [B 계층] 세션 중 위험도 재확인을 위해 Lambda(PDP) 호출용 URL/비밀키를 환경변수로 받음
 #    코드는 portal_app.py 외부 파일에서 관리, main.tf/compute.tf는 참조만 함
 # ==========================================
 resource "aws_instance" "app_server" {
@@ -15,6 +16,13 @@ resource "aws_instance" "app_server" {
 
   user_data_base64 = base64gzip(templatefile("${path.module}/templates/user_data_app.sh.tpl", {
     app_code = file("${path.module}/portal_app.py")
+
+    # [B 계층] portal_app.py가 세션 중 위험도 재확인을 위해 Lambda(PDP)를 직접 호출함.
+    # auth_server(ec2_auth.tf)에 넘기는 값과 동일한 방식/동일한 값.
+    pdp_evaluate_url       = "${aws_apigatewayv2_stage.pdp_stage.invoke_url}evaluate"
+    evaluate_shared_secret = var.evaluate_shared_secret
+    auth_domain            = local.auth_domain
+    debug_headers          = var.debug_headers_route ? "1" : "0"
   }))
 
   tags = {

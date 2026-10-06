@@ -1,6 +1,7 @@
 """
 main.tf가 참조하는 risk_score_engine.py를 실제 AWS 없이 로컬에서 검증하는 스크립트.
 v10: 전체 배점 2배 재설정 반영 (RISK_THRESHOLD=40, STEP_UP_MARGIN=20).
+v12: 자원 등급(tier) 도입, /dev 임계값 60 -> 40.
 """
 import os
 import sys
@@ -162,7 +163,8 @@ run_case(
 )
 
 # --- [v11] RESOURCE_THRESHOLDS 테스트 ---
-# RESOURCE_THRESHOLDS: /admin,/api/db-data=20  /hr=40  /dev,/marketing,/=60  (없으면 DEFAULT_THRESHOLD=40)
+# [v12] 등급: top_secret=20(/admin,/api/db-data)  confidential=40(/hr,/dev)  internal=60(/marketing,/)
+# (등급을 못 찾으면 DEFAULT_THRESHOLD=40)
 
 run_case(
     "[RESOURCE_THRESHOLDS] resource_path 없음 -> 기존과 동일하게 DEFAULT_THRESHOLD(40) 적용 (회귀 확인)",
@@ -193,11 +195,25 @@ run_case(
 )
 
 run_case(
-    "[RESOURCE_THRESHOLDS] /dev(임계값60): night_access+unknown_location(60점) -> 기본(40)이면 Step-up이지만 dev는 통과",
+    "[RESOURCE_THRESHOLDS] /dev(기밀, 임계값40): night_access+unknown_location(60점) -> 경계구간이라 Step-up",
     {"session_id": "r5", "identity": "hana@test.com", "night_access": True, "unknown_location": True, "resource_path": "/dev"},
+    expect_allow=False, expect_action="step_up_mfa_required"
+)
+print(">>> [v12] /dev가 60->40으로 바뀌어 s8과 같은 결과여야 정상 (v11까지는 통과였음)")
+print()
+
+run_case(
+    "[v12] /hr(기밀, 임계값40): 같은 신호 조합 -> /dev와 동일하게 Step-up",
+    {"session_id": "r5b", "identity": "hana@test.com", "night_access": True, "unknown_location": True, "resource_path": "/hr"},
+    expect_allow=False, expect_action="step_up_mfa_required"
+)
+
+run_case(
+    "[v12] /marketing(내부, 임계값60): night_access+unknown_location(60점) -> 통과",
+    {"session_id": "r5c", "identity": "hana@test.com", "night_access": True, "unknown_location": True, "resource_path": "/marketing"},
     expect_allow=True, expect_action="allow"
 )
-print(">>> 위 s8 케이스(behavioral 조합 60 -> Step-up)와 반대 결과여야 정상 - /dev는 임계값이 높아 더 관대함")
+print(">>> 내부 등급만 가장 관대해야 정상")
 print()
 
 run_case(
@@ -259,6 +275,48 @@ run_case(
     mfa_record={"identity": "attacker@test.com", "verified_at": now - 60, "expires_at": now + 540}
 )
 print(">>> step-up 재인증은 경계구간에만 적용됨 - security 신호로 인한 차단은 무관하게 그대로여야 정상")
+print()
+
+
+# --- [v12] 등급(tier) 표 검증 ---
+def check_tier(name, path, expect_tier, expect_threshold):
+    tier = engine.get_resource_tier(path)
+    th = engine.get_resource_threshold(path)
+    ok = (tier == expect_tier and th == expect_threshold)
+    print(f"[{'PASS' if ok else 'FAIL'}] {name}")
+    print(f"    -> path={path} tier={tier} threshold={th}")
+    if not ok:
+        print(f"    !! 기대값: tier={expect_tier}, threshold={expect_threshold}")
+    print()
+
+check_tier("[v12] /admin -> top_secret(20)", "/admin", "top_secret", 20)
+check_tier("[v12] /api/db-data?type=x -> top_secret(20)", "/api/db-data?type=x", "top_secret", 20)
+check_tier("[v12] /hr -> confidential(40)", "/hr", "confidential", 40)
+check_tier("[v12] /dev -> confidential(40), /hr과 같은 등급", "/dev", "confidential", 40)
+check_tier("[v12] /dev/sub 접두어 매칭 -> confidential(40)", "/dev/sub", "confidential", 40)
+check_tier("[v12] /marketing -> internal(60)", "/marketing", "internal", 60)
+check_tier("[v12] / -> internal(60)", "/", "internal", 60)
+check_tier("[v12] 목록에 없는 경로 -> 등급 없음, DEFAULT_THRESHOLD(40)", "/no-such-page", None, 40)
+check_tier("[v12] resource_path 없음 -> 등급 없음, DEFAULT_THRESHOLD(40)", None, None, 40)
+
+_r = json.loads(engine.lambda_handler(
+    {"headers": TEST_HEADERS, "body": json.dumps({"session_id": "t1", "identity": "hana@test.com", "resource_path": "/dev"})}, None
+)["body"])
+print(f"[{'PASS' if _r.get('resource_tier') == 'confidential' else 'FAIL'}] [v12] 응답에 resource_tier 포함")
+print(f"    -> resource_tier={_r.get('resource_tier')}")
+print()
+
+mock_table.reset_mock()
+engine.lambda_handler(
+    {"headers": TEST_HEADERS, "body": json.dumps({"session_id": "t2", "identity": "hana@test.com", "source": "B"})}, None
+)
+_logged = mock_table.put_item.call_args.kwargs["Item"]
+print(f"[{'PASS' if _logged.get('source') == 'B' else 'FAIL'}] [v12] source=B 가 DynamoDB 로그에 기록됨")
+engine.lambda_handler(
+    {"headers": TEST_HEADERS, "body": json.dumps({"session_id": "t3", "identity": "hana@test.com"})}, None
+)
+_logged_default = mock_table.put_item.call_args.kwargs["Item"]
+print(f"[{'PASS' if _logged_default.get('source') == 'A' else 'FAIL'}] [v12] source 미지정 시 기본값 A")
 print()
 
 

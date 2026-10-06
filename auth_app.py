@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 import requests
 import re
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 
@@ -491,8 +492,37 @@ def render_stepup_success(return_url):
 # 페이지로 넘어오기 직전 있었던 곳(Referer 헤더)을 근거로 추정한다. 확실한 값은 아니라서
 # 우리가 아는 앱 도메인(admin 서브도메인)에 해당할 때만 그리로 보내고, 그 외에는 항상
 # 안전한 기본값(포털 홈)으로 보낸다.
+def _safe_return_url(candidate):
+    """사용자가 넘긴 복귀 주소(쿼리스트링 return_url, 폼의 hidden 값)를 검증한다.
+    이 값은 HTML 속성과 JS 문자열, window.location에 그대로 들어가므로, 검증 없이 쓰면
+    (1) 아무 외부 사이트로 보내는 open redirect, (2) 따옴표를 섞은 값으로 스크립트가 끼어드는
+    XSS가 가능해진다. 우리 도메인(portal/admin 서브도메인)의 https 주소이고 위험 문자가
+    없을 때만 통과시키고, 아니면 None을 돌려 호출한 쪽이 안전한 기본값을 쓰게 한다."""
+    if not candidate:
+        return None
+    portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
+    if any(ch in candidate for ch in '"\'<>\\ `\r\n\t'):
+        return None
+    try:
+        parsed = urlparse(candidate)
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme != 'https' or port is not None or parsed.username or parsed.password:
+        return None
+    if parsed.hostname not in (portal_domain, f'admin.{portal_domain}'):
+        return None
+    return candidate
+
+
 def _resolve_return_url():
     portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
+    # [B 계층 추가] portal_app.py가 세션 중 재확인에서 step-up이 필요하다고 판단하면
+    # ?return_url=<원래 주소>를 붙여 이리로 보낸다. 이 경우 브라우저의 Referer에는 원래 페이지가
+    # 남지 않으므로(리다이렉트 응답은 Referer를 바꾸지 않음) Referer 추정보다 이 값을 우선한다.
+    explicit = _safe_return_url(request.args.get('return_url'))
+    if explicit:
+        return explicit
     referrer = request.referrer or ''
     # [확대] admin 서브도메인만 알아보던 걸, custom_deny_url을 새로 붙인 5개 앱
     # (portal/dev/marketing/hr/admin_console) 전부 인식하도록 확장. admin_api는
@@ -523,7 +553,7 @@ def stepup():
 def stepup_verify():
     sso_token = request.cookies.get(SSO_COOKIE_NAME)
     email = get_sso_session_email(sso_token) if sso_token else None
-    return_url = request.form.get('return_url') or _resolve_return_url()
+    return_url = _safe_return_url(request.form.get('return_url')) or _resolve_return_url()
     if not email:
         return """
         <p>로그인이 필요합니다. <a href="https://xmcda.store">포털에서 다시 로그인해주세요</a>.</p>

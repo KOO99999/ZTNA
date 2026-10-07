@@ -3,8 +3,8 @@ exec > /var/log/user-data.log 2>&1
 apt-get update -y
 apt-get install -y python3-pip
 # 포털/부서/관리자 페이지는 DB 연결이 필요 없음 (DynamoDB만 사용) - 로그인 관련
-# 패키지(flask-sqlalchemy, pymysql, cryptography, pyotp, pyjwt)는 auth_server 쪽으로 이관됨
-pip3 install flask boto3 requests
+# 패키지(flask-sqlalchemy, pymysql, pyotp)는 auth_server 쪽으로 이관됨. pyjwt+cryptography는 Access JWT 서명 검증용으로 이 서버에도 필요.
+pip3 install flask boto3 requests pyjwt cryptography
 
 cat << 'APP' > /home/ubuntu/portal_app.py
 ${app_code}
@@ -16,6 +16,8 @@ PDP_EVALUATE_URL=${pdp_evaluate_url}
 EVALUATE_SHARED_SECRET=${evaluate_shared_secret}
 AUTH_DOMAIN=${auth_domain}
 ZT_DEBUG_HEADERS=${debug_headers}
+CF_TEAM_DOMAIN=${cf_team_domain}
+CF_ACCESS_AUDS=${cf_access_auds}
 ENV
 chmod 600 /home/ubuntu/.env
 

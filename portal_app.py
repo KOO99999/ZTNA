@@ -9,6 +9,7 @@ import time
 import uuid
 
 import boto3
+import jwt  # PyJWT (RS256 검증에 cryptography 필요)
 import requests
 
 app = Flask(__name__)
@@ -32,6 +33,110 @@ PDP_EVALUATE_URL = os.environ.get("PDP_EVALUATE_URL")
 EVALUATE_SHARED_SECRET = os.environ.get("EVALUATE_SHARED_SECRET")
 AUTH_DOMAIN = os.environ.get("AUTH_DOMAIN", "auth.xmcda.store")
 PDP_TIMEOUT_SECONDS = 3
+
+
+# ==========================================================================
+# Cloudflare Access JWT 서명 검증
+#
+# Cloudflare가 요청에 붙이는 Cf-Access-Jwt-Assertion은 Cloudflare 개인키로 서명되어 있어,
+# 공개키(JWKS)로 "진짜 Cloudflare가 발급했고, 이 앱(aud)용이고, 만료 전인지"를 확인할 수 있다.
+# 평문 헤더(Cf-Access-Authenticated-User-Email)는 누가 위조해도 앱이 알 수 없으므로,
+# 신원(이메일)은 검증을 통과한 토큰 안의 email 값만 쓴다.
+# 검증 실패는 기록(journalctl)하고 즉시 차단한다. 토큰 원문은 로그에 남기지 않는다.
+# ==========================================================================
+CF_TEAM_DOMAIN = (os.environ.get("CF_TEAM_DOMAIN") or "").strip().rstrip("/")
+CF_ACCESS_AUDS = [a.strip() for a in (os.environ.get("CF_ACCESS_AUDS") or "").split(",") if a.strip()]
+CF_ISSUER = f"https://{CF_TEAM_DOMAIN}" if CF_TEAM_DOMAIN else None
+CF_CERTS_URL = f"{CF_ISSUER}/cdn-cgi/access/certs" if CF_ISSUER else None
+JWKS_TIMEOUT_SECONDS = 3
+JWKS_CACHE_SECONDS = 3600        # 정상 시 공개키 목록을 1시간 보관
+JWKS_MIN_REFETCH_SECONDS = 60    # 모르는 kid가 계속 들어와도 1분에 한 번만 다시 받음(남용 방지)
+
+_jwks = {"keys": {}, "fetched_at": 0.0}
+_jwks_lock = threading.Lock()
+
+
+class JwtVerifyError(Exception):
+    """reason: 로그에 남기는 짧은 분류 이름(토큰 내용은 담지 않는다)."""
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _fetch_jwks():
+    """Cloudflare 공개키 목록을 받아 {kid: 공개키객체}로 돌려준다. 테스트에서 대체하는 지점."""
+    resp = requests.get(CF_CERTS_URL, timeout=JWKS_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    keys = {}
+    for jwk in resp.json().get("keys", []):
+        if jwk.get("kty") == "RSA" and jwk.get("kid"):
+            keys[jwk["kid"]] = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(jwk))
+    return keys
+
+
+def _get_signing_key(kid):
+    now = time.time()
+    with _jwks_lock:
+        fresh = (now - _jwks["fetched_at"]) < JWKS_CACHE_SECONDS
+        if kid in _jwks["keys"] and fresh:
+            return _jwks["keys"][kid]
+        # 캐시가 오래됐거나 모르는 kid(키 교체 가능성)면 다시 받되, 너무 자주는 안 받는다
+        if (now - _jwks["fetched_at"]) >= JWKS_MIN_REFETCH_SECONDS:
+            try:
+                _jwks["keys"] = _fetch_jwks()
+                _jwks["fetched_at"] = now
+            except Exception as e:
+                print(f"[JWT_JWKS_FETCH_FAILED] {type(e).__name__}", flush=True)
+                if kid in _jwks["keys"]:
+                    return _jwks["keys"][kid]   # 받기 실패해도 이미 아는 키면 계속 사용
+                raise JwtVerifyError("jwks_unavailable")
+        if kid in _jwks["keys"]:
+            return _jwks["keys"][kid]
+    raise JwtVerifyError("unknown_kid")
+
+
+def verify_access_jwt(token):
+    """검증에 성공하면 claims(dict)를, 실패하면 JwtVerifyError를 낸다."""
+    if not CF_ISSUER or not CF_ACCESS_AUDS:
+        raise JwtVerifyError("config_missing")
+    if not token:
+        raise JwtVerifyError("token_missing")
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.PyJWTError:
+        raise JwtVerifyError("malformed")
+    # 알고리즘은 토큰이 아니라 우리가 정한다(alg=none / HS256 위조 방지)
+    if header.get("alg") != "RS256" or not header.get("kid"):
+        raise JwtVerifyError("bad_alg_or_kid")
+    key = _get_signing_key(header["kid"])
+    try:
+        claims = jwt.decode(
+            token, key, algorithms=["RS256"],
+            audience=CF_ACCESS_AUDS, issuer=CF_ISSUER,
+            options={"require": ["exp", "iat", "iss", "aud"]},
+        )
+    except jwt.ExpiredSignatureError:
+        raise JwtVerifyError("expired")
+    except jwt.InvalidAudienceError:
+        raise JwtVerifyError("bad_aud")
+    except jwt.InvalidIssuerError:
+        raise JwtVerifyError("bad_iss")
+    except jwt.InvalidSignatureError:
+        raise JwtVerifyError("bad_signature")
+    except jwt.MissingRequiredClaimError:
+        raise JwtVerifyError("missing_claim")
+    except jwt.PyJWTError:
+        raise JwtVerifyError("invalid")
+    email = claims.get("email")
+    if not isinstance(email, str) or not email:
+        raise JwtVerifyError("no_email_claim")   # 서비스 토큰 등 사람 계정이 아닌 토큰
+    return claims
+
+
+def _log_jwt_failure(reason):
+    # 토큰/쿠키 값은 남기지 않는다. 어떤 요청이 왜 막혔는지만 남긴다.
+    print(f"[JWT_VERIFY_FAILED] reason={reason} host={request.host} path={request.path} "
+          f"remote={request.remote_addr} cf_ip={request.headers.get('Cf-Connecting-Ip')}", flush=True)
 
 # 등급별 캐시 시간(초). 팀이 정한 값이며 표준에 근거가 있는 숫자가 아니다. 키는 Lambda가
 # 응답으로 돌려주는 resource_tier 이름이고, 0이면 캐시하지 않고 매 요청마다 Lambda에 묻는다.
@@ -201,12 +306,17 @@ def zero_trust_gate():
     if request.endpoint is None:
         return None
 
-    identity = request.headers.get('Cf-Access-Authenticated-User-Email')
-    if not identity:
-        # Access를 거치지 않은 요청이라는 뜻 - 판단 이전에 차단
+    # 신원은 서명 검증을 통과한 JWT의 email만 사용한다(평문 이메일 헤더는 쓰지 않음).
+    # 검증 실패 = 기록 후 즉시 차단. Lambda도 부르지 않는다.
+    try:
+        claims = verify_access_jwt(request.headers.get('Cf-Access-Jwt-Assertion'))
+    except JwtVerifyError as e:
+        _log_jwt_failure(e.reason)
         if request.path.startswith('/api/'):
-            return jsonify({"status": "Denied", "message": "관리자 이메일 인증 헤더가 누락되어 접근이 거부되었습니다."}), 403
-        return _status_page("접근이 거부되었습니다", "인증 정보가 없는 요청입니다.", 403)
+            return jsonify({"status": "Denied", "message": "인증 토큰 검증에 실패하여 접근이 거부되었습니다."}), 403
+        return _status_page("접근이 거부되었습니다", "인증 정보를 확인할 수 없는 요청입니다.", 403)
+    identity = claims["email"]
+    g.identity = identity
 
     # [실측 필요] CF-IPCountry가 실제로 이 앱까지 도착하는지는 /debug-headers로 확인할 것.
     # 없으면 None이 전달되고, Lambda는 geo_country가 없으면 위치 이상으로 보지 않는다(오탐 방지).
@@ -251,7 +361,7 @@ if os.environ.get("ZT_DEBUG_HEADERS") == "1":
 
 
 def render_page(title, content_html, is_public=False):
-    user_email = request.headers.get('Cf-Access-Authenticated-User-Email')
+    user_email = getattr(g, 'identity', None)   # 서명 검증된 JWT의 email(게이트에서 설정)
     # 허용 점수는 화면에 직접 적어두지 않고 Lambda가 이 요청에 실제로 적용한 임계값을 보여준다
     # (페이지마다 옛 숫자를 따로 적어두면 RESOURCE_THRESHOLDS가 바뀔 때 어긋남)
     threshold = getattr(g, 'risk', {}).get('resource_threshold')
@@ -391,12 +501,12 @@ def get_db_data():
         return jsonify({"status": "Denied", "message": "잘못된 경로입니다."}), 404
 
     data_type = request.args.get('type')
-    user_email = request.headers.get('Cf-Access-Authenticated-User-Email')
+    user_email = getattr(g, 'identity', None)   # 서명 검증된 JWT의 email(게이트에서 설정)
 
     if not user_email:
         return jsonify({
             "status": "Denied",
-            "message": "관리자 이메일 인증 헤더가 누락되어 DB 접근이 거부되었습니다."
+            "message": "검증된 신원 정보가 없어 DB 접근이 거부되었습니다."
         }), 403
 
     try:

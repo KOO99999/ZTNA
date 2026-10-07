@@ -40,6 +40,19 @@ variable "admin_allowed_emails" {
   description = "관리자 콘솔(/admin) 접근을 허용할 이메일 목록 (Cloudflare Access 이메일 OTP 로그인 대상)"
 }
 
+# Cloudflare Zero Trust 팀 도메인. portal_app.py가 이 도메인의 공개키(JWKS)로 Access JWT 서명을
+# 검증하고, 토큰의 iss(발급자)가 https://<이 값> 인지도 확인함. 틀리면 모든 요청이 차단되므로 주의.
+# Zero Trust 대시보드 > Settings > Custom Pages 등에서 보이는 "<이름>.cloudflareaccess.com" 전체를 넣음(https:// 제외).
+variable "cloudflare_team_domain" {
+  type        = string
+  description = "Cloudflare Zero Trust 팀 도메인 (예: your-team.cloudflareaccess.com, https:// 제외)"
+
+  validation {
+    condition     = can(regex("^[a-z0-9-]+\\.cloudflareaccess\\.com$", var.cloudflare_team_domain))
+    error_message = "cloudflare_team_domain은 'your-team.cloudflareaccess.com' 형식이어야 합니다(https:// 와 끝의 / 없이)."
+  }
+}
+
 # Worker -> Lambda(/evaluate), Flask -> Lambda(/evaluate) 호출 인증용 공유 비밀키.
 # random_password였다가 변수로 전환(2026-09 세션): terraform destroy를 해도 terraform.tfvars에
 # 고정해둔 값이 유지되므로, destroy할 때마다 Worker에 wrangler secret put을 다시 할 필요가 없어짐.

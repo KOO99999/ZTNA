@@ -5,12 +5,17 @@ Lambda 호출(requests.post)은 가짜로 대체하고, 호출 횟수와 보낸 
 import os
 import sys
 import json
+import time as _time
+import jwt as pyjwt
+from cryptography.hazmat.primitives.asymmetric import rsa
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
 os.environ["PDP_EVALUATE_URL"] = "https://pdp.test/evaluate"
 os.environ["EVALUATE_SHARED_SECRET"] = "test-secret-local-only"
 os.environ["AUTH_DOMAIN"] = "auth.xmcda.store"
+os.environ["CF_TEAM_DOMAIN"] = "team-test.cloudflareaccess.com"
+os.environ["CF_ACCESS_AUDS"] = "aud-portal,aud-admin"
 sys.modules['boto3'] = MagicMock()
 sys.path.insert(0, '.')
 import portal_app as pa
@@ -52,7 +57,33 @@ def at_kst(h, m=0, s=0):
 
 pa.requests.post = fake_post
 client = pa.app.test_client()
-H = {"Cf-Access-Authenticated-User-Email": "hana@test.com", "CF-IPCountry": "KR"}
+
+# ---- Cloudflare JWT 가짜 발급 환경: 테스트용 RSA 키 2개(정상 키 / 위조자 키) ----
+GOOD_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+EVIL_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+ISS = "https://team-test.cloudflareaccess.com"
+jwks_fetches = []
+
+def fake_fetch_jwks():
+    jwks_fetches.append(1)
+    return {"kid-good": GOOD_KEY.public_key()}
+
+pa._fetch_jwks = fake_fetch_jwks
+
+def make_token(email="hana@test.com", key=None, kid="kid-good", alg="RS256", iss=ISS,
+               aud=("aud-portal",), exp_delta=300, drop=(), extra=None):
+    now = int(_time.time())
+    claims = {"email": email, "iss": iss, "aud": list(aud), "iat": now, "exp": now + exp_delta}
+    if extra:
+        claims.update(extra)
+    for d in drop:
+        claims.pop(d, None)
+    return pyjwt.encode(claims, key or GOOD_KEY, algorithm=alg, headers={"kid": kid})
+
+def hdr(email="hana@test.com", country="KR", **kw):
+    return {"Cf-Access-Jwt-Assertion": make_token(email, **kw), "CF-IPCountry": country}
+
+H = hdr()
 
 # ---------- 1. 야간 경계 계산 ----------
 def sub(h, m=0, s=0):
@@ -253,7 +284,144 @@ reset(resp={"allow": True, "action": "allow", "score": 0, "resource_threshold": 
 r = client.get("/", headers={**H, "Host": "xmcda.store"})
 check("통과: 포털 홈에 60점 표시", "60점" in r.get_data(as_text=True))
 
-# ---------- 7. 디버그 라우트는 기본으로 꺼져 있음 ----------
+# ---------- 7. Cloudflare JWT 서명 검증 (검증 실패 = 기록 + 즉시 차단) ----------
+import io, contextlib
+
+def blocked_with_log(headers, path="/dev", host="xmcda.store"):
+    """요청을 보내고 (상태코드, 응답, 출력된 로그, Lambda 호출 수)를 돌려준다."""
+    reset()
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        r = client.get(path, headers={**headers, "Host": host})
+    return r, buf.getvalue(), len(calls)
+
+r, log, n = blocked_with_log({"CF-IPCountry": "KR"})
+check("JWT 없음 -> 403, Lambda 호출 없음, 실패 기록(token_missing)",
+      r.status_code == 403 and n == 0 and "[JWT_VERIFY_FAILED] reason=token_missing" in log, f"{r.status_code} {log!r}")
+
+r, log, n = blocked_with_log({"Cf-Access-Authenticated-User-Email": "hana@test.com", "CF-IPCountry": "KR"})
+check("평문 이메일 헤더만 있고 JWT 없음(위조 시나리오) -> 차단", r.status_code == 403 and n == 0 and "token_missing" in log)
+
+r, log, n = blocked_with_log({**hdr(), "Cf-Access-Authenticated-User-Email": "admin@test.com"})
+check("JWT는 hana인데 평문 헤더만 admin으로 바꿔도 신원은 hana(JWT)로 Lambda에 전달",
+      r.status_code == 200 and calls[0]["json"]["identity"] == "hana@test.com", calls[0]["json"] if calls else "no call")
+
+r, log, n = blocked_with_log({"Cf-Access-Jwt-Assertion": "not.a.jwt", "CF-IPCountry": "KR"})
+check("형식이 깨진 토큰 -> 차단 + 기록(malformed)", r.status_code == 403 and n == 0 and "reason=malformed" in log, log)
+
+r, log, n = blocked_with_log(hdr(key=EVIL_KEY))
+check("위조 서명(다른 개인키로 서명, kid만 정상) -> 차단 + 기록(bad_signature)",
+      r.status_code == 403 and n == 0 and "reason=bad_signature" in log, log)
+
+r, log, n = blocked_with_log(hdr(kid="kid-unknown"))
+check("모르는 kid -> 차단 + 기록(unknown_kid)", r.status_code == 403 and n == 0 and "reason=unknown_kid" in log, log)
+
+r, log, n = blocked_with_log(hdr(exp_delta=-10))
+check("만료된 토큰 -> 차단 + 기록(expired)", r.status_code == 403 and n == 0 and "reason=expired" in log, log)
+
+r, log, n = blocked_with_log(hdr(aud=("aud-other",)))
+check("다른 앱의 aud -> 차단 + 기록(bad_aud)", r.status_code == 403 and n == 0 and "reason=bad_aud" in log, log)
+
+r, log, n = blocked_with_log(hdr(iss="https://evil.cloudflareaccess.com"))
+check("다른 발급자(iss) -> 차단 + 기록(bad_iss)", r.status_code == 403 and n == 0 and "reason=bad_iss" in log, log)
+
+r, log, n = blocked_with_log(hdr(drop=("exp",)))
+check("exp 없는 토큰 -> 차단(영구 토큰 방지)", r.status_code == 403 and n == 0 and "reason=missing_claim" in log, log)
+
+r, log, n = blocked_with_log(hdr(drop=("email",)))
+check("email 클레임 없는 토큰(서비스 토큰 등) -> 차단 + 기록(no_email_claim)",
+      r.status_code == 403 and n == 0 and "reason=no_email_claim" in log, log)
+
+none_token = pyjwt.encode({"email": "hana@test.com", "iss": ISS, "aud": ["aud-portal"], "iat": int(_time.time()), "exp": int(_time.time()) + 300},
+                          key=None, algorithm="none", headers={"kid": "kid-good"})
+r, log, n = blocked_with_log({"Cf-Access-Jwt-Assertion": none_token, "CF-IPCountry": "KR"})
+check("alg=none 토큰 -> 차단", r.status_code == 403 and n == 0 and "reason=bad_alg_or_kid" in log, log)
+
+import hmac as _hmac, hashlib as _hashlib, base64 as _b64
+def b64(b): return _b64.urlsafe_b64encode(b).rstrip(b"=")
+pub_pem = GOOD_KEY.public_key().public_bytes(
+    __import__("cryptography.hazmat.primitives.serialization", fromlist=["x"]).Encoding.PEM,
+    __import__("cryptography.hazmat.primitives.serialization", fromlist=["x"]).PublicFormat.SubjectPublicKeyInfo)
+hs_head = b64(json.dumps({"alg": "HS256", "kid": "kid-good", "typ": "JWT"}).encode())
+hs_body = b64(json.dumps({"email": "hana@test.com", "iss": ISS, "aud": ["aud-portal"], "iat": int(_time.time()), "exp": int(_time.time()) + 300}).encode())
+hs_sig = b64(_hmac.new(pub_pem, hs_head + b"." + hs_body, _hashlib.sha256).digest())
+r, log, n = blocked_with_log({"Cf-Access-Jwt-Assertion": (hs_head + b"." + hs_body + b"." + hs_sig).decode(), "CF-IPCountry": "KR"})
+check("HS256 혼동 공격(공개키를 HMAC 비밀로 사용) -> 차단", r.status_code == 403 and n == 0 and "reason=bad_alg_or_kid" in log, log)
+
+r, log, n = blocked_with_log({**hdr(key=EVIL_KEY)}, path="/api/db-data?type=admin_logs", host="admin.xmcda.store")
+check("JWT 검증 실패(API) -> 403 JSON Denied, Lambda 호출 없음", r.status_code == 403 and r.get_json()["status"] == "Denied" and n == 0)
+
+r, log, n = blocked_with_log(hdr(key=EVIL_KEY))
+check("검증 실패 로그에 토큰 원문이 없음", make_token()[:20] not in log and "eyJ" not in log, log)
+
+# 정상 토큰
+r, log, n = blocked_with_log(hdr(aud=("aud-admin",)), path="/dev")
+check("정상 토큰(두 번째 허용 aud) -> 통과, 로그에 실패 기록 없음", r.status_code == 200 and "JWT_VERIFY_FAILED" not in log, f"{r.status_code} {log!r}")
+
+r, log, n = blocked_with_log(hdr(aud=("aud-other", "aud-portal")))
+check("aud 목록 중 하나라도 허용 목록에 있으면 통과", r.status_code == 200, r.status_code)
+
+reset()
+pa.table = MagicMock()
+pa.table.scan.return_value = {"Items": []}
+r = client.get("/api/db-data?type=admin_logs", headers={**hdr(), "Host": "admin.xmcda.store"})
+check("정상 토큰: /api/db-data 응답의 identity가 JWT의 email", r.status_code == 200 and r.get_json()["identity"] == "hana@test.com", r.get_data(as_text=True))
+
+reset()
+r = client.get("/dev", headers={**hdr(email="kim@test.com")})
+check("Lambda에 보내는 identity는 JWT의 email", calls[0]["json"]["identity"] == "kim@test.com", calls[0]["json"])
+
+r = client.get("/hr", headers=hdr(email="kim@test.com"))
+check("화면에 표시되는 계정도 JWT의 email", "kim@test.com" in r.get_data(as_text=True))
+
+# 설정 누락 -> fail-closed
+saved = (pa.CF_ISSUER, pa.CF_ACCESS_AUDS)
+pa.CF_ISSUER, pa.CF_ACCESS_AUDS = None, []
+r, log, n = blocked_with_log(hdr())
+check("팀 도메인/AUD 설정이 없으면 모두 차단(fail-closed) + 기록(config_missing)",
+      r.status_code == 403 and n == 0 and "reason=config_missing" in log, log)
+pa.CF_ISSUER, pa.CF_ACCESS_AUDS = saved
+
+# 공개키 가져오기: 캐시 / 실패 / 키 교체
+pa._jwks.update({"keys": {}, "fetched_at": 0.0})
+jwks_fetches.clear()
+client.get("/dev", headers=hdr()); client.get("/dev", headers=hdr()); client.get("/dev", headers=hdr())
+check("공개키 목록은 캐시되어 요청마다 받지 않음(1회)", len(jwks_fetches) == 1, len(jwks_fetches))
+
+def failing_fetch():
+    raise RuntimeError("cloudflare unreachable")
+orig_fetch = pa._fetch_jwks
+pa._jwks.update({"keys": {}, "fetched_at": 0.0})
+pa._fetch_jwks = failing_fetch
+r, log, n = blocked_with_log(hdr())
+check("공개키를 못 받고 아는 키도 없으면 차단 + 기록(jwks_unavailable)",
+      r.status_code == 403 and n == 0 and "reason=jwks_unavailable" in log, log)
+pa._fetch_jwks = orig_fetch
+
+pa._jwks.update({"keys": {"kid-good": GOOD_KEY.public_key()}, "fetched_at": _time.time() - pa.JWKS_CACHE_SECONDS - 5})
+pa._fetch_jwks = failing_fetch
+r, log, n = blocked_with_log(hdr())
+check("캐시가 오래됐고 새로 못 받아도, 이미 아는 키로는 계속 검증(Cloudflare 일시 장애 대응)", r.status_code == 200, f"{r.status_code} {log!r}")
+pa._fetch_jwks = orig_fetch
+
+pa._jwks.update({"keys": {"kid-good": GOOD_KEY.public_key()}, "fetched_at": _time.time()})
+jwks_fetches.clear()
+for _ in range(5):
+    client.get("/dev", headers=hdr(kid="kid-unknown"))
+check("모르는 kid가 반복돼도 공개키 재요청 폭주 없음(1분 최소 간격)", len(jwks_fetches) == 0, len(jwks_fetches))
+
+# 키 교체: 캐시에 없는 새 kid가 나타나면(1분 이상 지났을 때) 다시 받아서 통과
+NEW_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+def rotated_fetch():
+    return {"kid-good": GOOD_KEY.public_key(), "kid-new": NEW_KEY.public_key()}
+pa._fetch_jwks = rotated_fetch
+pa._jwks.update({"keys": {"kid-good": GOOD_KEY.public_key()}, "fetched_at": _time.time() - 120})
+reset()
+r = client.get("/dev", headers=hdr(key=NEW_KEY, kid="kid-new"))
+check("Cloudflare 키 교체: 새 kid가 나오면 공개키를 다시 받아 통과", r.status_code == 200, r.status_code)
+pa._fetch_jwks = orig_fetch
+
+# ---------- 8. 디버그 라우트는 기본으로 꺼져 있음 ----------
 reset()
 r = client.get("/debug-headers", headers=H)
 check("ZT_DEBUG_HEADERS 미설정이면 /debug-headers 없음(404)", r.status_code == 404, f"status={r.status_code}")

@@ -1,272 +1,32 @@
 from flask import Flask, request, jsonify, redirect, g
-from datetime import datetime, timedelta, timezone
-from urllib.parse import quote
 import base64
 import json
 import os
-import threading
-import time
-import uuid
 
 import boto3
-import jwt  # PyJWT (RS256 검증에 cryptography 필요)
-import requests
+
+from zt_jwt import JwtVerifyError, log_jwt_failure, verify_access_jwt
+from zt_risk import check_risk, resource_path_for, stepup_url
 
 app = Flask(__name__)
 dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
 table = dynamodb.Table('risk_score_log')
 
 
-# ==========================================================================
-# B 계층: 세션 중 위험도 재확인
-#
-# Cloudflare Access(A 계층)는 세션을 새로 만들 때만 Worker -> Lambda 평가를 하고, 세션이
-# 살아있는 동안(현재 15분)은 다시 평가하지 않는다. 그 사이의 빈틈을 메우기 위해, 이 앱이
-# 페이지/API 요청을 처리하기 직전에 같은 Lambda(PDP)에 직접 물어본다.
-#
-# [설계 원칙] 판단(점수 계산, 임계값 비교)은 여기서 하지 않는다. 원본 값(시각, 국가, 접속
-# 경로)만 Lambda로 넘기고 결과를 집행(통과/차단/재인증 안내)할 뿐이다 - Worker와 동일.
-# Lambda 호출은 전부 check_risk() 한 곳을 거치므로, 나중에 로컬 실행 방식으로 옮길 때는
-# 이 함수 안쪽만 바꾸면 된다.
-# ==========================================================================
-PDP_EVALUATE_URL = os.environ.get("PDP_EVALUATE_URL")
-EVALUATE_SHARED_SECRET = os.environ.get("EVALUATE_SHARED_SECRET")
 AUTH_DOMAIN = os.environ.get("AUTH_DOMAIN", "auth.xmcda.store")
-PDP_TIMEOUT_SECONDS = 3
 
-
-# ==========================================================================
-# Cloudflare Access JWT 서명 검증
-#
-# Cloudflare가 요청에 붙이는 Cf-Access-Jwt-Assertion은 Cloudflare 개인키로 서명되어 있어,
-# 공개키(JWKS)로 "진짜 Cloudflare가 발급했고, 이 앱(aud)용이고, 만료 전인지"를 확인할 수 있다.
-# 평문 헤더(Cf-Access-Authenticated-User-Email)는 누가 위조해도 앱이 알 수 없으므로,
-# 신원(이메일)은 검증을 통과한 토큰 안의 email 값만 쓴다.
-# 검증 실패는 기록(journalctl)하고 즉시 차단한다. 토큰 원문은 로그에 남기지 않는다.
-# ==========================================================================
-CF_TEAM_DOMAIN = (os.environ.get("CF_TEAM_DOMAIN") or "").strip().rstrip("/")
-CF_ACCESS_AUDS = [a.strip() for a in (os.environ.get("CF_ACCESS_AUDS") or "").split(",") if a.strip()]
-CF_ISSUER = f"https://{CF_TEAM_DOMAIN}" if CF_TEAM_DOMAIN else None
-CF_CERTS_URL = f"{CF_ISSUER}/cdn-cgi/access/certs" if CF_ISSUER else None
-JWKS_TIMEOUT_SECONDS = 3
-JWKS_CACHE_SECONDS = 3600        # 정상 시 공개키 목록을 1시간 보관
-JWKS_MIN_REFETCH_SECONDS = 60    # 모르는 kid가 계속 들어와도 1분에 한 번만 다시 받음(남용 방지)
-
-_jwks = {"keys": {}, "fetched_at": 0.0}
-_jwks_lock = threading.Lock()
-
-
-class JwtVerifyError(Exception):
-    """reason: 로그에 남기는 짧은 분류 이름(토큰 내용은 담지 않는다)."""
-    def __init__(self, reason):
-        super().__init__(reason)
-        self.reason = reason
-
-
-def _fetch_jwks():
-    """Cloudflare 공개키 목록을 받아 {kid: 공개키객체}로 돌려준다. 테스트에서 대체하는 지점."""
-    resp = requests.get(CF_CERTS_URL, timeout=JWKS_TIMEOUT_SECONDS)
-    resp.raise_for_status()
-    keys = {}
-    for jwk in resp.json().get("keys", []):
-        if jwk.get("kty") == "RSA" and jwk.get("kid"):
-            keys[jwk["kid"]] = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(jwk))
-    return keys
-
-
-def _get_signing_key(kid):
-    now = time.time()
-    with _jwks_lock:
-        fresh = (now - _jwks["fetched_at"]) < JWKS_CACHE_SECONDS
-        if kid in _jwks["keys"] and fresh:
-            return _jwks["keys"][kid]
-        # 캐시가 오래됐거나 모르는 kid(키 교체 가능성)면 다시 받되, 너무 자주는 안 받는다
-        if (now - _jwks["fetched_at"]) >= JWKS_MIN_REFETCH_SECONDS:
-            try:
-                _jwks["keys"] = _fetch_jwks()
-                _jwks["fetched_at"] = now
-            except Exception as e:
-                print(f"[JWT_JWKS_FETCH_FAILED] {type(e).__name__}", flush=True)
-                if kid in _jwks["keys"]:
-                    return _jwks["keys"][kid]   # 받기 실패해도 이미 아는 키면 계속 사용
-                raise JwtVerifyError("jwks_unavailable")
-        if kid in _jwks["keys"]:
-            return _jwks["keys"][kid]
-    raise JwtVerifyError("unknown_kid")
-
-
-def verify_access_jwt(token):
-    """검증에 성공하면 claims(dict)를, 실패하면 JwtVerifyError를 낸다."""
-    if not CF_ISSUER or not CF_ACCESS_AUDS:
-        raise JwtVerifyError("config_missing")
-    if not token:
-        raise JwtVerifyError("token_missing")
-    try:
-        header = jwt.get_unverified_header(token)
-    except jwt.PyJWTError:
-        raise JwtVerifyError("malformed")
-    # 알고리즘은 토큰이 아니라 우리가 정한다(alg=none / HS256 위조 방지)
-    if header.get("alg") != "RS256" or not header.get("kid"):
-        raise JwtVerifyError("bad_alg_or_kid")
-    key = _get_signing_key(header["kid"])
-    try:
-        claims = jwt.decode(
-            token, key, algorithms=["RS256"],
-            audience=CF_ACCESS_AUDS, issuer=CF_ISSUER,
-            options={"require": ["exp", "iat", "iss", "aud"]},
-        )
-    except jwt.ExpiredSignatureError:
-        raise JwtVerifyError("expired")
-    except jwt.InvalidAudienceError:
-        raise JwtVerifyError("bad_aud")
-    except jwt.InvalidIssuerError:
-        raise JwtVerifyError("bad_iss")
-    except jwt.InvalidSignatureError:
-        raise JwtVerifyError("bad_signature")
-    except jwt.MissingRequiredClaimError:
-        raise JwtVerifyError("missing_claim")
-    except jwt.PyJWTError:
-        raise JwtVerifyError("invalid")
-    email = claims.get("email")
-    if not isinstance(email, str) or not email:
-        raise JwtVerifyError("no_email_claim")   # 서비스 토큰 등 사람 계정이 아닌 토큰
-    return claims
-
-
-def _log_jwt_failure(reason):
-    # 토큰/쿠키 값은 남기지 않는다. 어떤 요청이 왜 막혔는지만 남긴다.
-    print(f"[JWT_VERIFY_FAILED] reason={reason} host={request.host} path={request.path} "
-          f"remote={request.remote_addr} cf_ip={request.headers.get('Cf-Connecting-Ip')}", flush=True)
-
-# 등급별 캐시 시간(초). 팀이 정한 값이며 표준에 근거가 있는 숫자가 아니다. 키는 Lambda가
-# 응답으로 돌려주는 resource_tier 이름이고, 0이면 캐시하지 않고 매 요청마다 Lambda에 묻는다.
-# Lambda가 알려주는 등급 이름을 쓰므로 이 앱은 경로별 임계값/등급 표를 따로 갖지 않는다.
-# 등급을 모르는 경우(None)도 캐시하지 않는다.
-CACHE_TTL_SECONDS = {
-    "top_secret": 0,       # 관리자 콘솔, 감사 로그 API: 매 요청 검사
-    "confidential": 90,    # 인사, 개발
-    "internal": 300,       # 마케팅, 포털 공통
-}
-
-# 야간 접속 판정 기준(KST 22시~06시). risk_score_engine.py의 night_access 판정과 같은 값이어야
-# 하며, 거기서 바꾸면 여기도 같이 바꿔야 한다. 캐시가 이 경계를 넘어 살아있으면, 21:58에 받은
-# "통과"가 22:00 이후에도 쓰이는 빈틈이 생기므로 캐시 만료를 이 경계에서 끊는다.
-NIGHT_START_HOUR_KST = 22
-NIGHT_END_HOUR_KST = 6
-KST = timezone(timedelta(hours=9))
-
-_cache = {}
-_cache_lock = threading.Lock()
-_CACHE_MAX_ENTRIES = 1000
-
-
-def seconds_until_night_boundary(now_utc):
-    """지금부터 다음 야간 경계(KST 06:00 또는 22:00)까지 남은 초."""
-    now_kst = now_utc.astimezone(KST)
-    boundaries = []
-    for hour in (NIGHT_END_HOUR_KST, NIGHT_START_HOUR_KST):
-        boundary = now_kst.replace(hour=hour, minute=0, second=0, microsecond=0)
-        if boundary <= now_kst:
-            boundary += timedelta(days=1)
-        boundaries.append(boundary)
-    return (min(boundaries) - now_kst).total_seconds()
-
-
-def _call_pdp(identity, country, resource_path):
-    """Lambda(PDP) 호출. 실패하면 fail-closed(차단) 결과를 돌려준다 - Worker와 같은 정책."""
-    if not PDP_EVALUATE_URL or not EVALUATE_SHARED_SECRET:
-        print("[B_PDP_CONFIG_MISSING] PDP_EVALUATE_URL/EVALUATE_SHARED_SECRET 환경변수 없음", flush=True)
-        return {"allow": False, "action": "pdp_unavailable", "error": True}
-    try:
-        resp = requests.post(
-            PDP_EVALUATE_URL,
-            headers={
-                "Content-Type": "application/json",
-                "X-Evaluate-Secret": EVALUATE_SHARED_SECRET,
-            },
-            json={
-                "identity": identity,
-                "session_id": str(uuid.uuid4()),
-                "request_timestamp": datetime.now(timezone.utc).isoformat(),
-                "geo_country": country,
-                "resource_path": resource_path,
-                "source": "B",
-            },
-            timeout=PDP_TIMEOUT_SECONDS,
-        )
-        if resp.status_code != 200:
-            print(f"[B_PDP_HTTP_ERROR] status={resp.status_code}", flush=True)
-            return {"allow": False, "action": "pdp_unavailable", "error": True}
-        data = resp.json()
-        return {
-            "allow": data.get("allow") is True,
-            "action": data.get("action", "unknown"),
-            "score": data.get("score"),
-            "resource_threshold": data.get("resource_threshold"),
-            "resource_tier": data.get("resource_tier"),
-            "error": False,
-        }
-    except Exception as e:
-        print(f"[B_PDP_CALL_FAILED] {e}", flush=True)
-        return {"allow": False, "action": "pdp_unavailable", "error": True}
-
-
-def check_risk(identity, country, resource_path):
-    """이 앱에서 Lambda를 부르는 유일한 통로.
-
-    캐시 규칙:
-      1) 허용 결과만 저장한다. 차단/step-up 필요 결과를 저장하면 /stepup에서 재인증을
-         마치고 돌아와도 옛 결과가 남아 계속 막힌다.
-      2) 같은 사용자라도 국가가 직전과 다르면 캐시를 버리고 즉시 다시 묻는다.
-      3) 만료는 min(등급별 캐시 시간, 다음 야간 경계까지 남은 시간).
-    """
-    now = time.time()
-    key = (identity, resource_path)
-
-    with _cache_lock:
-        entry = _cache.get(key)
-        if entry:
-            if entry["expires_at"] > now and entry["country"] == country:
-                return {**entry["result"], "from_cache": True}
-            del _cache[key]
-
-    result = _call_pdp(identity, country, resource_path)
-    result["from_cache"] = False
-
-    if result["allow"] and not result["error"]:
-        ttl = CACHE_TTL_SECONDS.get(result.get("resource_tier"), 0)
-        if ttl > 0:
-            until_boundary = seconds_until_night_boundary(datetime.fromtimestamp(now, timezone.utc))
-            with _cache_lock:
-                if len(_cache) >= _CACHE_MAX_ENTRIES:
-                    for k in [k for k, v in _cache.items() if v["expires_at"] <= now]:
-                        del _cache[k]
-                if len(_cache) < _CACHE_MAX_ENTRIES:
-                    _cache[key] = {
-                        "expires_at": now + min(ttl, until_boundary),
-                        "country": country,
-                        "result": {k: v for k, v in result.items() if k != "from_cache"},
-                    }
-    return result
+# 신원 확인(JWT 서명 검증)은 zt_jwt.py, 위험도 확인(Lambda 호출/캐시)은 zt_risk.py에 있다.
+# 위험도 확인은 nginx 앞단(auth_gate.py)으로 옮기는 중이며, 앞단 동작이 확인되면 이 앱에서는
+# zt_risk 사용(아래 zero_trust_gate의 check_risk 호출과 응답 처리)을 제거하고 JWT 검증만 남긴다.
 
 
 def _resource_path_for_request():
-    """이 요청이 어느 자원인지. index.js(Worker)의 extractResourcePath와 같은 규칙:
-    admin 서브도메인이면 /admin 또는 /api/db-data, 그 외에는 요청 경로 그대로."""
-    path = request.path
-    if request.host.startswith('admin.'):
-        return '/api/db-data' if path == '/api/db-data' else '/admin'
-    return path.rstrip('/') or '/'
+    return resource_path_for(request.host, request.path)
 
 
 def _stepup_url(is_api):
-    # fetch 호출(API)은 인증 후 그 API 주소가 아니라 호출한 페이지(관리자 콘솔)로 돌아가야 함
-    if is_api:
-        return_url = f"https://{request.host}/"
-    else:
-        query = request.query_string.decode('utf-8', 'ignore')
-        return_url = f"https://{request.host}{request.path}" + (f"?{query}" if query else "")
-    return f"https://{AUTH_DOMAIN}/stepup?return_url={quote(return_url, safe='')}"
+    return stepup_url(AUTH_DOMAIN, request.host, request.path,
+                      request.query_string.decode('utf-8', 'ignore'), is_api)
 
 
 def _status_page(title, message, code):
@@ -311,7 +71,8 @@ def zero_trust_gate():
     try:
         claims = verify_access_jwt(request.headers.get('Cf-Access-Jwt-Assertion'))
     except JwtVerifyError as e:
-        _log_jwt_failure(e.reason)
+        log_jwt_failure(e.reason, request.host, request.path, request.remote_addr,
+                        request.headers.get('Cf-Connecting-Ip'))
         if request.path.startswith('/api/'):
             return jsonify({"status": "Denied", "message": "인증 토큰 검증에 실패하여 접근이 거부되었습니다."}), 403
         return _status_page("접근이 거부되었습니다", "인증 정보를 확인할 수 없는 요청입니다.", 403)

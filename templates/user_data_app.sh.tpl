@@ -10,6 +10,16 @@ cat << 'APP' > /home/ubuntu/portal_app.py
 ${app_code}
 APP
 
+# 신원 확인(JWT 서명 검증)과 위험도 확인 모듈. portal_app.py가 같은 폴더에서 가져다 씀
+# (판단 서비스(web 서버의 auth_gate.py)와 같은 코드). nginx 앞단 전환이 끝나면 zt_risk.py는 제거 예정.
+cat << 'ZTJWT' > /home/ubuntu/zt_jwt.py
+${zt_jwt_code}
+ZTJWT
+
+cat << 'ZTRISK' > /home/ubuntu/zt_risk.py
+${zt_risk_code}
+ZTRISK
+
 # [B 계층] Lambda(PDP) 호출 정보. auth_server의 .env와 같은 방식.
 cat << ENV > /home/ubuntu/.env
 PDP_EVALUATE_URL=${pdp_evaluate_url}

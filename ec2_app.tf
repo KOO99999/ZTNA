@@ -16,7 +16,9 @@ resource "aws_instance" "app_server" {
   user_data_replace_on_change = true
 
   user_data_base64 = base64gzip(templatefile("${path.module}/templates/user_data_app.sh.tpl", {
-    app_code = file("${path.module}/portal_app.py")
+    app_code    = file("${path.module}/portal_app.py")
+    zt_jwt_code  = file("${path.module}/zt_jwt.py")
+    zt_risk_code = file("${path.module}/zt_risk.py")
 
     # [B 계층] portal_app.py가 세션 중 위험도 재확인을 위해 Lambda(PDP)를 직접 호출함.
     # auth_server(ec2_auth.tf)에 넘기는 값과 동일한 방식/동일한 값.

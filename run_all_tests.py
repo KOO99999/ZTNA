@@ -1,5 +1,5 @@
 """
-두 테스트(test_risk_score.py, test_portal_b.py)를 한 번에 돌리고, 긴 출력 대신
+세 테스트(test_risk_score.py, test_portal_b.py, test_auth_gate.py)를 한 번에 돌리고, 긴 출력 대신
 PASS/FAIL 개수만 표로 보여주는 요약 스크립트. 화면 한 장으로 캡처할 수 있게 만든 것.
 
 사용법 (프로젝트 폴더에서): python run_all_tests.py
@@ -14,6 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TESTS = [
     ("엔진 (risk_score_engine.py)", "test_risk_score.py"),
     ("B 계층 (portal_app.py)", "test_portal_b.py"),
+    ("판단 서비스 (auth_gate.py)", "test_auth_gate.py"),
 ]
 
 env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")

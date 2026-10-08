@@ -49,5 +49,11 @@ resource "aws_instance" "web_server" {
 
   lifecycle {
     create_before_destroy = true
+
+    # user_data 설정 방식을 user_data -> user_data_base64로 바꾼 첫 apply에서 Terraform이 이 서버를
+    # 교체하지 않고 제자리 수정(in-place)으로 계획해, 새 부팅 스크립트(판단 서비스/nginx)가 실행되지
+    # 않는 문제가 있었음. 또 app_server가 교체되면 사설 IP가 바뀌므로 nginx/cloudflared 설정도
+    # 새로 만들어야 함. app_server가 교체될 때 web_server도 항상 같이 교체되게 묶어 둠.
+    replace_triggered_by = [aws_instance.app_server]
   }
 }

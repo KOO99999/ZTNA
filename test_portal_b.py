@@ -144,19 +144,24 @@ check("옛 /api/db-data 라우트는 없어짐(404)", r.status_code == 404, r.st
 # 로그: 최근 순 정렬 + 50건 제한 + 이스케이프
 pa.table.scan.return_value = {"Items": [{"session_id": f"s{i}", "timestamp": i, "identity": "kim@test.com", "resource_path": "/hr",
                                         "risk_score": 10, "resource_threshold": 40, "action": "allow", "source": "A", "reasons": ["night_access"]} for i in range(1, 121)]}
-r = admin_get()
+pa.table.scan.reset_mock()
+r0 = admin_get()
+t0 = r0.get_data(as_text=True)
+check("처음 접속: 로그는 안 보이고 빨간 버튼만 있음, DynamoDB 조회 안 함", r0.status_code == 200 and "DynamoDB 감사 로그 조회" in t0 and 'href="/?logs=1"' in t0
+      and "<th>시각(KST)</th>" not in t0 and pa.table.scan.call_count == 0, pa.table.scan.call_count)
+r = admin_get("/?logs=1")
 t = r.get_data(as_text=True)
-check("관리자: 콘솔이 서버에서 그려져 200, fetch 스크립트 없음", r.status_code == 200 and "fetch(" not in t and "/api/db-data" not in t)
+check("버튼(/?logs=1): 콘솔이 서버에서 그려져 200, fetch 스크립트 없음", r.status_code == 200 and "fetch(" not in t and "/api/db-data" not in t)
 check("로그 50건만 표시, 가장 최근(timestamp 120)이 먼저", t.count("<tr><td>") == 50 and t.index("1970-01-01 09:02:00") < t.index("1970-01-01 09:01:59"), t.count("<tr><td>"))
 
 pa.table.scan.return_value = {"Items": [{"timestamp": 5, "identity": "<img src=x onerror=alert(1)>", "resource_path": "/x<script>alert(2)</script>?a=\"'",
                                         "risk_score": 1, "reasons": ["<b>r</b>"], "action": "deny", "source": "B"}]}
-t = admin_get().get_data(as_text=True)
+t = admin_get("/?logs=1").get_data(as_text=True)
 check("저장된 값(identity/resource_path/reasons)의 HTML이 이스케이프됨(XSS 방지)",
       "<script>alert(2)" not in t and "<img src=x" not in t and "<b>r</b>" not in t and "&lt;script&gt;alert(2)" in t, t[-600:])
 
 pa.table.scan.side_effect = RuntimeError("db secret detail")
-t = admin_get().get_data(as_text=True)
+t = admin_get("/?logs=1").get_data(as_text=True)
 check("로그 조회 실패 시 내부 오류 문구 노출 없이 안내만", "불러오지 못했습니다" in t and "db secret detail" not in t)
 pa.table.scan.side_effect = None
 pa.table.scan.return_value = {"Items": []}

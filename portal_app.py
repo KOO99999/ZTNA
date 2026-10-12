@@ -336,25 +336,29 @@ def admin_console():
         risk_html = ("<table><tr><th>사용자</th><th>신호</th><th>걸린 시각</th><th>마지막 감지</th><th>출처</th><th></th></tr>"
                      + rows + "</table>" + more)
 
-    # --- 최근 판정 로그 ---
-    logs, truncated = _recent_logs()
-    if logs is None:
-        log_html = '<p class="msg msg-err">감사 로그를 불러오지 못했습니다.</p>'
-    elif not logs:
-        log_html = "<p>기록이 없습니다.</p>"
+    # --- 최근 판정 로그: 빨간 버튼(/?logs=1)을 눌렀을 때만 읽는다(평소에는 DynamoDB를 조회하지 않음) ---
+    if request.args.get("logs") == "1":
+        logs, truncated = _recent_logs()
+        if logs is None:
+            log_body = '<p class="msg msg-err">감사 로그를 불러오지 못했습니다.</p>'
+        elif not logs:
+            log_body = "<p>기록이 없습니다.</p>"
+        else:
+            rows = ""
+            for it in logs:
+                reasons = it.get("reasons") or []
+                reasons = ", ".join(str(r) for r in reasons) if isinstance(reasons, (list, tuple, set)) else str(reasons)
+                rows += (f"<tr><td>{esc(_fmt_ts(it.get('timestamp')))}</td><td>{esc(it.get('identity', '-'))}</td>"
+                         f"<td>{esc(it.get('resource_path', '-'))}</td><td>{esc(it.get('risk_score', '-'))}</td>"
+                         f"<td>{esc(it.get('resource_threshold', '-'))}</td><td>{esc(it.get('action', '-'))}</td>"
+                         f"<td>{esc(it.get('source', '-'))}</td><td>{esc(reasons)}</td></tr>")
+            note = (f"최근 {len(logs)}건 (최신순)" +
+                    (f" - 로그가 많아 최근 {LOG_SCAN_CAP}건 안에서만 정렬했습니다" if truncated else ""))
+            log_body = (f"<p><small>{esc(note)}</small></p><table><tr><th>시각(KST)</th><th>사용자</th><th>자원</th><th>점수</th>"
+                        "<th>임계값</th><th>판정</th><th>출처</th><th>사유</th></tr>" + rows + "</table>")
+        log_html = ('<a href="/"><button type="button" style="background-color: #6c757d;">로그 닫기</button></a>' + log_body)
     else:
-        rows = ""
-        for it in logs:
-            reasons = it.get("reasons") or []
-            reasons = ", ".join(str(r) for r in reasons) if isinstance(reasons, (list, tuple, set)) else str(reasons)
-            rows += (f"<tr><td>{esc(_fmt_ts(it.get('timestamp')))}</td><td>{esc(it.get('identity', '-'))}</td>"
-                     f"<td>{esc(it.get('resource_path', '-'))}</td><td>{esc(it.get('risk_score', '-'))}</td>"
-                     f"<td>{esc(it.get('resource_threshold', '-'))}</td><td>{esc(it.get('action', '-'))}</td>"
-                     f"<td>{esc(it.get('source', '-'))}</td><td>{esc(reasons)}</td></tr>")
-        note = (f"최근 {len(logs)}건 (최신순)" +
-                (f" - 로그가 많아 최근 {LOG_SCAN_CAP}건 안에서만 정렬했습니다" if truncated else ""))
-        log_html = (f"<p><small>{esc(note)}</small></p><table><tr><th>시각(KST)</th><th>사용자</th><th>자원</th><th>점수</th>"
-                    "<th>임계값</th><th>판정</th><th>출처</th><th>사유</th></tr>" + rows + "</table>")
+        log_html = '<a href="/?logs=1"><button type="button" style="background-color: #dc3545;">DynamoDB 감사 로그 조회</button></a>'
 
     html = f"""
     <p><strong>⚠️ 관리자 전용 영역입니다.</strong></p>

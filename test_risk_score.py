@@ -15,9 +15,12 @@ os.environ["EVALUATE_SHARED_SECRET"] = "test-secret-local-only"
 sys.modules['boto3'] = MagicMock()
 import boto3
 mock_table = MagicMock()       # risk_score_log
+mock_user_risk = MagicMock()    # [User Risk] 기본은 걸려 있는 신호 없음
 mock_mfa_table = MagicMock()   # [step-up] mfa_verified - 별도 mock, 기본은 기록 없음(get_item 결과 없음)으로 둠
 
 def _table_side_effect(name):
+    if name == 'user_risk':
+        return mock_user_risk
     return mock_mfa_table if name == 'mfa_verified' else mock_table
 
 boto3.resource.return_value.Table.side_effect = _table_side_effect
@@ -30,6 +33,8 @@ TEST_HEADERS = {"x-evaluate-secret": "test-secret-local-only"}
 def run_case(name, body, expect_allow=None, expect_action=None, mfa_record=None):
     mock_table.reset_mock()
     mock_mfa_table.reset_mock()
+    mock_user_risk.reset_mock()
+    mock_user_risk.query.return_value = {"Items": []}
     # 기본값: mfa_verified 기록 없음. mfa_record를 넘기면 그 내용으로 get_item이 응답하게 함
     # (예: {"identity": "...", "expires_at": now+600} 처럼 이미 저장돼있던 상황을 흉내)
     mock_mfa_table.get_item.return_value = {"Item": mfa_record} if mfa_record else {}
@@ -386,6 +391,8 @@ t("[캐시TTL] MFA 기록이 이미 만료됐으면(음수) 0 이하로 내려�
 def _call(body, mfa_record=None):
     mock_table.reset_mock()
     mock_mfa_table.reset_mock()
+    mock_user_risk.reset_mock()
+    mock_user_risk.query.return_value = {"Items": []}
     mock_mfa_table.get_item.return_value = {"Item": mfa_record} if mfa_record else {}
     raw = engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps(body)}, None)
     return json.loads(raw["body"])
@@ -421,3 +428,98 @@ with contextlib.redirect_stdout(_buf):
     engine.lambda_handler({"headers": {"x-evaluate-secret": "wrong-value-xyz"}, "body": "{}"}, None)
 t("[보안] 정상 호출 로그에 공유비밀키가 찍히지 않음", "test-secret-local-only" not in _buf.getvalue(), _buf.getvalue()[:200])
 t("[보안] 틀린 비밀키로 거부된 호출의 로그에도 입력값이 찍히지 않음", "wrong-value-xyz" not in _buf.getvalue())
+
+
+# ==========================================================================
+# [User Risk] 해제 불가 신호를 인증된 신원에 저장하고, 이후 판단에 반영하고, 조회 실패는 차단
+# ==========================================================================
+def _flag(identity, signal, status="active"):
+    return {"identity": identity, "signal": signal, "status": status, "set_at": now}
+
+t("[UserRisk] STICKY_SIGNALS는 resettable=False인 security 신호 3개",
+  sorted(engine.STICKY_SIGNALS) == ["device_fingerprint_mismatch", "threat_intel_match", "waf_sqli"], engine.STICKY_SIGNALS)
+
+# 1) persist_risk=true + 감지 -> 저장
+r = _call({"session_id": "u1", "identity": "kim@test.com", "waf_sqli": True, "persist_risk": True, "source": "B"})
+calls = mock_user_risk.update_item.call_args_list
+t("[UserRisk] persist_risk=true: 감지된 waf_sqli를 user_risk에 active로 저장", len(calls) == 1
+  and calls[0].kwargs["Key"] == {"identity": "kim@test.com", "signal": "waf_sqli"}
+  and calls[0].kwargs["ExpressionAttributeValues"][":active"] == "active"
+  and calls[0].kwargs["ExpressionAttributeValues"][":src"] == "B", calls)
+t("[UserRisk] 해제된(released) 항목은 같은 조건식으로 다시 active가 될 수 있음(재감지)",
+  "<> :active" in calls[0].kwargs["ConditionExpression"])
+
+# 2) persist_risk 없음 -> 저장 안 함 (로그인 폼 등 인증 전 입력으로 남의 계정을 잠그는 공격 방지)
+r = _call({"session_id": "u2", "identity": "victim@test.com", "waf_sqli": True})
+t("[UserRisk] persist_risk가 없으면 저장하지 않음(남의 이메일을 적어 잠그는 공격 방지)", mock_user_risk.update_item.call_count == 0)
+t("[UserRisk] 저장하지 않아도 그 요청 자체는 차단", (not r["allow"]) and r["action"] == "block_until_mfa", r)
+
+# 3) 저장 대상이 아닌 신호는 저장 안 함
+r = _call({"session_id": "u3", "identity": "kim@test.com", "night_access": True, "brute_force": True, "persist_risk": True})
+t("[UserRisk] night_access/brute_force 같은 해제 가능 신호는 저장하지 않음", mock_user_risk.update_item.call_count == 0)
+
+# 4) identity 없음/unknown -> 조회·저장 모두 안 함
+r = _call({"session_id": "u4", "waf_sqli": True, "persist_risk": True})
+t("[UserRisk] identity가 없으면 조회/저장하지 않음", mock_user_risk.query.call_count == 0 and mock_user_risk.update_item.call_count == 0)
+r = _call({"session_id": "u4b", "identity": "unknown", "waf_sqli": True, "persist_risk": True})
+t("[UserRisk] identity가 'unknown'이어도 저장하지 않음", mock_user_risk.update_item.call_count == 0)
+
+# 5) 이미 걸려 있는 신호 -> 다른 신호 없이도 차단, 이유에 표시
+def _call_flagged(body, items):
+    mock_table.reset_mock(); mock_mfa_table.reset_mock(); mock_user_risk.reset_mock()
+    mock_mfa_table.get_item.return_value = {}
+    mock_user_risk.query.return_value = {"Items": items}
+    raw = engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps(body)}, None)
+    return raw["statusCode"], json.loads(raw["body"])
+
+code, r = _call_flagged({"session_id": "u5", "identity": "kim@test.com", "resource_path": "/dev"},
+                        [_flag("kim@test.com", "threat_intel_match")])
+t("[UserRisk] active 신호가 있으면 아무 신호 없이 와도 차단", code == 200 and (not r["allow"]) and r["action"] == "block_until_mfa", r)
+t("[UserRisk] 차단 이유에 user_risk_active가 표시됨", "user_risk_active:threat_intel_match" in r["reasons"], r["reasons"])
+t("[UserRisk] 차단이면 캐시 유효시간 0", r.get("cache_ttl_seconds") == 0)
+
+code, r = _call_flagged({"session_id": "u6", "identity": "kim@test.com", "resource_path": "/dev", "security_mfa_passed": True},
+                        [_flag("kim@test.com", "waf_sqli")])
+t("[UserRisk] MFA를 통과해도 걸린 신호는 풀리지 않음(resettable=False)", not r["allow"], r)
+
+code, r = _call_flagged({"session_id": "u7", "identity": "kim@test.com", "resource_path": "/dev"},
+                        [_flag("kim@test.com", "waf_sqli", status="released")])
+t("[UserRisk] released(해제된) 항목은 판단에 반영되지 않음", code == 200 and r["allow"], r)
+
+code, r = _call_flagged({"session_id": "u8", "identity": "kim@test.com", "resource_path": "/dev"},
+                        [_flag("kim@test.com", "night_access")])
+t("[UserRisk] sticky 대상이 아닌 신호 이름이 저장돼 있어도 무시", code == 200 and r["allow"], r)
+
+# 6) 같은 신호가 이미 active인 상태에서 또 감지 -> 새로 만들지 않고 last_seen만 갱신
+class _CondFail(Exception):
+    response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+mock_user_risk.reset_mock()
+mock_user_risk.query.return_value = {"Items": [_flag("kim@test.com", "waf_sqli")]}
+mock_user_risk.update_item.side_effect = [_CondFail("x"), {}]
+mock_mfa_table.get_item.return_value = {}
+engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps(
+    {"session_id": "u9", "identity": "kim@test.com", "waf_sqli": True, "persist_risk": True})}, None)
+t("[UserRisk] 이미 active인 신호가 또 감지되면 last_seen만 갱신",
+  mock_user_risk.update_item.call_count == 2 and "last_seen" in mock_user_risk.update_item.call_args_list[1].kwargs["UpdateExpression"]
+  and "#st" not in mock_user_risk.update_item.call_args_list[1].kwargs["UpdateExpression"])
+mock_user_risk.update_item.side_effect = None
+
+# 7) 조회 실패 -> fail-closed (500, 호출자는 차단 처리)
+mock_table.reset_mock()
+mock_user_risk.reset_mock()
+mock_user_risk.query.side_effect = RuntimeError("dynamodb down")
+_b = io.StringIO()
+with contextlib.redirect_stdout(_b):
+    raw = engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps(
+        {"session_id": "u10", "identity": "kim@test.com", "resource_path": "/dev"})}, None)
+t("[UserRisk] 조회 실패는 통과시키지 않고 500(fail-closed)", raw["statusCode"] == 500 and json.loads(raw["body"]).get("error") == "user_risk_unavailable", raw)
+t("[UserRisk] 조회 실패 시 판정 로그(put_item)도 남기지 않음(판단하지 않았으므로)", mock_table.put_item.call_count == 0)
+mock_user_risk.query.side_effect = None
+
+# 8) 쿼리가 key 기반(Query)이고 예약어를 이름 치환으로 쓴다
+mock_user_risk.reset_mock(); mock_user_risk.query.return_value = {"Items": []}
+engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps({"session_id": "u11", "identity": "kim@test.com"})}, None)
+qk = mock_user_risk.query.call_args.kwargs
+t("[UserRisk] Scan이 아니라 identity 키로 Query하고, 예약어는 이름 치환 사용",
+  qk.get("KeyConditionExpression") == "#i = :i" and qk["ExpressionAttributeNames"] == {"#i": "identity"}
+  and mock_user_risk.scan.call_count == 0)

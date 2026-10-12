@@ -12,3 +12,4 @@ account/
 access_worker/wrangler.toml
 app.py
 __pycache__
+risk_admin.zip

@@ -31,7 +31,11 @@ AUTH_DOMAIN=${auth_domain}
 ZT_DEBUG_HEADERS=${debug_headers}
 CF_TEAM_DOMAIN=${cf_team_domain}
 CF_ACCESS_AUDS=${cf_access_auds}
+ADMIN_EMAILS=${admin_emails}
+RISK_ADMIN_FUNCTION=${risk_admin_function}
 ZTENV
+# 해제 폼의 CSRF 토큰 서명 키: 서버가 처음 뜰 때 한 번 만든다(코드/Terraform/저장소에 값이 남지 않음, root 전용 파일)
+echo "CSRF_SECRET=$(openssl rand -hex 32)" >> /etc/ztapp/env
 chown root:root /etc/ztapp/env
 chmod 600 /etc/ztapp/env
 

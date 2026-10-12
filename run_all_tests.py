@@ -19,6 +19,7 @@ TESTS = [
     ("앱 신원확인 (portal_app.py)", "test_portal_b.py"),
     ("판단 서비스 (auth_gate.py)", "test_auth_gate.py"),
     ("로그인 서버 (auth_app.py)", "test_auth_return_url.py"),
+    ("User Risk 관리 (risk_admin.py)", "test_risk_admin.py"),
 ]
 
 env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")

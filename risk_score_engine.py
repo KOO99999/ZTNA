@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
 table = dynamodb.Table('risk_score_log')
 mfa_table = dynamodb.Table('mfa_verified')
+user_risk_table = dynamodb.Table('user_risk')   # 관리자가 풀어줄 때까지 유지되는 누적 위험 상태(mfa_verified와 별개)
 
 # [step-up 재인증] MFA 재인증 기록의 유효 시간. 팀이 정한 값이며 표준에 정해진 수치는
 # 아님(RFC 9470/NIST 800-63B 모두 "얼마나 최근이어야 하는가"의 구체적 숫자는 구현자에게
@@ -166,6 +167,60 @@ FAIL_POLICY = {
     "admin": "fail_closed",
 }
 
+# ==========================================================================
+# [User Risk] 관리자가 풀어줄 때까지 유지되는 누적 위험 상태
+#   - MFA를 통과해도 풀리지 않는 security 신호(resettable=False)가 "인증된 신원"에 걸리면 user_risk에 active로
+#     저장하고, 이후 그 사람의 모든 판단에 같은 신호로 반영한다. 풀어주는 일은 risk_admin.py(전용 Lambda)만 한다.
+#   - mfa_verified(짧은 수명의 "방금 MFA했다" 기록)와는 절대 합치지 않는다. 다른 층이다.
+#   - 저장은 호출자가 persist_risk=true로 알린 경우에만 한다. 로그인 폼 같은 "아직 인증 전" 입력에서 나온 신호를
+#     그 이메일 계정에 저장하면, 남의 이메일을 적어서 그 사람을 잠그는 공격이 가능해지기 때문이다.
+# ==========================================================================
+STICKY_SIGNALS = tuple(
+    name for name, rule in RISK_MATRIX.items()
+    if rule["group"] == "security" and rule.get("resettable") is False
+)
+
+
+def load_active_user_risk(identity):
+    """이 사람에게 걸려 있는 active 신호 이름 목록. 조회 실패는 예외를 그대로 올린다(호출부가 fail-closed)."""
+    resp = user_risk_table.query(
+        KeyConditionExpression="#i = :i",
+        ExpressionAttributeNames={"#i": "identity"},
+        ExpressionAttributeValues={":i": identity},
+    )
+    return [
+        item["signal"] for item in resp.get("Items", [])
+        if item.get("status") == "active" and item.get("signal") in STICKY_SIGNALS
+    ]
+
+
+def persist_user_risk(identity, signals, source, now_ts):
+    """새로 감지된 sticky 신호를 active로 저장. 이미 active면 last_seen만 갱신, 해제됐던 신호가 다시 감지되면 새로 active."""
+    for signal in signals:
+        key = {"identity": identity, "signal": signal}
+        try:
+            user_risk_table.update_item(
+                Key=key,
+                UpdateExpression="SET #st = :active, set_at = :now, last_seen = :now, #src = :src REMOVE released_by, released_at",
+                ConditionExpression="attribute_not_exists(#st) OR #st <> :active",
+                ExpressionAttributeNames={"#st": "status", "#src": "source"},
+                ExpressionAttributeValues={":active": "active", ":now": now_ts, ":src": source},
+            )
+        except Exception as e:
+            code = getattr(e, "response", {}).get("Error", {}).get("Code", "") if hasattr(e, "response") else ""
+            if code == "ConditionalCheckFailedException" or "ConditionalCheckFailed" in str(e):
+                try:
+                    user_risk_table.update_item(
+                        Key=key,
+                        UpdateExpression="SET last_seen = :now",
+                        ExpressionAttributeValues={":now": now_ts},
+                    )
+                except Exception as e2:
+                    print("user_risk last_seen 갱신 실패:", str(e2))
+            else:
+                print("user_risk 저장 실패:", str(e))
+
+
 def lambda_handler(event, context):
     # [보안] 예전에는 여기서 event 전체를 print했는데, event.headers에 x-evaluate-secret(공유비밀키)이
     # 그대로 들어 있어 비밀키가 CloudWatch Logs에 평문으로 남았다. event 원문은 절대 기록하지 않는다.
@@ -239,6 +294,25 @@ def lambda_handler(event, context):
     if geo_country is not None and geo_country != HOME_COUNTRY:
         body["unknown_location"] = True
 
+    # --- User Risk: 이 사람에게 이미 걸려 있는 해제 불가 신호를 읽어 같은 신호로 반영 ---
+    # 조회에 실패하면 걸려 있는지 알 수 없으므로 통과시키지 않는다(fail-closed, 500 -> 호출자는 차단 처리).
+    risk_identity = body.get("identity")
+    has_identity = bool(risk_identity) and risk_identity != "unknown"
+    detected_sticky = [s for s in STICKY_SIGNALS if body.get(s)]
+    stored_sticky = []
+    if has_identity:
+        try:
+            stored_sticky = load_active_user_risk(risk_identity)
+        except Exception as e:
+            print("user_risk 조회 실패(fail-closed):", str(e))
+            return {
+                "statusCode": 500,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"error": "user_risk_unavailable"})
+            }
+        for signal in stored_sticky:
+            body[signal] = True
+
     risk_score = 0             # 0(완전 안전)에서 시작, 위험할수록 더함. 상한 없음
     reasons = []
     penalized_signals = []     # 실제로 위험도가 반영된 신호만 (조합규칙 판단용)
@@ -257,6 +331,8 @@ def lambda_handler(event, context):
             risk_score += rule["risk"]
             reasons.append(f"{factor} (+{rule['risk']})")
             penalized_signals.append(factor)
+            if factor in stored_sticky and factor not in detected_sticky:
+                reasons.append(f"user_risk_active:{factor}")
 
     # 2. 조합 규칙 가산 — 실제로 위험도가 반영된 신호끼리만 적용 (리셋된 신호는 조합에서도 제외)
     for signals, bonus, label in COMBINATION_RULES:
@@ -320,6 +396,10 @@ def lambda_handler(event, context):
         action = "allow" if allow_access else "block"
 
     cache_ttl_seconds = compute_cache_ttl(resource_tier, allow_access, current_time, mfa_expires_at)
+
+    # 새로 감지된 해제 불가 신호는 (인증된 신원이고 호출자가 허용한 경우에만) User Risk에 남긴다.
+    if has_identity and detected_sticky and body.get("persist_risk") is True:
+        persist_user_risk(risk_identity, detected_sticky, body.get("source", "A"), current_time)
 
     try:
         table.put_item(

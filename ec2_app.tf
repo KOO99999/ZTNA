@@ -10,7 +10,7 @@ resource "aws_instance" "app_server" {
   ami                  = data.aws_ami.ubuntu.id
   instance_type        = "t3.micro"
   subnet_id            = aws_subnet.app_subnet.id
-  iam_instance_profile = aws_iam_instance_profile.ec2_profile.name
+  iam_instance_profile = aws_iam_instance_profile.app_profile.name
 
   vpc_security_group_ids = [aws_security_group.app_sg.id]
 
@@ -22,6 +22,10 @@ resource "aws_instance" "app_server" {
 
     auth_domain   = local.auth_domain
     debug_headers = var.debug_headers_route ? "1" : "0"
+
+    # [관리자 콘솔] 관리자 이메일(앱에서 한 번 더 확인)과 위험 상태 해제 Lambda 이름. 앱은 이 함수를 AWS 권한으로 직접 호출한다.
+    admin_emails        = join(",", [for e in var.admin_allowed_emails : lower(e)])
+    risk_admin_function = aws_lambda_function.risk_admin.function_name
 
     # [JWT 서명 검증] portal_app.py가 Cf-Access-Jwt-Assertion의 서명/발급자/aud/만료를 검증함.
     # aud는 이 서버로 요청을 보내는 Access 앱 6개의 AUD 태그(쉼표 구분). 앱이 재생성되어 AUD가

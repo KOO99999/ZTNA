@@ -115,10 +115,10 @@ resource "aws_dynamodb_table" "mfa_verified" {
 }
 
 # ==========================================
-# 2. AWS IAM Role (EC2: 감사 로그 테이블 읽기만)
-#    예전에는 AmazonDynamoDBFullAccess(모든 테이블에 모든 작업)를 붙였으나, EC2 3대 중 DynamoDB를 쓰는 곳은
-#    portal_app.py의 감사 로그 조회(risk_score_log Scan) 하나뿐이라 그 작업만 허용한다.
-#    (Lambda 판단 엔진은 별도 역할을 쓴다 - 아래 3번)
+# 2. AWS IAM Role (EC2 공용: Session Manager 접속만)
+#    예전에는 AmazonDynamoDBFullAccess(모든 테이블에 모든 작업)를 붙였다. 지금은 DynamoDB 권한이 전혀 없고,
+#    관리자 콘솔을 돌리는 app 서버만 별도 역할(risk_admin.tf)로 필요한 작업만 갖는다.
+#    (Lambda 판단 엔진은 또 다른 역할을 쓴다 - 아래 3번)
 # ==========================================
 resource "aws_iam_role" "ec2_role" {
   name_prefix = "zt-ec2-role-"
@@ -137,20 +137,8 @@ resource "aws_iam_role" "ec2_role" {
   }
 }
 
-resource "aws_iam_role_policy" "ec2_dynamodb_audit_read" {
-  name = "zt-ec2-audit-log-read"
-  role = aws_iam_role.ec2_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Sid      = "ReadAuditLogOnly"
-      Effect   = "Allow"
-      Action   = ["dynamodb:Scan"]
-      Resource = [aws_dynamodb_table.risk_score_log.arn]
-    }]
-  })
-}
+# [참고] 감사 로그 조회(risk_score_log Scan)는 관리자 콘솔을 돌리는 app 서버 전용 역할(risk_admin.tf의 app_role)로 옮겼다.
+#   이 공용 역할은 web/auth/app가 함께 쓰므로 SSM(아래)만 갖는다 - web/auth 서버는 DynamoDB 권한이 필요 없다.
 
 # EC2를 AWS 콘솔의 Session Manager로 SSH 없이 접속하기 위한 권한
 # (부팅 스크립트 실패 원인 확인 등, 문제 해결 목적으로 추가)
@@ -196,6 +184,7 @@ resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
 # Lambda 판단 엔진이 실제로 쓰는 DynamoDB 작업만 허용한다 (예전에는 AmazonDynamoDBFullAccess).
 #   risk_score_log : 판정 결과 기록(PutItem)
 #   mfa_verified   : step-up 재인증 기록 저장(PutItem)과 조회(GetItem)
+#   user_risk      : 사용자별 위험 상태 조회(Query)와 기록/갱신(UpdateItem). 해제(관리자)는 risk_admin Lambda만 한다.
 resource "aws_iam_role_policy" "lambda_dynamodb" {
   name = "zt-lambda-dynamodb-minimal"
   role = aws_iam_role.lambda_role.id
@@ -214,6 +203,12 @@ resource "aws_iam_role_policy" "lambda_dynamodb" {
         Effect   = "Allow"
         Action   = ["dynamodb:PutItem", "dynamodb:GetItem"]
         Resource = [aws_dynamodb_table.mfa_verified.arn]
+      },
+      {
+        Sid      = "UserRiskReadAndFlag"
+        Effect   = "Allow"
+        Action   = ["dynamodb:Query", "dynamodb:UpdateItem"]
+        Resource = [aws_dynamodb_table.user_risk.arn]
       }
     ]
   })

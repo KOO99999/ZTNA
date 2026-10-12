@@ -1,9 +1,9 @@
-"""위험도 확인 (Lambda PDP 호출 + 결과 캐시). 판단 서비스(auth_gate.py)가 쓰고,
-nginx 전환이 끝나기 전까지는 앱(portal_app.py)도 쓴다.
+"""위험도 확인 (Lambda PDP 호출 + 결과 캐시). nginx 앞단 판단 서비스(auth_gate.py)만 쓴다
+(앱 서버에는 이 모듈도, Lambda 비밀키도 배포하지 않는다).
 
 환경변수: PDP_EVALUATE_URL, EVALUATE_SHARED_SECRET
 """
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import os
 import threading
 import time
@@ -28,38 +28,16 @@ PDP_EVALUATE_URL = os.environ.get("PDP_EVALUATE_URL")
 EVALUATE_SHARED_SECRET = os.environ.get("EVALUATE_SHARED_SECRET")
 PDP_TIMEOUT_SECONDS = 3
 
-# 등급별 캐시 시간(초). 팀이 정한 값이며 표준에 근거가 있는 숫자가 아니다. 키는 Lambda가
-# 응답으로 돌려주는 resource_tier 이름이고, 0이면 캐시하지 않고 매 요청마다 Lambda에 묻는다.
-# Lambda가 알려주는 등급 이름을 쓰므로 이 앱은 경로별 임계값/등급 표를 따로 갖지 않는다.
-# 등급을 모르는 경우(None)도 캐시하지 않는다.
-CACHE_TTL_SECONDS = {
-    "top_secret": 0,       # 관리자 콘솔, 감사 로그 API: 매 요청 검사
-    "confidential": 90,    # 인사, 개발
-    "internal": 300,       # 마케팅, 포털 공통
-}
-
-# 야간 접속 판정 기준(KST 22시~06시). risk_score_engine.py의 night_access 판정과 같은 값이어야
-# 하며, 거기서 바꾸면 여기도 같이 바꿔야 한다. 캐시가 이 경계를 넘어 살아있으면, 21:58에 받은
-# "통과"가 22:00 이후에도 쓰이는 빈틈이 생기므로 캐시 만료를 이 경계에서 끊는다.
-NIGHT_START_HOUR_KST = 22
-NIGHT_END_HOUR_KST = 6
-KST = timezone(timedelta(hours=9))
+# [캐시 유효기간] 허용 결과를 몇 초 재사용할지는 Lambda(PDP)가 정해서 응답의 cache_ttl_seconds로
+# 알려준다(등급별 시간, 야간 경계, 재인증 유효 시간까지 Lambda가 계산). 이 모듈은 그 값을 그대로
+# 따르고 등급표도 야간 기준도 갖지 않는다. 값이 없거나 이상하면 캐시하지 않는다(안전한 쪽).
+# MAX_CACHE_TTL_SECONDS는 정책이 아니라 안전 상한이다: Lambda 설정 실수로 아주 큰 값이 와도
+# Access 세션 길이(15분)를 넘겨 '통과'를 재사용하지 않도록 막는다.
+MAX_CACHE_TTL_SECONDS = 900
 
 _cache = {}
 _cache_lock = threading.Lock()
 _CACHE_MAX_ENTRIES = 1000
-
-
-def seconds_until_night_boundary(now_utc):
-    """지금부터 다음 야간 경계(KST 06:00 또는 22:00)까지 남은 초."""
-    now_kst = now_utc.astimezone(KST)
-    boundaries = []
-    for hour in (NIGHT_END_HOUR_KST, NIGHT_START_HOUR_KST):
-        boundary = now_kst.replace(hour=hour, minute=0, second=0, microsecond=0)
-        if boundary <= now_kst:
-            boundary += timedelta(days=1)
-        boundaries.append(boundary)
-    return (min(boundaries) - now_kst).total_seconds()
 
 
 def _call_pdp(identity, country, resource_path):
@@ -94,6 +72,7 @@ def _call_pdp(identity, country, resource_path):
             "score": data.get("score"),
             "resource_threshold": data.get("resource_threshold"),
             "resource_tier": data.get("resource_tier"),
+            "cache_ttl_seconds": data.get("cache_ttl_seconds"),
             "error": False,
         }
     except Exception as e:
@@ -108,7 +87,7 @@ def check_risk(identity, country, resource_path):
       1) 허용 결과만 저장한다. 차단/step-up 필요 결과를 저장하면 /stepup에서 재인증을
          마치고 돌아와도 옛 결과가 남아 계속 막힌다.
       2) 같은 사용자라도 국가가 직전과 다르면 캐시를 버리고 즉시 다시 묻는다.
-      3) 만료는 min(등급별 캐시 시간, 다음 야간 경계까지 남은 시간).
+      3) 만료 시간은 Lambda가 응답에 실어 보낸 cache_ttl_seconds(0이면 저장 안 함).
     """
     now = time.time()
     key = (identity, resource_path)
@@ -124,16 +103,18 @@ def check_risk(identity, country, resource_path):
     result["from_cache"] = False
 
     if result["allow"] and not result["error"]:
-        ttl = CACHE_TTL_SECONDS.get(result.get("resource_tier"), 0)
+        ttl = result.get("cache_ttl_seconds")
+        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)):
+            ttl = 0
+        ttl = min(ttl, MAX_CACHE_TTL_SECONDS)
         if ttl > 0:
-            until_boundary = seconds_until_night_boundary(datetime.fromtimestamp(now, timezone.utc))
             with _cache_lock:
                 if len(_cache) >= _CACHE_MAX_ENTRIES:
                     for k in [k for k, v in _cache.items() if v["expires_at"] <= now]:
                         del _cache[k]
                 if len(_cache) < _CACHE_MAX_ENTRIES:
                     _cache[key] = {
-                        "expires_at": now + min(ttl, until_boundary),
+                        "expires_at": now + ttl,
                         "country": country,
                         "result": {k: v for k, v in result.items() if k != "from_cache"},
                     }

@@ -1,8 +1,10 @@
 """
-세 테스트(test_risk_score.py, test_portal_b.py, test_auth_gate.py)를 한 번에 돌리고, 긴 출력 대신
+다섯 테스트(test_risk_score.py, test_zt_risk.py, test_portal_b.py, test_auth_gate.py, test_auth_return_url.py)를 한 번에 돌리고, 긴 출력 대신
 PASS/FAIL 개수만 표로 보여주는 요약 스크립트. 화면 한 장으로 캡처할 수 있게 만든 것.
 
 사용법 (프로젝트 폴더에서): python run_all_tests.py
+  로그인 서버 테스트의 2부(/stepup, /token 흐름)는 pip install flask-sqlalchemy pymysql pyotp 가 있어야 실행됨
+  (없으면 1부만 실행하고 건너뛴 것으로 표시). Worker(index.js) 테스트는 node가 필요해 별도: node tests_js/test_worker.mjs
 FAIL이 하나라도 있으면 그 항목 이름을 아래에 따로 보여주고, 종료 코드 1로 끝난다.
 """
 import os
@@ -13,8 +15,10 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 TESTS = [
     ("엔진 (risk_score_engine.py)", "test_risk_score.py"),
-    ("B 계층 (portal_app.py)", "test_portal_b.py"),
+    ("위험도 확인 (zt_risk.py)", "test_zt_risk.py"),
+    ("앱 신원확인 (portal_app.py)", "test_portal_b.py"),
     ("판단 서비스 (auth_gate.py)", "test_auth_gate.py"),
+    ("로그인 서버 (auth_app.py)", "test_auth_return_url.py"),
 ]
 
 env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")

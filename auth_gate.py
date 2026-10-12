@@ -2,7 +2,8 @@
 
 nginx와 같은 서버에서 127.0.0.1로만 받는다. nginx는 이 서비스의 답(상태 코드)만 따른다.
   /auth    : JWT 서명 검증(zt_jwt) -> 위험도 확인(zt_risk) -> 200(통과) 또는 403(차단)
-             차단 이유는 응답 헤더 X-ZT-Action으로 알려주고, 어떤 오류든 통과(200)는 되지 않는다.
+             통과하면 X-ZT-Identity/X-ZT-Threshold/X-ZT-Tier(화면 표시용)를 응답 헤더로 알려주고,
+             차단 이유는 X-ZT-Action으로 알려준다. 어떤 오류든 통과(200)는 되지 않는다.
   /deny    : nginx가 차단 응답을 만들 때 부르는 곳(재인증 안내 리다이렉트, 차단/오류 화면)
   /healthz : 살아있는지 확인용
 
@@ -50,7 +51,15 @@ def auth():
     # 2) 위험도: 같은 Lambda(PDP)에 묻는다. 호출 실패/비정상 응답은 zt_risk가 차단으로 돌려준다.
     result = check_risk(identity, request.headers.get("CF-IPCountry"), resource_path_for(host, path))
     if result["allow"]:
-        return Response("ok", 200, {"X-ZT-Identity": identity})
+        # 앱은 위험도를 다시 묻지 않는다. 화면에 보여줄 "이 요청에 적용된 임계값"만 여기서 받아 간다
+        # (nginx가 auth_request_set으로 꺼내 앱에 넘기며, 항상 이 값으로 덮어써서 클라이언트가 보낸
+        # 같은 이름의 헤더는 앱에 닿지 않는다).
+        headers = {"X-ZT-Identity": identity}
+        if isinstance(result.get("resource_threshold"), (int, float)) and not isinstance(result.get("resource_threshold"), bool):
+            headers["X-ZT-Threshold"] = str(int(result["resource_threshold"]))
+        if isinstance(result.get("resource_tier"), str):
+            headers["X-ZT-Tier"] = result["resource_tier"]
+        return Response("ok", 200, headers)
 
     action = "pdp_unavailable" if result.get("error") else result.get("action", "denied")
     print(f"[ZT_DENY] action={action} identity={identity} host={host} path={path}", flush=True)

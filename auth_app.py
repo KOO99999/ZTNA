@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 import requests
 import re
+from html import escape
 from urllib.parse import urlparse
 
 app = Flask(__name__)
@@ -37,6 +38,10 @@ class Account(db.Model):
     totp_secret = db.Column(db.String(64), nullable=True)
     totp_enabled = db.Column(db.Boolean, default=False, nullable=False)
     role = db.Column(db.String(32), default='employee', nullable=False)
+    # 소속 부서(dev / marketing / hr / admin). 토큰의 department 클레임과 "접근 권한 없음" 안내 화면에 쓴다.
+    # 기존 DB에는 이 컬럼이 없다(db.create_all()은 이미 있는 테이블에 컬럼을 추가해 주지 않음).
+    # 아래 ensure_department_schema()가 서버 시작 때 자동으로 추가한다.
+    department = db.Column(db.String(32), nullable=True)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
 
@@ -61,6 +66,65 @@ class LoginFailure(db.Model):
 
 with app.app_context():
     db.create_all()
+
+
+# ==========================================================================
+# [자동 마이그레이션] 서버가 켜질 때 accounts.department 컬럼을 보장하고 소속을 채운다.
+#
+# 왜: db.create_all()은 "없는 테이블"만 만들고 이미 있는 테이블에 컬럼을 추가해 주지 않는다.
+#     옛 DB에 새 코드가 붙으면 없는 컬럼을 SELECT해서 로그인 서버 전체가 오류가 난다.
+# 무엇을:
+#   1) department 컬럼이 없으면 ALTER TABLE로 추가한다(NULL 허용, 있으면 아무것도 안 함).
+#   2) ACCOUNT_DEPARTMENTS 환경변수("이메일=소속;이메일=소속", Terraform main.tf의 이메일 목록에서 생성)에
+#      적힌 계정만 소속을 맞춘다. 목록에 없는 계정은 건드리지 않는다.
+# 따로 빼는 법: AUTO_MIGRATE_SCHEMA=0 으로 끄거나(환경변수), 이 블록(ensure_department_schema와
+#      아래 호출 두 줄)을 지우고 account/migrate_department.py를 손으로 돌리면 된다.
+# ==========================================================================
+def _parse_account_departments(raw):
+    """'a@x=dev;b@x=hr' -> {'a@x': 'dev', 'b@x': 'hr'}. 형식이 이상한 항목은 건너뛴다."""
+    result = {}
+    for item in (raw or '').split(';'):
+        email, sep, dept = item.strip().partition('=')
+        email, dept = email.strip().lower(), dept.strip()
+        if sep and email and dept:
+            result[email] = dept[:32]
+    return result
+
+
+def ensure_department_schema():
+    if os.environ.get('AUTO_MIGRATE_SCHEMA', '1') != '1':
+        return
+    from sqlalchemy import inspect, text
+
+    if 'department' not in [c['name'] for c in inspect(db.engine).get_columns('accounts')]:
+        try:
+            db.session.execute(text('ALTER TABLE accounts ADD COLUMN department VARCHAR(32) NULL'))
+            db.session.commit()
+            print('[MIGRATE] accounts.department 컬럼 추가', flush=True)
+        except Exception as e:
+            db.session.rollback()
+            # 워커가 여러 개면 다른 쪽이 먼저 추가했을 수 있다. 그래도 없으면 진짜 오류이므로 그대로 올린다.
+            if 'department' not in [c['name'] for c in inspect(db.engine).get_columns('accounts')]:
+                raise
+            print(f'[MIGRATE] 컬럼은 다른 프로세스가 이미 추가함: {e}', flush=True)
+
+    try:
+        changed = 0
+        for email, dept in _parse_account_departments(os.environ.get('ACCOUNT_DEPARTMENTS')).items():
+            account = Account.query.filter_by(email=email).first()
+            if account and account.department != dept:
+                print(f'[MIGRATE] {email}: {account.department!r} -> {dept!r}', flush=True)
+                account.department = dept
+                changed += 1
+        db.session.commit()
+        print(f'[MIGRATE] 소속 갱신 {changed}건', flush=True)
+    except Exception as e:
+        db.session.rollback()
+        print(f'[MIGRATE_SYNC_FAILED] {e}', flush=True)
+
+
+with app.app_context():
+    ensure_department_schema()
 
 
 PDP_EVALUATE_URL = os.environ.get('PDP_EVALUATE_URL')
@@ -487,8 +551,9 @@ def render_stepup_success(return_url):
     """
 
 
-# [기능추가] Access의 커스텀 거부 URL 리다이렉트에는 "원래 어디로 가려 했는지"를 담은
-# 신뢰할 만한 값이 실려온다는 근거를 문서로 확인하지 못해서, 그 대신 브라우저가 이
+# [기능추가] Access의 커스텀 거부 URL 리다이렉트에는 ?original_url=(원래 가려던 주소)가
+# 실려오는 것이 실제로 관찰됐지만 Cloudflare 문서에는 정의돼 있지 않다. 그래서 이 값은 규격이
+# 아니라 "관찰된 동작"으로만 쓰고(_original_url_candidate), 없으면 브라우저가 이
 # 페이지로 넘어오기 직전 있었던 곳(Referer 헤더)을 근거로 추정한다. 확실한 값은 아니라서
 # 우리가 아는 앱 도메인(admin 서브도메인)에 해당할 때만 그리로 보내고, 그 외에는 항상
 # 안전한 기본값(포털 홈)으로 보낸다.
@@ -515,6 +580,103 @@ def _safe_return_url(candidate):
     return candidate
 
 
+def _original_url_candidate(raw):
+    """Access가 커스텀 거부 URL로 보낼 때 붙여주는 ?original_url=xmcda.store/dev 를 읽는다.
+    실제 리다이렉트 URL에서 관찰한 값이며 Cloudflare 문서에는 정의돼 있지 않다(그래서 규격으로
+    믿지 않고, 없거나 이상하면 아래 Referer/기본값으로 그대로 넘어간다). 관찰된 값에는
+    https://가 없으므로 붙여 주되, 최종 통과 여부는 반드시 _safe_return_url(우리 도메인
+    allowlist, https만, 포트/계정정보/위험문자 거부)이 결정한다."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    if '://' not in raw:
+        raw = 'https://' + raw
+    return _safe_return_url(raw)
+
+
+# [접근 권한 안내] Cloudflare Access가 "소속이 달라서" 막은 경우와 "위험도 때문에 추가 인증이 필요해서"
+# 막은 경우 모두 이 서버의 /stepup으로 보낸다(자원 하나에 거부 주소를 하나만 쓸 수 있음). 둘을 구분하지 않으면
+# 권한이 없는 사람에게 TOTP를 묻고, 인증해도 같은 곳에서 또 막히는 헛걸음이 생긴다. 그래서 /stepup이
+# "이 사람의 소속(DB)이 가려던 자원의 허용 소속(Terraform이 환경변수로 넘긴 표)에 드는지"를 먼저 본다.
+#
+# 이 표는 안내 화면을 고르는 용도일 뿐 접근을 허용하지 않는다. 실제 허용/차단은 Cloudflare Access 정책과
+# nginx 앞단 판단 서비스가 하므로, 표가 없거나 틀려도 권한이 새지 않는다(최악의 경우 안내 화면이 달라질 뿐).
+# 형식: "경로=소속,소속;경로=소속" (예: /dev=dev;/hr=hr;admin=admin). admin 서브도메인은 키가 admin.
+def _parse_path_permissions(raw):
+    perms = {}
+    for item in (raw or '').split(';'):
+        key, sep, depts = item.strip().partition('=')
+        if not sep or not key.strip():
+            continue
+        perms[key.strip()] = [d.strip() for d in depts.split(',') if d.strip()]
+    return perms
+
+
+PATH_PERMISSIONS = _parse_path_permissions(os.environ.get('PATH_PERMISSIONS'))
+
+
+def _resource_key(url):
+    """복귀 주소가 어느 자원인지: admin 서브도메인이면 'admin', 아니면 첫 경로 조각('/dev', '/hr' ...), 홈은 '/'."""
+    parsed = urlparse(url)
+    if (parsed.hostname or '').startswith('admin.'):
+        return 'admin'
+    segments = [seg for seg in parsed.path.split('/') if seg]
+    return '/' + segments[0] if segments else '/'
+
+
+def check_department_access(department, url):
+    """True=소속이 허용 목록에 있음, False=없음, None=이 자원은 권한표에 없어서 판단 불가(기존 흐름대로 진행)."""
+    allowed = PATH_PERMISSIONS.get(_resource_key(url))
+    if allowed is None:
+        return None
+    return (department or '') in allowed
+
+
+def render_no_permission(email, department, url):
+    portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
+    needed = ', '.join(PATH_PERMISSIONS.get(_resource_key(url), [])) or '-'
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>접근 권한 없음 - ZT Login Server</title>
+        <style>
+            body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
+            .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 440px; margin: 60px auto; }}
+            a.btn {{ display: inline-block; margin: 6px 8px 0 0; padding: 10px 16px; border-radius: 6px; background: #007bff; color: white; text-decoration: none; font-weight: bold; }}
+            a.sub {{ background: #6c757d; }}
+            dt {{ color: #777; font-size: 0.85em; margin-top: 10px; }}
+            dd {{ margin: 2px 0 0 0; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h2>접근 권한이 없습니다</h2>
+            <p style="font-size:0.9em; color:#555;">이 계정의 소속으로는 요청한 페이지를 열 수 없습니다. 추가 인증으로 해결되는 문제가 아닙니다.</p>
+            <dl>
+                <dt>로그인한 계정</dt><dd>{escape(email)}</dd>
+                <dt>계정의 소속</dt><dd>{escape(department or '(지정되지 않음)')}</dd>
+                <dt>이 페이지를 열 수 있는 소속</dt><dd>{escape(needed)}</dd>
+            </dl>
+            <p style="font-size:0.9em; color:#555;">권한이 필요하면 관리자에게 소속 변경을 요청하세요.</p>
+            <a class="btn" href="https://{escape(portal_domain)}/">포털 홈으로</a>
+            <a class="btn sub" href="/logout">다른 계정으로 로그인</a>
+        </div>
+    </body>
+    </html>
+    """
+
+
+def _no_permission_response(account, email, return_url):
+    """소속이 이 자원의 허용 목록에 없으면 403 안내 화면을, 아니면 None을 돌려준다."""
+    department = account.department if account else None
+    if check_department_access(department, return_url) is False:
+        print(f"[STEPUP_NO_PERMISSION] identity={email} department={department or '-'} resource={_resource_key(return_url)}", flush=True)
+        return render_no_permission(email, department, return_url), 403
+    return None
+
+
 def _resolve_return_url():
     portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
     # [B 계층 추가] portal_app.py가 세션 중 재확인에서 step-up이 필요하다고 판단하면
@@ -523,6 +685,11 @@ def _resolve_return_url():
     explicit = _safe_return_url(request.args.get('return_url'))
     if explicit:
         return explicit
+    # [수정] Access 거부 리다이렉트의 ?original_url= 로 "원래 가려던 주소"를 복원한다.
+    # (기존에는 이 값을 읽지 않아 /dev에서 거부돼도 인증 후 항상 홈으로 갔음)
+    from_access = _original_url_candidate(request.args.get('original_url'))
+    if from_access:
+        return from_access
     referrer = request.referrer or ''
     # [확대] admin 서브도메인만 알아보던 걸, custom_deny_url을 새로 붙인 5개 앱
     # (portal/dev/marketing/hr/admin_console) 전부 인식하도록 확장. admin_api는
@@ -544,6 +711,10 @@ def stepup():
         return """
         <p>로그인이 필요합니다. <a href="https://xmcda.store">포털에서 다시 로그인해주세요</a>.</p>
         """
+    # 소속이 달라서 막힌 경우에는 TOTP를 묻지 않고 "권한 없음"을 알려준다(인증해도 해결되지 않으므로)
+    denied = _no_permission_response(Account.query.filter_by(email=email).first(), email, return_url)
+    if denied:
+        return denied
     if check_brute_force(email):
         return render_stepup_form(return_url, error=f"시도 횟수를 초과했습니다. {BRUTE_FORCE_LOCKOUT_MINUTES}분 후 다시 시도해주세요.", locked=True)
     return render_stepup_form(return_url)
@@ -559,12 +730,17 @@ def stepup_verify():
         <p>로그인이 필요합니다. <a href="https://xmcda.store">포털에서 다시 로그인해주세요</a>.</p>
         """
 
+    account = Account.query.filter_by(email=email).first()
+    # 폼을 직접 POST해도 소속이 맞지 않으면 TOTP 확인 자체를 하지 않는다
+    denied = _no_permission_response(account, email, return_url)
+    if denied:
+        return denied
+
     if check_brute_force(email):
         return render_stepup_form(return_url, error=f"시도 횟수를 초과했습니다. {BRUTE_FORCE_LOCKOUT_MINUTES}분 후 다시 시도해주세요.", locked=True)
 
     totp_input = request.form.get('totp_code', '').strip()
     client_ip = request.headers.get('CF-Connecting-IP', request.remote_addr)
-    account = Account.query.filter_by(email=email).first()
 
     totp_ok = False
     if account and account.totp_secret and pyotp.TOTP(account.totp_secret).verify(totp_input, valid_window=1):
@@ -620,6 +796,7 @@ def token():
         "sub": account.email,
         "email": account.email,
         "role": account.role,
+        "department": account.department or "",
         "iat": now,
         "exp": now + 3600,
     }
@@ -658,6 +835,7 @@ def userinfo():
         "sub": account.email,
         "email": account.email,
         "role": account.role,
+        "department": account.department or "",
     })
 
 

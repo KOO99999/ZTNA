@@ -3,7 +3,7 @@ import os
 import time
 import uuid
 import boto3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
 table = dynamodb.Table('risk_score_log')
@@ -61,6 +61,10 @@ COMBINATION_RULES = [
 #   "/hr과 /dev는 같은 기밀 등급"이 코드에 그대로 드러나고, 기준을 바꿀 땐 등급 숫자 하나만 고치면 됨.
 #   등급 분류는 "자원이 흔히 다루는 데이터 종류에 대한 가정"(개인정보, 소스코드/서버 접근 = 기밀)에
 #   따른 팀 판단이며 실제 데이터 분류 체계에 근거한 것이 아님 - 숫자(20/40/60)와 함께 보고서에 명시할 것.
+# 야간 접속 판정 기준(KST 22시~06시). night_access 판정과 아래 캐시 만료 계산이 같은 값을 쓴다.
+NIGHT_START_HOUR_KST = 22
+NIGHT_END_HOUR_KST = 6
+
 TIER_THRESHOLDS = {
     "top_secret": 20,    # 최고기밀: 관리자 콘솔, 감사 로그 API
     "confidential": 40,  # 기밀: 인사(개인정보), 개발(소스코드/서버 접근)
@@ -109,6 +113,47 @@ def get_resource_threshold(resource_path):
     tier = get_resource_tier(resource_path)
     return TIER_THRESHOLDS[tier] if tier else DEFAULT_THRESHOLD
 
+# [캐시 유효기간] "통과" 판정을 호출한 쪽(nginx 앞단 판단 서비스, zt_risk.py)이 몇 초 동안 다시
+# 묻지 않고 재사용해도 되는지를 PDP(여기)가 정해서 응답(cache_ttl_seconds)에 실어 보낸다.
+# 호출한 쪽은 이 값을 그대로 따르고 자기만의 등급표를 갖지 않는다 - 판정 기준과 같은 곳에서
+# 관리하면 등급을 바꿀 때 한 군데만 고치면 된다. 숫자는 팀이 정한 값이며 표준에 근거가 있는 것이
+# 아니다. 0이면 캐시하지 않고 매 요청마다 묻는다. 등급을 모르는 자원도 0(캐시 안 함).
+TIER_CACHE_TTL_SECONDS = {
+    "top_secret": 0,       # 관리자 콘솔, 감사 로그 API: 매 요청 검사
+    "confidential": 90,    # 인사, 개발
+    "internal": 300,       # 마케팅, 포털 공통
+}
+
+
+def seconds_until_night_boundary(now_ts):
+    """지금(epoch 초)부터 다음 야간 경계(KST 06:00 또는 22:00)까지 남은 초.
+    캐시가 이 경계를 넘어 살아 있으면 21:58에 받은 '통과'가 22:00 이후(야간)에도 쓰이는 빈틈이 생긴다."""
+    kst = timezone(timedelta(hours=9))
+    now_kst = datetime.fromtimestamp(now_ts, timezone.utc).astimezone(kst)
+    boundaries = []
+    for hour in (NIGHT_END_HOUR_KST, NIGHT_START_HOUR_KST):
+        boundary = now_kst.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if boundary <= now_kst:
+            boundary += timedelta(days=1)
+        boundaries.append(boundary)
+    return (min(boundaries) - now_kst).total_seconds()
+
+
+def compute_cache_ttl(tier, allow_access, now_ts, mfa_expires_at=None):
+    """허용 판정을 몇 초간 재사용해도 되는지(초). 허용이 아니면 0.
+    min(등급별 캐시 시간, 다음 야간 경계까지 남은 시간, 재인증(MFA) 유효 시간이 남은 만큼)."""
+    if not allow_access:
+        return 0
+    ttl = TIER_CACHE_TTL_SECONDS.get(tier, 0)
+    if ttl <= 0:
+        return 0
+    ttl = min(ttl, seconds_until_night_boundary(now_ts))
+    if mfa_expires_at is not None:
+        # step-up 재인증 덕에 통과한 경우, 그 재인증 기록이 만료된 뒤까지 통과가 재사용되면 안 됨
+        ttl = min(ttl, mfa_expires_at - now_ts)
+    return max(0, int(ttl))
+
+
 # 장애 시 정책 참고표 (Lambda/DynamoDB에 닿지 못해 판단 자체를 할 수 없을 때).
 # [현재 동작] 전부 차단(fail_closed). Worker(A 계층, index.js)와 portal_app.py(B 계층) 모두
 # 자원 등급과 무관하게, 판단을 못 하면 접근을 막는다. 이 표는 코드가 읽어서 쓰는 값이 아니라
@@ -122,7 +167,9 @@ FAIL_POLICY = {
 }
 
 def lambda_handler(event, context):
-    print("Received event:", json.dumps(event))
+    # [보안] 예전에는 여기서 event 전체를 print했는데, event.headers에 x-evaluate-secret(공유비밀키)이
+    # 그대로 들어 있어 비밀키가 CloudWatch Logs에 평문으로 남았다. event 원문은 절대 기록하지 않는다.
+    # (판정 결과는 아래에서 DynamoDB와 [SOC_ALERT] 한 줄 로그로 남기며, 거기에는 비밀키가 없다.)
 
     # API Gateway(HTTP API v2)는 헤더 키를 소문자로 정규화해서 넘겨줌
     headers = event.get("headers", {}) or {}
@@ -180,7 +227,7 @@ def lambda_handler(event, context):
         try:
             dt_utc = datetime.fromisoformat(request_timestamp.replace("Z", "+00:00"))
             kst_hour = (dt_utc + timedelta(hours=9)).hour
-            if kst_hour >= 22 or kst_hour < 6:
+            if kst_hour >= NIGHT_START_HOUR_KST or kst_hour < NIGHT_END_HOUR_KST:
                 body["night_access"] = True
         except Exception as e:
             print("night_access 판정 중 시각 파싱 오류:", str(e))
@@ -239,6 +286,8 @@ def lambda_handler(event, context):
     resource_threshold = get_resource_threshold(resource_path)
     resource_tier = get_resource_tier(resource_path)
 
+    mfa_expires_at = None      # step-up 재인증 기록으로 통과한 경우에만 채움 (캐시 유효기간 계산용)
+
     # 4. 보안 위험이 걸린 세션은 MFA 재인증 전까지 무조건 차단
     if security_penalty_applied and not security_mfa_passed:
         allow_access = False
@@ -258,6 +307,7 @@ def lambda_handler(event, context):
                 print("mfa_verified 조회 실패:", str(e))
 
         if mfa_fresh:
+            mfa_expires_at = int(mfa_item.get("expires_at"))   # DynamoDB는 숫자를 Decimal로 돌려줌
             allow_access = True
             action = "step_up_mfa_verified"
             reasons.append("recent_mfa_reauth_verified")
@@ -268,6 +318,8 @@ def lambda_handler(event, context):
     else:
         allow_access = (risk_score <= resource_threshold)
         action = "allow" if allow_access else "block"
+
+    cache_ttl_seconds = compute_cache_ttl(resource_tier, allow_access, current_time, mfa_expires_at)
 
     try:
         table.put_item(
@@ -300,6 +352,7 @@ def lambda_handler(event, context):
             "session_id": session_id,
             "resource_path": resource_path,
             "resource_threshold": resource_threshold,
-            "resource_tier": resource_tier
+            "resource_tier": resource_tier,
+            "cache_ttl_seconds": cache_ttl_seconds
         })
     }

@@ -2,7 +2,8 @@
 # 11. Portal 티어 EC2 — Flask (포털/부서 페이지/관리자 콘솔)
 #    로그인 로직은 auth_server(ec2_auth.tf)로 분리됨 - 이 서버는 DB 연결이 필요 없음
 #    [JWT 검증] Cloudflare Access 서명 토큰 검증용 팀 도메인/AUD를 환경변수로 받음
-#    [B 계층] 세션 중 위험도 재확인을 위해 Lambda(PDP) 호출용 URL/비밀키를 환경변수로 받음
+#    위험도 판단(Lambda 호출)은 web 서버 앞단(nginx auth_request -> auth_gate.py)이 하므로, 이 서버는
+#    Lambda 주소도 공유비밀키도 받지 않는다(침해돼도 비밀키가 나가지 않게)
 #    코드는 portal_app.py 외부 파일에서 관리, main.tf/compute.tf는 참조만 함
 # ==========================================
 resource "aws_instance" "app_server" {
@@ -17,15 +18,10 @@ resource "aws_instance" "app_server" {
 
   user_data_base64 = base64gzip(templatefile("${path.module}/templates/user_data_app.sh.tpl", {
     app_code    = file("${path.module}/portal_app.py")
-    zt_jwt_code  = file("${path.module}/zt_jwt.py")
-    zt_risk_code = file("${path.module}/zt_risk.py")
+    zt_jwt_code = file("${path.module}/zt_jwt.py")
 
-    # [B 계층] portal_app.py가 세션 중 위험도 재확인을 위해 Lambda(PDP)를 직접 호출함.
-    # auth_server(ec2_auth.tf)에 넘기는 값과 동일한 방식/동일한 값.
-    pdp_evaluate_url       = "${aws_apigatewayv2_stage.pdp_stage.invoke_url}evaluate"
-    evaluate_shared_secret = var.evaluate_shared_secret
-    auth_domain            = local.auth_domain
-    debug_headers          = var.debug_headers_route ? "1" : "0"
+    auth_domain   = local.auth_domain
+    debug_headers = var.debug_headers_route ? "1" : "0"
 
     # [JWT 서명 검증] portal_app.py가 Cf-Access-Jwt-Assertion의 서명/발급자/aud/만료를 검증함.
     # aud는 이 서버로 요청을 보내는 Access 앱 6개의 AUD 태그(쉼표 구분). 앱이 재생성되어 AUD가

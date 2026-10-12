@@ -9,3 +9,4 @@ compatibility_date = "2024-09-01"
 # main.tf/worker_automation.tf 쪽을 수정하세요.
 [vars]
 LAMBDA_EVALUATE_URL = "${lambda_evaluate_url}"
+CF_TEAM_DOMAIN = "${cf_team_domain}"

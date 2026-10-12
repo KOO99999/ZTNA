@@ -40,6 +40,29 @@ locals {
   marketing_team_emails = ["employee05@xmcda.store", "employee06@xmcda.store", "employee07@xmcda.store"]
   hr_team_emails        = ["employee08@xmcda.store", "employee09@xmcda.store"]
   all_employee_emails   = concat(local.dev_team_emails, local.marketing_team_emails, local.hr_team_emails, var.admin_allowed_emails)
+
+  # [접근 권한 안내] 자원(경로)별로 열 수 있는 소속(department). 로그인 서버(auth_app.py)가 환경변수로 받아
+  # /stepup에서 "소속이 달라서 막힌 것인지, 위험도 때문에 추가 인증이 필요한 것인지"를 구분하는 데 쓴다.
+  # 키: 첫 경로 조각("/dev" 등) 또는 admin 서브도메인("admin"). 값: 그 자원을 열 수 있는 소속 목록.
+  # 소속은 DB accounts.department 값이며, 위 *_team_emails 목록과 같은 사람 구성으로 맞춰 둬야 한다
+  # (Access 정책은 이메일 그룹으로 허용/차단하고, 이 표는 안내 화면만 고른다 - 두 곳이 어긋나면 안내가 틀릴 뿐 권한이 새지는 않음).
+  path_departments = {
+    "/dev"       = ["dev"]
+    "/marketing" = ["marketing"]
+    "/hr"        = ["hr"]
+    "admin"      = ["admin"]
+  }
+  path_permissions_env = join(";", [for path, depts in local.path_departments : "${path}=${join(",", depts)}"])
+
+  # [계정 소속 자동 반영] 위 *_team_emails / admin_allowed_emails 목록에서 "이메일=소속;..." 문자열을 만든다.
+  # 로그인 서버가 켜질 때 이 목록의 계정만 DB accounts.department를 맞춘다(목록에 없는 계정은 건드리지 않음).
+  # 이메일 그룹(Access 정책)과 DB 소속이 같은 목록에서 나오므로 두 곳이 어긋나지 않는다.
+  account_departments_env = join(";", concat(
+    [for e in local.dev_team_emails : "${lower(e)}=dev"],
+    [for e in local.marketing_team_emails : "${lower(e)}=marketing"],
+    [for e in local.hr_team_emails : "${lower(e)}=hr"],
+    [for e in var.admin_allowed_emails : "${lower(e)}=admin"],
+  ))
 }
 
 # ==========================================
@@ -92,7 +115,10 @@ resource "aws_dynamodb_table" "mfa_verified" {
 }
 
 # ==========================================
-# 2. AWS IAM Role (EC2 DynamoDB 읽기 권한)
+# 2. AWS IAM Role (EC2: 감사 로그 테이블 읽기만)
+#    예전에는 AmazonDynamoDBFullAccess(모든 테이블에 모든 작업)를 붙였으나, EC2 3대 중 DynamoDB를 쓰는 곳은
+#    portal_app.py의 감사 로그 조회(risk_score_log Scan) 하나뿐이라 그 작업만 허용한다.
+#    (Lambda 판단 엔진은 별도 역할을 쓴다 - 아래 3번)
 # ==========================================
 resource "aws_iam_role" "ec2_role" {
   name_prefix = "zt-ec2-role-"
@@ -111,9 +137,19 @@ resource "aws_iam_role" "ec2_role" {
   }
 }
 
-resource "aws_iam_role_policy_attachment" "ec2_dynamodb" {
-  role       = aws_iam_role.ec2_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess"
+resource "aws_iam_role_policy" "ec2_dynamodb_audit_read" {
+  name = "zt-ec2-audit-log-read"
+  role = aws_iam_role.ec2_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid      = "ReadAuditLogOnly"
+      Effect   = "Allow"
+      Action   = ["dynamodb:Scan"]
+      Resource = [aws_dynamodb_table.risk_score_log.arn]
+    }]
+  })
 }
 
 # EC2를 AWS 콘솔의 Session Manager로 SSH 없이 접속하기 위한 권한
@@ -157,9 +193,30 @@ resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-resource "aws_iam_role_policy_attachment" "lambda_dynamodb" {
-  role       = aws_iam_role.lambda_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess"
+# Lambda 판단 엔진이 실제로 쓰는 DynamoDB 작업만 허용한다 (예전에는 AmazonDynamoDBFullAccess).
+#   risk_score_log : 판정 결과 기록(PutItem)
+#   mfa_verified   : step-up 재인증 기록 저장(PutItem)과 조회(GetItem)
+resource "aws_iam_role_policy" "lambda_dynamodb" {
+  name = "zt-lambda-dynamodb-minimal"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "WriteRiskLog"
+        Effect   = "Allow"
+        Action   = ["dynamodb:PutItem"]
+        Resource = [aws_dynamodb_table.risk_score_log.arn]
+      },
+      {
+        Sid      = "MfaVerifiedReadWrite"
+        Effect   = "Allow"
+        Action   = ["dynamodb:PutItem", "dynamodb:GetItem"]
+        Resource = [aws_dynamodb_table.mfa_verified.arn]
+      }
+    ]
+  })
 }
 
 data "archive_file" "lambda_zip" {

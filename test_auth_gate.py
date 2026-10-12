@@ -43,7 +43,7 @@ def token(email="hana@test.com", key=None, exp_delta=300, aud=("aud-portal",), d
     return pyjwt.encode(c, key or GOOD, algorithm="RS256", headers={"kid": "kid-good"})
 
 calls = []
-reply = {"allow": True, "action": "allow", "score": 0, "resource_threshold": 40, "resource_tier": "confidential"}
+reply = {"allow": True, "action": "allow", "score": 0, "resource_threshold": 40, "resource_tier": "confidential", "cache_ttl_seconds": 90}
 status = 200
 boom = False
 def fake_post(url, headers=None, json=None, timeout=None):
@@ -57,7 +57,7 @@ zr.requests.post = fake_post
 def reset(resp=None, st=200, err=False):
     global reply, status, boom
     calls.clear(); zr._cache.clear()
-    reply = resp or {"allow": True, "action": "allow", "score": 0, "resource_threshold": 40, "resource_tier": "confidential"}
+    reply = resp or {"allow": True, "action": "allow", "score": 0, "resource_threshold": 40, "resource_tier": "confidential", "cache_ttl_seconds": 90}
     status, boom = st, err
 
 client = ag.app.test_client()
@@ -92,8 +92,31 @@ check("끝 슬래시와 쿼리는 판단 경로에서 제거 (/hr)", calls[0]["r
 reset(); ask(uri="/%68r")
 check("퍼센트 인코딩 경로도 앱과 같은 경로(/hr)로 판단", calls[0]["resource_path"] == "/hr", calls[0]["resource_path"])
 
+# 통과 응답에는 앱 화면용 임계값/등급이 실린다 (nginx가 꺼내 앱에 넘김). 캐시에서 나온 응답도 같아야 함.
+reset(); r1, _ = ask(); r2, _ = ask()
+check("통과 응답에 X-ZT-Threshold/X-ZT-Tier (Lambda가 이 요청에 적용한 값)",
+      r1.headers.get("X-ZT-Threshold") == "40" and r1.headers.get("X-ZT-Tier") == "confidential", dict(r1.headers))
+check("캐시에서 나온 통과 응답에도 같은 X-ZT-Threshold/X-ZT-Tier", len(calls) == 1 and r2.headers.get("X-ZT-Threshold") == "40" and r2.headers.get("X-ZT-Tier") == "confidential")
+reset(resp={"allow": True, "action": "allow", "score": 0, "resource_threshold": 20, "resource_tier": "top_secret", "cache_ttl_seconds": 0})
+r, _ = ask(uri="/", host="admin.xmcda.store")
+check("관리자 콘솔(최고기밀)은 X-ZT-Threshold=20", r.headers.get("X-ZT-Threshold") == "20" and r.headers.get("X-ZT-Tier") == "top_secret")
+reset(resp={"allow": True, "action": "allow", "score": 0, "cache_ttl_seconds": 0})
+r, _ = ask()
+check("Lambda가 임계값/등급을 안 줬으면 헤더를 만들지 않음(앱은 '확인 불가' 표시)", r.status_code == 200 and "X-ZT-Threshold" not in r.headers and "X-ZT-Tier" not in r.headers)
+reset(resp={"allow": True, "action": "allow", "resource_threshold": "40<x>", "resource_tier": 5, "cache_ttl_seconds": 0})
+r, _ = ask()
+check("임계값/등급이 이상한 형식이면 헤더로 내보내지 않음", r.status_code == 200 and "X-ZT-Threshold" not in r.headers and "X-ZT-Tier" not in r.headers)
+reset(); r, _ = ask(extra={"X-ZT-Threshold": "1", "X-ZT-Tier": "internal"})
+check("클라이언트가 보낸 X-ZT-Threshold/X-ZT-Tier는 판단 서비스 응답에 영향 없음", r.headers.get("X-ZT-Threshold") == "40" and r.headers.get("X-ZT-Tier") == "confidential")
+reset(resp={"allow": False, "action": "block", "score": 100, "resource_threshold": 40, "resource_tier": "confidential", "cache_ttl_seconds": 0})
+r, _ = ask()
+check("차단 응답에는 임계값/등급 헤더가 없음", r.status_code == 403 and "X-ZT-Threshold" not in r.headers)
+
 reset(); ask(); ask()
 check("같은 사용자/경로 재요청은 캐시 사용 (Lambda 1회)", len(calls) == 1, len(calls))
+reset(resp={"allow": True, "action": "allow", "score": 0, "resource_threshold": 20, "resource_tier": "top_secret", "cache_ttl_seconds": 0})
+ask(uri="/", host="admin.xmcda.store"); ask(uri="/", host="admin.xmcda.store")
+check("Lambda가 cache_ttl_seconds=0을 주면(관리자) 매 요청 Lambda 호출", len(calls) == 2, len(calls))
 reset(); ask(country="KR"); ask(country="US")
 check("국가가 바뀌면 캐시 무시하고 즉시 재평가", len(calls) == 2, len(calls))
 

@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, redirect, g
+from flask import Flask, request, jsonify, g
 import base64
 import json
 import os
@@ -6,7 +6,6 @@ import os
 import boto3
 
 from zt_jwt import JwtVerifyError, log_jwt_failure, verify_access_jwt
-from zt_risk import check_risk, resource_path_for, stepup_url
 
 app = Flask(__name__)
 dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
@@ -15,18 +14,10 @@ table = dynamodb.Table('risk_score_log')
 
 AUTH_DOMAIN = os.environ.get("AUTH_DOMAIN", "auth.xmcda.store")
 
-# 신원 확인(JWT 서명 검증)은 zt_jwt.py, 위험도 확인(Lambda 호출/캐시)은 zt_risk.py에 있다.
-# 위험도 확인은 nginx 앞단(auth_gate.py)으로 옮기는 중이며, 앞단 동작이 확인되면 이 앱에서는
-# zt_risk 사용(아래 zero_trust_gate의 check_risk 호출과 응답 처리)을 제거하고 JWT 검증만 남긴다.
-
-
-def _resource_path_for_request():
-    return resource_path_for(request.host, request.path)
-
-
-def _stepup_url(is_api):
-    return stepup_url(AUTH_DOMAIN, request.host, request.path,
-                      request.query_string.decode('utf-8', 'ignore'), is_api)
+# [역할 분담] 위험도 판단(Lambda 호출, 캐시, 차단/재인증 응답)은 nginx 앞단의 판단 서비스(auth_gate.py)가
+# 요청마다 하고, 통과한 요청만 이 앱에 도착한다. 그래서 이 앱은 Lambda를 부르지 않고 비밀키도 갖지 않는다.
+# 대신 신원은 여기서도 Cloudflare Access JWT의 서명을 직접 검증한다(zt_jwt.py) - 앞단을 우회해 앱에
+# 닿는 요청이나 위조된 헤더가 있어도 서명 검증을 통과한 이메일만 신원으로 인정하는 이중 확인이다.
 
 
 def _status_page(title, message, code):
@@ -38,36 +29,20 @@ def _status_page(title, message, code):
     return html, code
 
 
-def _deny_response(result):
-    is_api = request.path.startswith('/api/')
-    action = result.get("action", "")
-
-    if action == "step_up_mfa_required":
-        url = _stepup_url(is_api)
-        if is_api:
-            return jsonify({"status": "StepUpRequired", "message": "추가 인증이 필요합니다.", "stepup_url": url}), 403
-        return redirect(url, code=302)
-
-    # 차단 사유(점수, 신호)는 일부러 노출하지 않는다 - 공격자에게 우회 단서를 주지 않기 위해
-    if result.get("error"):
-        if is_api:
-            return jsonify({"status": "Error", "message": "위험 판단 서버에 연결할 수 없어 접근을 차단했습니다."}), 503
-        return _status_page("일시적으로 확인할 수 없습니다",
-                            "위험 판단 서버에 연결할 수 없어 접근을 차단했습니다. 잠시 후 다시 시도해 주세요.", 503)
-
-    if is_api:
-        return jsonify({"status": "Denied", "message": "보안 정책에 따라 접근이 차단되었습니다."}), 403
-    return _status_page("접근이 차단되었습니다", "보안 정책에 따라 이 페이지에 대한 접근이 차단되었습니다.", 403)
+def _threshold_from_gate():
+    """판단 서비스가 nginx를 통해 알려준 '이 요청에 적용된 임계값'(화면 표시용). 정수가 아니면 None."""
+    raw = request.headers.get('X-ZT-Threshold', '')
+    return int(raw) if raw.isdigit() and len(raw) <= 4 else None
 
 
 @app.before_request
-def zero_trust_gate():
+def identity_gate():
     # 등록된 라우트가 아니면(404) 판단할 필요 없음
     if request.endpoint is None:
         return None
 
     # 신원은 서명 검증을 통과한 JWT의 email만 사용한다(평문 이메일 헤더는 쓰지 않음).
-    # 검증 실패 = 기록 후 즉시 차단. Lambda도 부르지 않는다.
+    # 검증 실패 = 기록 후 즉시 차단.
     try:
         claims = verify_access_jwt(request.headers.get('Cf-Access-Jwt-Assertion'))
     except JwtVerifyError as e:
@@ -76,18 +51,9 @@ def zero_trust_gate():
         if request.path.startswith('/api/'):
             return jsonify({"status": "Denied", "message": "인증 토큰 검증에 실패하여 접근이 거부되었습니다."}), 403
         return _status_page("접근이 거부되었습니다", "인증 정보를 확인할 수 없는 요청입니다.", 403)
-    identity = claims["email"]
-    g.identity = identity
-
-    # [실측 필요] CF-IPCountry가 실제로 이 앱까지 도착하는지는 /debug-headers로 확인할 것.
-    # 없으면 None이 전달되고, Lambda는 geo_country가 없으면 위치 이상으로 보지 않는다(오탐 방지).
-    country = request.headers.get('CF-IPCountry')
-
-    result = check_risk(identity, country, _resource_path_for_request())
-    g.risk = result
-    if result["allow"]:
-        return None
-    return _deny_response(result)
+    g.identity = claims["email"]
+    g.threshold = _threshold_from_gate()
+    return None
 
 
 if os.environ.get("ZT_DEBUG_HEADERS") == "1":
@@ -124,8 +90,9 @@ if os.environ.get("ZT_DEBUG_HEADERS") == "1":
 def render_page(title, content_html, is_public=False):
     user_email = getattr(g, 'identity', None)   # 서명 검증된 JWT의 email(게이트에서 설정)
     # 허용 점수는 화면에 직접 적어두지 않고 Lambda가 이 요청에 실제로 적용한 임계값을 보여준다
-    # (페이지마다 옛 숫자를 따로 적어두면 RESOURCE_THRESHOLDS가 바뀔 때 어긋남)
-    threshold = getattr(g, 'risk', {}).get('resource_threshold')
+    # (페이지마다 옛 숫자를 따로 적어두면 RESOURCE_THRESHOLDS가 바뀔 때 어긋남).
+    # 값은 판단 서비스가 nginx를 통해 넘겨준 X-ZT-Threshold 헤더에서 읽는다(앱이 Lambda를 부르지 않음).
+    threshold = getattr(g, 'threshold', None)
     threshold_str = f"{threshold}점" if threshold is not None else "확인 불가"
 
     if is_public and not user_email:

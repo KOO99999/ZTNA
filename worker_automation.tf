@@ -14,6 +14,8 @@ resource "local_file" "worker_wrangler_toml" {
   filename = "${path.module}/access_worker/wrangler.toml"
   content = templatefile("${path.module}/templates/wrangler.toml.tpl", {
     lambda_evaluate_url = "${aws_apigatewayv2_api.pdp_api.api_endpoint}/evaluate"
+    # Access가 보낸 평가 요청의 서명을 이 팀 도메인의 공개키로 검증한다(index.js)
+    cf_team_domain = var.cloudflare_team_domain
   })
 }
 

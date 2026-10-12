@@ -26,6 +26,12 @@ resource "aws_instance" "auth_server" {
     domain_name             = local.auth_domain
     oidc_client_id          = var.oidc_client_id
     oidc_client_secret      = var.oidc_client_secret
+
+    # 자원별로 열 수 있는 소속 표(main.tf locals). /stepup이 "권한 없음" 안내 화면을 고를 때만 쓰며,
+    # 접근 허용/차단을 정하는 값이 아니다(실제 차단은 Access 정책과 앞단 판단 서비스가 함).
+    path_permissions = local.path_permissions_env
+    # 서버 시작 때 DB 소속(accounts.department)을 맞추는 목록(main.tf locals). 컬럼이 없으면 같이 추가한다.
+    account_departments = local.account_departments_env
   }))
 
   tags = {

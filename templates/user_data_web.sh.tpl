@@ -9,7 +9,9 @@ apt-get install -y python3-pip curl
 #     비밀키(.env)를 읽지 못하게 함 (env 파일은 root만 읽기 가능, systemd가 읽어서 넘겨줌)
 #   - 죽어도 systemd가 바로 다시 띄움(재시작 횟수 제한 없음). 응답이 없으면 nginx가 차단(fail-closed)
 # ==========================================================================
-pip3 install flask gunicorn pyjwt cryptography requests
+# gunicorn은 --no-control-socket 옵션이 있는 버전(26.2.0에서 확인)으로 고정함. 이 옵션이 없는 옛 버전이
+# 깔리면 서비스가 시작되지 않으므로, 버전을 올릴 때는 옵션 존재 여부를 먼저 확인할 것.
+pip3 install flask "gunicorn==26.2.0" pyjwt cryptography requests
 
 useradd --system --no-create-home --shell /usr/sbin/nologin ztgate || true
 mkdir -p /opt/ztgate /etc/ztgate
@@ -40,6 +42,8 @@ ZTENV
 chown root:root /etc/ztgate/env
 chmod 600 /etc/ztgate/env
 
+# --no-control-socket: gunicorn 관리용 유닉스 소켓(기본 위치가 실행 계정의 홈 디렉터리)을 만들지 않음.
+#   ztgate는 홈이 없고 파일시스템이 읽기 전용(ProtectSystem=strict)이라 불필요하며, 열려 있는 관리 통로도 줄임.
 # workers=1, threads=8: 위험도 캐시와 공개키 캐시가 프로세스 안 메모리에 있으므로 프로세스를
 # 하나로 두고 스레드로 동시 요청을 처리함(프로세스를 여러 개 두면 캐시가 쪼개져 Lambda 호출이 늘어남).
 # 프로세스가 죽으면 gunicorn 관리자가 새로 띄우고, 관리자까지 죽으면 systemd가 다시 띄움.
@@ -54,7 +58,7 @@ User=ztgate
 Group=ztgate
 WorkingDirectory=/opt/ztgate
 EnvironmentFile=/etc/ztgate/env
-ExecStart=/usr/bin/python3 -m gunicorn --workers 1 --threads 8 --bind 127.0.0.1:9000 --timeout 15 --graceful-timeout 5 auth_gate:app
+ExecStart=/usr/bin/python3 -m gunicorn --workers 1 --threads 8 --bind 127.0.0.1:9000 --timeout 15 --graceful-timeout 5 --no-control-socket auth_gate:app
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
@@ -135,6 +139,8 @@ server {
     location / {
         auth_request /_zt_auth;
         auth_request_set $zt_action $upstream_http_x_zt_action;
+        auth_request_set $zt_threshold $upstream_http_x_zt_threshold;
+        auth_request_set $zt_tier $upstream_http_x_zt_tier;
         error_page 401 403 = @zt_denied;
         error_page 500 502 503 504 = $zt_unavailable_target;
 
@@ -144,6 +150,10 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         # 앱은 서명 검증된 JWT의 email만 쓴다. 믿을 수 없는 평문 이메일 헤더는 앱에 넘기지 않음
         proxy_set_header Cf-Access-Authenticated-User-Email "";
+        # 화면 표시용 임계값/등급: 판단 서비스가 알려준 값으로 항상 덮어씀(값이 비면 헤더 자체를 보내지 않음).
+        # 클라이언트가 같은 이름의 헤더를 보내도 앱에는 닿지 않는다.
+        proxy_set_header X-ZT-Threshold $zt_threshold;
+        proxy_set_header X-ZT-Tier $zt_tier;
     }
 }
 NGINX

@@ -335,3 +335,89 @@ def run_auth_case(name, headers):
 
 run_auth_case("헤더 없이 호출 -> 401 unauthorized", {})
 run_auth_case("틀린 비밀키로 호출 -> 401 unauthorized", {"x-evaluate-secret": "wrong-value"})
+
+
+# ==========================================================================
+# [캐시 유효기간] Lambda가 정해서 응답(cache_ttl_seconds)으로 돌려준다.
+# 호출한 쪽(zt_risk.py)은 이 값을 그대로 따르므로, 등급표/야간 경계/MFA 만료 계산은 여기서만 검증한다.
+# ==========================================================================
+import io
+import contextlib
+from datetime import datetime, timezone, timedelta
+from unittest.mock import patch
+
+_KST = timezone(timedelta(hours=9))
+
+def _kst(h, m=0, s=0):
+    return datetime(2026, 10, 6, h, m, s, tzinfo=_KST).timestamp()
+
+def t(name, cond, detail=""):
+    print(f"[{'PASS' if cond else 'FAIL'}] {name}")
+    if detail or not cond:
+        print(f"    -> {detail}")
+    print()
+
+for label, (h, m, s), expect in [
+    ("21:58 KST -> 22:00까지 120초", (21, 58, 0), 120),
+    ("05:59:30 KST -> 06:00까지 30초", (5, 59, 30), 30),
+    ("06:00:00 정각 -> 다음은 22:00 (16시간)", (6, 0, 0), 16 * 3600),
+    ("22:00:00 정각 -> 다음은 06:00 (8시간)", (22, 0, 0), 8 * 3600),
+    ("14:00 KST -> 22:00까지 8시간", (14, 0, 0), 8 * 3600),
+    ("00:00 KST -> 06:00까지 6시간", (0, 0, 0), 6 * 3600),
+]:
+    got = engine.seconds_until_night_boundary(_kst(h, m, s))
+    t(f"[캐시TTL] 야간 경계: {label}", abs(got - expect) < 1, f"got={got}")
+
+noon = _kst(14)
+t("[캐시TTL] 기밀(confidential) 허용 -> 90초", engine.compute_cache_ttl("confidential", True, noon) == 90)
+t("[캐시TTL] 내부(internal) 허용 -> 300초", engine.compute_cache_ttl("internal", True, noon) == 300)
+t("[캐시TTL] 최고기밀(top_secret) -> 0 (캐시 안 함)", engine.compute_cache_ttl("top_secret", True, noon) == 0)
+t("[캐시TTL] 등급을 모르는 자원(None) -> 0", engine.compute_cache_ttl(None, True, noon) == 0)
+t("[캐시TTL] 허용이 아니면 등급과 무관하게 0", engine.compute_cache_ttl("internal", False, noon) == 0)
+t("[캐시TTL] 21:58의 내부 자원 -> 22:00 경계까지 120초로 끊김",
+  engine.compute_cache_ttl("internal", True, _kst(21, 58)) == 120, engine.compute_cache_ttl("internal", True, _kst(21, 58)))
+t("[캐시TTL] 05:59:30의 기밀 자원 -> 06:00 경계까지 30초로 끊김",
+  engine.compute_cache_ttl("confidential", True, _kst(5, 59, 30)) == 30)
+t("[캐시TTL] MFA 재인증 기록이 30초 남았으면 기밀 TTL(90)보다 짧은 30초",
+  engine.compute_cache_ttl("confidential", True, noon, mfa_expires_at=int(noon) + 30) == 30)
+t("[캐시TTL] MFA 기록이 이미 만료됐으면(음수) 0 이하로 내려가지 않음",
+  engine.compute_cache_ttl("confidential", True, noon, mfa_expires_at=int(noon) - 5) == 0)
+
+def _call(body, mfa_record=None):
+    mock_table.reset_mock()
+    mock_mfa_table.reset_mock()
+    mock_mfa_table.get_item.return_value = {"Item": mfa_record} if mfa_record else {}
+    raw = engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps(body)}, None)
+    return json.loads(raw["body"])
+
+with patch.object(engine.time, "time", return_value=_kst(14)):
+    now14 = int(_kst(14))
+    r = _call({"session_id": "c1", "identity": "hana@test.com", "resource_path": "/dev"})
+    t("[캐시TTL] 응답: /dev 허용 -> cache_ttl_seconds=90", r["allow"] and r.get("cache_ttl_seconds") == 90, r.get("cache_ttl_seconds"))
+    r = _call({"session_id": "c2", "identity": "hana@test.com", "resource_path": "/marketing"})
+    t("[캐시TTL] 응답: /marketing 허용 -> 300", r.get("cache_ttl_seconds") == 300, r.get("cache_ttl_seconds"))
+    r = _call({"session_id": "c3", "identity": "hana@test.com", "resource_path": "/admin"})
+    t("[캐시TTL] 응답: /admin 허용 -> 0 (매 요청 검사)", r["allow"] and r.get("cache_ttl_seconds") == 0, r.get("cache_ttl_seconds"))
+    r = _call({"session_id": "c4", "identity": "hana@test.com", "resource_path": "/no-such-page"})
+    t("[캐시TTL] 응답: 목록에 없는 자원 -> 0", r.get("cache_ttl_seconds") == 0, r.get("cache_ttl_seconds"))
+    r = _call({"session_id": "c5", "identity": "x@test.com", "resource_path": "/dev", "waf_sqli": True})
+    t("[캐시TTL] 응답: 차단 -> 0", (not r["allow"]) and r.get("cache_ttl_seconds") == 0, r.get("cache_ttl_seconds"))
+    r = _call({"session_id": "c6", "identity": "hana@test.com", "resource_path": "/dev", "night_access": True, "unknown_location": True})
+    t("[캐시TTL] 응답: step-up 필요 -> 0", r["action"] == "step_up_mfa_required" and r.get("cache_ttl_seconds") == 0, r)
+    r = _call({"session_id": "c7", "identity": "hana@test.com", "resource_path": "/dev", "night_access": True, "unknown_location": True},
+              mfa_record={"identity": "hana@test.com", "expires_at": now14 + 30})
+    t("[캐시TTL] 응답: step-up 재인증 통과 -> MFA 남은 시간(30초)을 넘지 않음",
+      r["action"] == "step_up_mfa_verified" and r.get("cache_ttl_seconds") == 30, r)
+
+with patch.object(engine.time, "time", return_value=_kst(21, 58)):
+    r = _call({"session_id": "c8", "identity": "hana@test.com", "resource_path": "/marketing"})
+    t("[캐시TTL] 응답: 21:58의 /marketing -> 야간 경계(120초)로 끊김", r.get("cache_ttl_seconds") == 120, r.get("cache_ttl_seconds"))
+
+# 비밀키 유출 방지: event 원문을 로그로 찍지 않는다 (예전에는 print(event)로 x-evaluate-secret이 CloudWatch에 남았음)
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps({"session_id": "leak", "identity": "hana@test.com"})}, None)
+    engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps({"session_id": "leak2", "identity": "hana@test.com", "mfa_reauth": True})}, None)
+    engine.lambda_handler({"headers": {"x-evaluate-secret": "wrong-value-xyz"}, "body": "{}"}, None)
+t("[보안] 정상 호출 로그에 공유비밀키가 찍히지 않음", "test-secret-local-only" not in _buf.getvalue(), _buf.getvalue()[:200])
+t("[보안] 틀린 비밀키로 거부된 호출의 로그에도 입력값이 찍히지 않음", "wrong-value-xyz" not in _buf.getvalue())

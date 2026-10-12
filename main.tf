@@ -498,17 +498,17 @@ resource "cloudflare_zero_trust_access_application" "admin_console" {
 
   # [통일 관리 방식] risk_block_shared를 dev/marketing/hr와 동일하게 적용.
   # (path_cookie_attribute는 provider v4에 없어서, 아래 enable_path_cookie_attribute에서
-  # Cloudflare API를 직접 호출해 6개 앱 전체에 자동으로 켬 - v5로 프로바이더 업그레이드 없이 처리)
+  # Cloudflare API를 직접 호출해 5개 앱 전체에 자동으로 켬 - v5로 프로바이더 업그레이드 없이 처리)
   policies = [
     cloudflare_zero_trust_access_policy.risk_block_shared.id,
     cloudflare_zero_trust_access_policy.admin_gate_console.id,
   ]
 }
 
-# [자동화, 6개 앱 전체] provider(v4)가 path_cookie_attribute를 지원하지 않아서,
+# [자동화, 5개 앱 전체] provider(v4)가 path_cookie_attribute를 지원하지 않아서,
 # Cloudflare REST API를 직접 호출해 이 필드만 켠다. GET으로 현재 설정 전체를 가져온 뒤
 # path_cookie_attribute만 덮어써서 그대로 PUT하므로, Terraform이 관리하는 다른 필드
-# (policies 등)는 건드리지 않는다. for_each로 6개 앱을 한 번의 apply로 전부 처리.
+# (policies 등)는 건드리지 않는다. for_each로 5개 앱을 한 번의 apply로 전부 처리.
 locals {
   path_cookie_target_apps = {
     portal        = cloudflare_zero_trust_access_application.portal.id
@@ -516,7 +516,6 @@ locals {
     marketing     = cloudflare_zero_trust_access_application.marketing.id
     hr            = cloudflare_zero_trust_access_application.hr.id
     admin_console = cloudflare_zero_trust_access_application.admin_console.id
-    admin_api     = cloudflare_zero_trust_access_application.admin_api.id
   }
 }
 
@@ -588,40 +587,6 @@ resource "cloudflare_zero_trust_access_policy" "risk_block_shared" {
   }
 }
 
-resource "cloudflare_zero_trust_access_application" "admin_api" {
-  account_id       = var.cloudflare_account_id
-  name             = "ZT Admin API (DynamoDB 감사 로그)"
-  # [실험] admin_console과 함께 admin 서브도메인으로 이동.
-  # portal_app.py의 /admin 페이지가 fetch('/api/db-data?...')를 상대경로로 호출하므로,
-  # /admin만 옮기고 이 API를 기존 도메인에 남겨두면 그 호출이 엉뚱한 곳으로 가서 깨짐.
-  domain           = "admin.${var.domain_name}/api/db-data"
-  type             = "self_hosted"
-  # [확대, 부분적용] session_duration만 15분으로 줄임. custom_deny_url은 일부러 안 넣음 -
-  # 이 앱은 페이지 이동이 아니라 portal_app.py가 fetch()로 상대경로 호출하는 API라서,
-  # HTML 재인증 페이지로 리다이렉트시키면 JS의 JSON 파싱이 깨짐. §7 미결정 항목
-  # ("/api/db-data step-up 재인증")과 같은 문제 - B 계층에서 fetch 응답 자체에
-  # "재인증 필요" 신호를 담아 처리하는 방식으로 다시 설계 필요.
-  session_duration = "15m"
-  allowed_idps     = [cloudflare_zero_trust_access_identity_provider.login_server.id]
-  auto_redirect_to_identity = true
-  app_launcher_visible = false
-
-  policies = [
-    cloudflare_zero_trust_access_policy.risk_block_shared.id,
-    cloudflare_zero_trust_access_policy.admin_gate_api.id,
-  ]
-}
-
-resource "cloudflare_zero_trust_access_policy" "admin_gate_api" {
-  account_id = var.cloudflare_account_id
-  name       = "Admin API - Admins Only"
-  decision   = "allow"
-
-  include {
-    group = [cloudflare_zero_trust_access_group.admins.id]
-  }
-}
-
 # ==========================================
 # 5. Cloudflare Tunnel 사전 구성
 # ==========================================
@@ -684,7 +649,7 @@ resource "cloudflare_record" "web_app_dns" {
   ttl     = 1
 }
 
-# [실험] admin_console/admin_api를 서브도메인으로 분리하면서 추가.
+# [실험] admin_console을 서브도메인으로 분리하면서 추가.
 # 같은 터널(web_tunnel)을 그대로 쓰고, 실제 경로 분기는 EC2 쪽 cloudflared
 # 로컬 config.yml(user_data_web_sh.tpl)의 hostname 규칙이 담당함.
 resource "cloudflare_record" "admin_dns" {

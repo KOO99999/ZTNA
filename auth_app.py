@@ -755,8 +755,7 @@ def _resolve_return_url():
         return from_access
     referrer = request.referrer or ''
     # [확대] admin 서브도메인만 알아보던 걸, custom_deny_url을 새로 붙인 5개 앱
-    # (portal/dev/marketing/hr/admin_console) 전부 인식하도록 확장. admin_api는
-    # fetch 호출용이라 애초에 여기로 올 일이 없음(위 admin_api 정의 주석 참고).
+    # (portal/dev/marketing/hr/admin_console) 전부 인식하도록 확장.
     if f'admin.{portal_domain}' in referrer:
         return f'https://admin.{portal_domain}'
     for path in ('/dev', '/marketing', '/hr'):
@@ -928,12 +927,12 @@ def logout():
         clear_sso_session(sso_token)
 
     # [버그수정] 예전엔 xmcda.store 루트의 /cdn-cgi/access/logout 하나만 호출했는데,
-    # (1) path_cookie_attribute로 6개 앱의 세션 쿠키가 경로별로 분리돼 있고
-    # (2) admin_console/admin_api는 admin.xmcda.store라는 별도 서브도메인이라
+    # (1) path_cookie_attribute로 앱별 세션 쿠키가 경로별로 분리돼 있고
+    # (2) admin_console은 admin.xmcda.store라는 별도 서브도메인이라
     # 이 한 번의 호출로는 다른 앱들의 세션이 전혀 지워지지 않고 남아있었음
     # (admin.xmcda.store가 로그아웃 후에도 재인증 없이 그대로 통과되던 원인).
     # xmcda.store와 admin.xmcda.store는 같은 등록 도메인(site)을 공유하는 서브도메인이라
-    # SameSite 쿠키도 같이 전달되는 same-site 관계임을 이용해, 6개 앱의 로그아웃
+    # SameSite 쿠키도 같이 전달되는 same-site 관계임을 이용해, 5개 앱의 로그아웃
     # 엔드포인트를 전부 숨은 이미지 태그로 호출한 뒤 최종 목적지로 이동시킨다.
     portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
     logout_urls = [
@@ -942,7 +941,6 @@ def logout():
         f"https://{portal_domain}/marketing/cdn-cgi/access/logout",
         f"https://{portal_domain}/hr/cdn-cgi/access/logout",
         f"https://admin.{portal_domain}/cdn-cgi/access/logout",
-        f"https://admin.{portal_domain}/api/db-data/cdn-cgi/access/logout",
     ]
     logout_pixels = "\n        ".join(
         f'<img src="{url}" style="display:none" onerror="this.remove()">' for url in logout_urls

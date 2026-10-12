@@ -9,6 +9,15 @@ resource "aws_instance" "web_server" {
   availability_zone    = "ap-northeast-2a"
   iam_instance_profile = aws_iam_instance_profile.ec2_profile.name
 
+  # [IMDSv2 강제] 서버 안에서 임시 IAM 키를 가져올 때 토큰(세션)을 먼저 받아야 하게 한다.
+  # v1은 주소만 알면 누구나 키를 가져갈 수 있어, 앱이 속아서 대신 요청해 주는 SSRF에 키가 유출될 수 있다.
+  # (AWS 권장: EC2 User Guide "Use IMDSv2"). hop_limit 1 = 서버 밖(컨테이너 등)으로 토큰이 넘어가지 않게 함.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
+
   vpc_security_group_ids = [aws_security_group.web_sg.id]
 
   user_data_replace_on_change = true
@@ -39,7 +48,6 @@ resource "aws_instance" "web_server" {
       cloudflare_zero_trust_access_application.marketing.aud,
       cloudflare_zero_trust_access_application.hr.aud,
       cloudflare_zero_trust_access_application.admin_console.aud,
-      cloudflare_zero_trust_access_application.admin_api.aud,
     ])
   }))
 

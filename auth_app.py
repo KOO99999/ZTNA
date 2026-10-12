@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, redirect, make_response
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
+import json
 import os
 import time
 import uuid
@@ -123,8 +124,70 @@ def ensure_department_schema():
         print(f'[MIGRATE_SYNC_FAILED] {e}', flush=True)
 
 
+# ==========================================================================
+# [자동 계정 시딩] 서버가 켜질 때 AWS SSM Parameter Store(SecureString)에 저장된 계정 정보로, DB에 없는 계정만 만든다.
+#
+# 왜: RDS를 새로 만들면 accounts가 비어 있어서 계정을 손으로 다시 만들어야 했다(seed_accounts.py).
+#     비밀번호/TOTP는 Terraform 변수나 user_data에 넣으면 콘솔과 state에 남으므로, 값은 내 PC에서 AWS에 직접 올리고
+#     (account/put_seed_credentials.py) 이 서버는 자기 IAM 역할로 그 값만 읽는다.
+# 저장 형식(JSON): {"이메일": {"password_hash": "scrypt:...", "totp_secret": "BASE32"}, ...}
+#   - 비밀번호는 평문이 아니라 해시(werkzeug)만 저장한다. 평문이 들어 있으면(형식이 해시가 아니면) 만들지 않는다.
+#   - ACCOUNT_DEPARTMENTS(Terraform 이메일 목록)에 없는 이메일은 만들지 않는다. 소속과 role은 그 목록에서 정한다.
+#   - 이미 있는 계정은 건드리지 않는다(비밀번호/TOTP 덮어쓰기 없음). 값을 못 읽어도 로그인 서버는 그대로 켜진다.
+# 끄는 법: AUTO_SEED_ACCOUNTS=0 (또는 SEED_PARAM_NAME을 비움)
+# ==========================================================================
+_PASSWORD_HASH_RE = re.compile(r'^(scrypt|pbkdf2):[^\s]{20,}$')
+_TOTP_SECRET_RE = re.compile(r'^[A-Z2-7]{16,64}$')
+
+
+def seed_accounts_from_ssm():
+    param_name = os.environ.get('SEED_PARAM_NAME')
+    if os.environ.get('AUTO_SEED_ACCOUNTS', '1') != '1' or not param_name:
+        return
+    try:
+        import boto3
+        ssm = boto3.client('ssm', region_name=os.environ.get('AWS_REGION', 'ap-northeast-2'))
+        raw = ssm.get_parameter(Name=param_name, WithDecryption=True)['Parameter']['Value']
+        creds = json.loads(raw)
+        if not isinstance(creds, dict):
+            raise ValueError('JSON 객체가 아님')
+    except Exception as e:
+        # 값(비밀)이 로그에 남지 않게 예외 종류만 적는다
+        print(f'[SEED_SKIPPED] 계정 시딩 값을 읽지 못함: {type(e).__name__}', flush=True)
+        return
+
+    departments = _parse_account_departments(os.environ.get('ACCOUNT_DEPARTMENTS'))
+    created = 0
+    for raw_email, entry in creds.items():
+        email = str(raw_email).strip().lower()
+        dept = departments.get(email)
+        if dept is None:
+            print(f'[SEED] {email}: ACCOUNT_DEPARTMENTS에 없어 건너뜀', flush=True)
+            continue
+        if not isinstance(entry, dict):
+            continue
+        password_hash, totp_secret = entry.get('password_hash'), entry.get('totp_secret')
+        if not (isinstance(password_hash, str) and _PASSWORD_HASH_RE.match(password_hash)
+                and isinstance(totp_secret, str) and _TOTP_SECRET_RE.match(totp_secret)):
+            print(f'[SEED] {email}: password_hash/totp_secret 형식이 올바르지 않아 건너뜀', flush=True)
+            continue
+        try:
+            if Account.query.filter_by(email=email).first():
+                continue
+            db.session.add(Account(email=email, password_hash=password_hash, totp_secret=totp_secret,
+                                   totp_enabled=True, role='admin' if dept == 'admin' else 'employee', department=dept))
+            db.session.commit()
+            created += 1
+            print(f'[SEED] {email} 생성 (소속 {dept})', flush=True)
+        except Exception as e:
+            db.session.rollback()
+            print(f'[SEED_FAILED] {email}: {type(e).__name__}', flush=True)
+    print(f'[SEED] 새 계정 {created}건', flush=True)
+
+
 with app.app_context():
     ensure_department_schema()
+    seed_accounts_from_ssm()
 
 
 PDP_EVALUATE_URL = os.environ.get('PDP_EVALUATE_URL')

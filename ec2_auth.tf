@@ -8,7 +8,7 @@ resource "aws_instance" "auth_server" {
   ami                  = data.aws_ami.ubuntu.id
   instance_type        = "t3.micro"
   subnet_id            = aws_subnet.app_subnet.id
-  iam_instance_profile = aws_iam_instance_profile.ec2_profile.name
+  iam_instance_profile = aws_iam_instance_profile.auth_profile.name
 
   vpc_security_group_ids = [aws_security_group.app_sg.id]
 
@@ -32,6 +32,9 @@ resource "aws_instance" "auth_server" {
     path_permissions = local.path_permissions_env
     # 서버 시작 때 DB 소속(accounts.department)을 맞추는 목록(main.tf locals). 컬럼이 없으면 같이 추가한다.
     account_departments = local.account_departments_env
+    # 서버 시작 때 이 SSM 파라미터(SecureString, Terraform 밖에서 관리)에서 계정 정보를 읽어 DB에 없는 계정을 만든다(auth_seed.tf).
+    seed_param_name = local.seed_param_name
+    aws_region      = var.aws_region
   }))
 
   tags = {

@@ -54,6 +54,9 @@ resource "aws_instance" "web_server" {
     # 교체하지 않고 제자리 수정(in-place)으로 계획해, 새 부팅 스크립트(판단 서비스/nginx)가 실행되지
     # 않는 문제가 있었음. 또 app_server가 교체되면 사설 IP가 바뀌므로 nginx/cloudflared 설정도
     # 새로 만들어야 함. app_server가 교체될 때 web_server도 항상 같이 교체되게 묶어 둠.
-    replace_triggered_by = [aws_instance.app_server]
+    # auth_server도 마찬가지: 아래 cloudflared 로컬 config.yml에 auth 서버의 사설 IP가 적혀 있어서, auth_server가 교체되는데
+    # web_server가 제자리 수정(user_data만 바뀌고 부팅 스크립트는 다시 실행되지 않음)으로 계획되면 auth.xmcda.store가 옛 IP로
+    # 가서 로그인이 멈춘다(2026-10-12 plan에서 발견). 그래서 auth_server 교체 때도 같이 교체되게 묶는다.
+    replace_triggered_by = [aws_instance.app_server, aws_instance.auth_server]
   }
 }

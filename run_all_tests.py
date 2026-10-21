@@ -21,6 +21,7 @@ TESTS = [
     ("로그인 서버 (auth_app.py)", "test_auth_return_url.py"),
     ("User Risk 관리 (risk_admin.py)", "test_risk_admin.py"),
     ("계정 자동 시딩 (auth_app.py)", "test_seed_accounts.py"),
+    ("유출 비밀번호 검사 (auth_app.py)", "test_pwned_password.py"),
 ]
 
 env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")

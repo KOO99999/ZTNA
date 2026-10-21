@@ -24,7 +24,8 @@ resource "aws_instance" "auth_server" {
   user_data_replace_on_change = true
 
   user_data_base64 = base64gzip(templatefile("${path.module}/templates/user_data_auth.sh.tpl", {
-    app_code    = file("${path.module}/auth_app.py")
+    # user_data 16KB 제한 대비: 주석 전용 줄은 배포본에서만 제거(원본 auth_app.py는 그대로)
+    app_code    = replace(file("${path.module}/auth_app.py"), "/(?m)^[ \\t]*#[^\\n]*\\r?\\n/", "")
     db_host     = aws_db_instance.login_db.address
     db_name     = aws_db_instance.login_db.db_name
     db_user     = aws_db_instance.login_db.username

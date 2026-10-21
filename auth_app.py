@@ -12,6 +12,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 import requests
 import re
+import hashlib
+import hmac
 from html import escape
 from urllib.parse import urlparse
 
@@ -302,6 +304,28 @@ def check_brute_force(email):
     return recent_failures >= BRUTE_FORCE_THRESHOLD
 
 
+# [pwned_password] 유출 비밀번호 검사 (NIST SP 800-63B 5.1.1.2: 설정/변경 시 유출 목록 대조).
+# HIBP k-anonymity: SHA-1 앞 5자리만 전송, 나머지는 응답 목록에서 로컬 비교(비번/전체 해시는 외부로 안 나감).
+# Add-Padding 응답의 가짜 항목(count 0)은 무시. 조회 실패는 fail-open(로그인 가용성 우선) + 로그.
+PWNED_MIN_LEN = 12
+
+
+def pwned_count(pw):
+    try:
+        h = hashlib.sha1(pw.encode('utf-8')).hexdigest().upper()
+        r = requests.get("https://api.pwnedpasswords.com/range/" + h[:5],
+                         headers={"Add-Padding": "true"}, timeout=2)
+        r.raise_for_status()
+        for line in r.text.splitlines():
+            suf, _, cnt = line.partition(':')
+            if hmac.compare_digest(suf.strip(), h[5:]):
+                return int(cnt.strip() or 0)
+        return 0
+    except Exception as e:
+        print(f"[PWNED_CHECK_FAILED] {type(e).__name__}", flush=True)
+        return None
+
+
 def finalize_login(email, client_id, redirect_uri, state, response_type, scope, totp_ok):
     brute_force_flag = check_brute_force(email)
     # [정리] 예전에는 여기서 night_access를 직접 계산(UTC 0~4시 = 한국 낮 9~14시라 반대로
@@ -370,6 +394,41 @@ def render_credentials_form(client_id, redirect_uri, state, response_type, scope
                 <input type="password" name="password" required>
 
                 <button type="submit">다음</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    """
+
+
+def render_change_form(challenge_id, error=None):
+    error_html = f'<p style="color:#dc3545;"><strong>{error}</strong></p>' if error else ""
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>ZT Login Server</title>
+        <style>
+            body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
+            .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 400px; margin: 60px auto; }}
+            input {{ width: 100%; padding: 10px; margin: 6px 0 14px 0; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }}
+            button {{ width: 100%; background: #007bff; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-weight: bold; }}
+            label {{ font-size: 0.9em; color: #555; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h2>비밀번호 변경 필요</h2>
+            <p style="font-size:0.9em; color:#555;">이 비밀번호는 외부에서 유출된 목록에서 발견되었습니다. 새 비밀번호({PWNED_MIN_LEN}자 이상, 구성 규칙 없음)를 설정해주세요.</p>
+            {error_html}
+            <form method="POST" action="/authorize/change-password">
+                <input type="hidden" name="challenge_id" value="{challenge_id}">
+                <label>새 비밀번호</label>
+                <input type="password" name="new_password" required autofocus>
+                <label>새 비밀번호 확인</label>
+                <input type="password" name="confirm_password" required>
+                <button type="submit">변경 후 로그인</button>
             </form>
         </div>
     </body>
@@ -489,11 +548,20 @@ def authorize():
             error=f"로그인 시도가 너무 많습니다. {BRUTE_FORCE_LOCKOUT_MINUTES}분 후 다시 시도해주세요."
         )
 
-    if not account.totp_enabled:
+    # [pwned_password] 유출 목록에 있으면 즉시 차단하지 않고, TOTP 통과 후 새 비밀번호를 강제한다
+    # (비번만 아는 공격자는 변경 화면에 도달 못함). 평문은 저장하지 않고 플래그만 둔다.
+    # user_risk에는 기록하지 않음(비번을 바꾸면 해소되는 상태라 sticky 신호가 아님).
+    pwned = (pwned_count(password) or 0) > 0
+    if pwned:
+        print(f"[PWNED_DETECTED] identity={email}", flush=True)
+
+    if not account.totp_enabled and not pwned:
         return finalize_login(email, client_id, redirect_uri, state, response_type, scope, totp_ok=True)
 
     challenge_id = secrets.token_urlsafe(24)
     PENDING_LOGINS[challenge_id] = {
+        "must_change": pwned,
+        "totp_verified": False,
         "email": email,
         "expires_at": time.time() + 300,
         "client_id": client_id,
@@ -502,6 +570,9 @@ def authorize():
         "response_type": response_type,
         "scope": scope,
     }
+    if not account.totp_enabled:  # TOTP 없는 계정: 비번 자체가 유일한 증명이므로 바로 변경 화면
+        PENDING_LOGINS[challenge_id]["totp_verified"] = True
+        return render_change_form(challenge_id)
     return render_totp_form(challenge_id)
 
 
@@ -536,9 +607,51 @@ def authorize_verify_totp():
     if not totp_ok:
         return render_totp_form(challenge_id, error="TOTP 코드(또는 백업코드)가 올바르지 않습니다.")
 
+    if entry.get("must_change"):
+        entry["totp_verified"] = True
+        entry["expires_at"] = time.time() + 300
+        return render_change_form(challenge_id)
+
     PENDING_LOGINS.pop(challenge_id, None)
     return finalize_login(
         email, entry["client_id"], entry["redirect_uri"], entry["state"],
+        entry["response_type"], entry["scope"], totp_ok=True,
+    )
+
+
+@app.route('/authorize/change-password', methods=['POST'])
+def authorize_change_password():
+    challenge_id = request.form.get('challenge_id', '')
+    new_pw = request.form.get('new_password', '')
+    entry = PENDING_LOGINS.get(challenge_id)
+    if (not entry or entry["expires_at"] < time.time()
+            or not entry.get("must_change") or not entry.get("totp_verified")):
+        PENDING_LOGINS.pop(challenge_id, None)
+        return render_credentials_form(
+            '', '', '', 'code', 'openid',
+            error="로그인 세션이 만료되었습니다. 처음부터 다시 시도해주세요."
+        )
+    account = Account.query.filter_by(email=entry["email"]).first()
+    err = None
+    if not account:
+        err = "계정을 찾을 수 없습니다."
+    elif len(new_pw) < PWNED_MIN_LEN:
+        err = f"비밀번호는 {PWNED_MIN_LEN}자 이상이어야 합니다."
+    elif new_pw != request.form.get('confirm_password', ''):
+        err = "새 비밀번호 확인이 일치하지 않습니다."
+    elif check_password_hash(account.password_hash, new_pw):
+        err = "이전 비밀번호와 같은 값은 사용할 수 없습니다."
+    elif (pwned_count(new_pw) or 0) > 0:
+        err = "이 비밀번호도 유출 목록에서 발견되었습니다. 다른 비밀번호를 사용해주세요."
+    if err:
+        return render_change_form(challenge_id, error=err)
+
+    account.password_hash = generate_password_hash(new_pw)
+    db.session.commit()
+    PENDING_LOGINS.pop(challenge_id, None)
+    print(f"[PASSWORD_CHANGED] identity={entry['email']} reason=pwned", flush=True)
+    return finalize_login(
+        entry["email"], entry["client_id"], entry["redirect_uri"], entry["state"],
         entry["response_type"], entry["scope"], totp_ok=True,
     )
 

@@ -106,6 +106,7 @@ with patch.object(aa, "Account", SimpleNamespace(query=FQ())), \
     r = c.post("/authorize/verify-totp", data={"challenge_id": cid, "totp_code": pyotp.TOTP(acct.totp_secret).now()})
     h = r.get_data(as_text=True)
     ok("TOTP 통과 -> 변경 화면", "change-password" in h and r.status_code == 200 and not risk_calls)
+    ok("변경 버튼 문구는 '변경'", '<button type="submit">변경</button>' in h and "변경 후 로그인" not in h)
 
     def change(newpw, conf=None, pwned=None):
         with patch.object(aa, "pwned_count", lambda p: (pwned or {}).get(p, 0)):
@@ -158,6 +159,17 @@ with patch.object(aa, "Account", SimpleNamespace(query=FQ())), \
     aa.PENDING_LOGINS.clear()
     c, html = login(OLD, {OLD: 1}, "n@xmcda.store")
     ok("TOTP 없는 계정: 바로 변경 화면", "change-password" in html)
+
+# 로그아웃: 5개 앱 로그아웃 요청이 모두 끝난 뒤 이동(고정 1초 아님), 응답 없어도 5초 뒤 이동
+aa.SSO_SESSIONS.clear()
+tk = aa.create_sso_session("u@xmcda.store")
+c = aa.app.test_client(); c.set_cookie(aa.SSO_COOKIE_NAME, tk)
+html = c.get("/logout").get_data(as_text=True)
+ok("로그아웃: SSO 세션 서버에서 삭제", tk not in aa.SSO_SESSIONS)
+ok("로그아웃: 5개 앱 로그아웃 주소 호출", html.count("/cdn-cgi/access/logout") == 5 and "admin.xmcda.store/cdn-cgi/access/logout" in html)
+ok("로그아웃: 요청 끝난 뒤 이동(onload/onerror 카운트)", html.count('onload="done()"') == 5 and html.count('onerror="done()"') == 5 and "var remaining = 5" in html)
+ok("로그아웃: 고정 1초 이동 없음 + 5초 안전장치", "1000" not in html and "setTimeout(go, 5000)" in html)
+ok("로그아웃: 스크립트가 이미지보다 먼저 정의", html.index("function done()") < html.index("<img"))
 
 # SSO 30분 무활동 만료
 import time as _t

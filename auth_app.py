@@ -445,7 +445,7 @@ def render_change_form(challenge_id, error=None):
                 <input type="password" name="new_password" required autofocus>
                 <label>새 비밀번호 확인</label>
                 <input type="password" name="confirm_password" required>
-                <button type="submit">변경 후 로그인</button>
+                <button type="submit">변경</button>
             </form>
         </div>
     </body>
@@ -1076,7 +1076,7 @@ def logout():
         f"https://admin.{portal_domain}/cdn-cgi/access/logout",
     ]
     logout_pixels = "\n        ".join(
-        f'<img src="{url}" style="display:none" onerror="this.remove()">' for url in logout_urls
+        f'<img src="{url}" style="display:none" onload="done()" onerror="done()">' for url in logout_urls
     )
 
     response = make_response(f"""
@@ -1084,13 +1084,25 @@ def logout():
     <html>
     <head><meta charset="utf-8"><title>로그아웃 중...</title></head>
     <body>
+        <script>
+          // [버그수정] 예전엔 고정 1초 뒤에 이동해서, 5개 로그아웃 요청이 끝나기 전에 페이지가
+          // 넘어가면 일부 세션 쿠키가 안 지워져 로그아웃을 두 번 눌러야 했음.
+          // 요청이 전부 끝나면(성공/실패 무관) 이동하고, 응답이 없어도 5초 뒤엔 이동한다.
+          var remaining = {len(logout_urls)};
+          var moved = false;
+          function go() {{
+            if (moved) return;
+            moved = true;
+            window.location.href = "https://{portal_domain}/";
+          }}
+          function done() {{
+            remaining -= 1;
+            if (remaining <= 0) go();
+          }}
+          setTimeout(go, 5000);
+        </script>
         {logout_pixels}
         <p>로그아웃 처리 중입니다. 잠시만 기다려주세요...</p>
-        <script>
-          setTimeout(function() {{
-            window.location.href = "https://{portal_domain}/";
-          }}, 1000);
-        </script>
     </body>
     </html>
     """)

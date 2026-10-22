@@ -29,10 +29,10 @@ function extractResourcePath(requestUrl) {
     // [버그수정] admin_console/admin_api를 admin.xmcda.store 서브도메인으로 옮기면서,
     // 이 함수가 도메인은 버리고 경로만 봐서 "admin.xmcda.store/"가 포털의 "/"(임계값 60)와
     // 똑같이 취급되던 문제가 있었음 - resource_threshold가 20이 아니라 60으로 잘못 찍힘.
-    // admin 서브도메인으로 온 요청은 RESOURCE_THRESHOLDS의 기존 /admin, /api/db-data
-    // 키와 매칭되도록 호스트 정보를 경로에 반영한다.
+    // admin 서브도메인으로 온 요청은 경로와 무관하게 RESOURCE_THRESHOLDS의 /admin 키와
+    // 매칭되도록 호스트 정보를 경로에 반영한다.
     if (parsed.hostname.startsWith('admin.')) {
-      return parsed.pathname === '/api/db-data' ? '/api/db-data' : '/admin';
+      return '/admin';
     }
     return parsed.pathname || '/';
   } catch (e) {

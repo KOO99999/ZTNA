@@ -168,7 +168,7 @@ run_case(
 )
 
 # --- [v11] RESOURCE_THRESHOLDS 테스트 ---
-# [v12] 등급: top_secret=20(/admin,/api/db-data)  confidential=40(/hr,/dev)  internal=60(/marketing,/)
+# [v12] 등급: top_secret=20(/admin)  confidential=40(/hr,/dev)  internal=60(/marketing,/)
 # (등급을 못 찾으면 DEFAULT_THRESHOLD=40)
 
 run_case(
@@ -222,8 +222,8 @@ print(">>> 내부 등급만 가장 관대해야 정상")
 print()
 
 run_case(
-    "[RESOURCE_THRESHOLDS] /api/db-data(임계값20)에 쿼리스트링이 붙어도 정상 매칭",
-    {"session_id": "r6", "identity": "hana@test.com", "unknown_location": True, "resource_path": "/api/db-data?type=admin_logs"},
+    "[RESOURCE_THRESHOLDS] /admin(임계값20)에 쿼리스트링이 붙어도 정상 매칭",
+    {"session_id": "r6", "identity": "hana@test.com", "unknown_location": True, "resource_path": "/admin?type=admin_logs"},
     expect_allow=False, expect_action="step_up_mfa_required"
 )
 
@@ -295,7 +295,7 @@ def check_tier(name, path, expect_tier, expect_threshold):
     print()
 
 check_tier("[v12] /admin -> top_secret(20)", "/admin", "top_secret", 20)
-check_tier("[v12] /api/db-data?type=x -> top_secret(20)", "/api/db-data?type=x", "top_secret", 20)
+check_tier("[v12] /admin?type=x -> top_secret(20)", "/admin?type=x", "top_secret", 20)
 check_tier("[v12] /hr -> confidential(40)", "/hr", "confidential", 40)
 check_tier("[v12] /dev -> confidential(40), /hr과 같은 등급", "/dev", "confidential", 40)
 check_tier("[v12] /dev/sub 접두어 매칭 -> confidential(40)", "/dev/sub", "confidential", 40)

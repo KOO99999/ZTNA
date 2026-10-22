@@ -84,7 +84,7 @@ check("Lambda에 보내는 identity는 JWT의 email, 국가는 CF-IPCountry 헤�
       calls[0]["identity"] == "hana@test.com" and calls[0]["geo_country"] == "KR" and calls[0]["source"] == "B", calls[0])
 
 reset(); ask(uri="/api/db-data?type=admin_logs", host="admin.xmcda.store")
-check("admin 서브도메인 + /api/db-data -> resource_path=/api/db-data (쿼리 제거)", calls[0]["resource_path"] == "/api/db-data", calls[0]["resource_path"])
+check("admin 서브도메인 + 임의 경로 -> resource_path=/admin (쿼리 제거)", calls[0]["resource_path"] == "/admin", calls[0]["resource_path"])
 reset(); ask(uri="/", host="admin.xmcda.store")
 check("admin 서브도메인 / -> resource_path=/admin", calls[0]["resource_path"] == "/admin")
 reset(); ask(uri="/hr/?x=1")

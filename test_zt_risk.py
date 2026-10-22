@@ -169,7 +169,7 @@ check("Lambda 호출 timeout 설정됨", sent["timeout"] == zr.PDP_TIMEOUT_SECON
 
 # ---------- 5. 자원 매핑 / step-up 주소 ----------
 check("admin 서브도메인 / -> /admin", zr.resource_path_for("admin.xmcda.store", "/") == "/admin")
-check("admin 서브도메인 /api/db-data -> /api/db-data", zr.resource_path_for("admin.xmcda.store", "/api/db-data") == "/api/db-data")
+check("admin 서브도메인 임의 경로 -> /admin", zr.resource_path_for("admin.xmcda.store", "/anything/else") == "/admin")
 check("포털 홈 -> /", zr.resource_path_for("xmcda.store", "/") == "/")
 check("끝의 슬래시 제거: /dev/ -> /dev", zr.resource_path_for("xmcda.store", "/dev/") == "/dev")
 u = zr.stepup_url("auth.xmcda.store", "xmcda.store", "/hr", "x=1", False)

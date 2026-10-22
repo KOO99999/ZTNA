@@ -268,18 +268,33 @@ SSO_COOKIE_NAME = 'sso_session'
 SSO_SESSION_SECONDS = 8 * 3600
 
 
+# [SSO 세션] 절대 만료 8시간(NIST SP 800-63B AAL2 상한 12시간 이내) + 무활동 30분(AAL2 기준 30분).
+# 무활동은 "이 서버가 SSO 쿠키를 마지막으로 확인한 시각"으로 잰다. Access 세션이 15분마다 갱신되며 이 서버로
+# 오기 때문에, 계속 쓰는 사용자는 15분마다 시각이 갱신되고 30분 넘게 안 쓴 사용자는 만료된다(정밀한 요청 단위는 아님).
+SSO_IDLE_SECONDS = 30 * 60
+
+
 def create_sso_session(email):
     token = secrets.token_urlsafe(32)
-    SSO_SESSIONS[token] = {"email": email, "expires_at": time.time() + SSO_SESSION_SECONDS}
+    now = time.time()
+    SSO_SESSIONS[token] = {"email": email, "expires_at": now + SSO_SESSION_SECONDS, "last_seen": now}
     return token
 
 
 def get_sso_session_email(token):
     entry = SSO_SESSIONS.get(token)
-    if not entry or entry["expires_at"] < time.time():
+    now = time.time()
+    if not entry or entry["expires_at"] < now or now - entry.get("last_seen", now) > SSO_IDLE_SECONDS:
         SSO_SESSIONS.pop(token, None)
         return None
+    entry["last_seen"] = now
     return entry["email"]
+
+
+def clear_sso_sessions_for(email):
+    """비밀번호 변경 뒤 그 사용자의 기존 SSO 세션을 모두 끊는다(OWASP: 비밀번호 변경 후 세션 무효화)."""
+    for t in [t for t, e in SSO_SESSIONS.items() if e["email"] == email]:
+        SSO_SESSIONS.pop(t, None)
 
 
 def clear_sso_session(token):
@@ -360,8 +375,10 @@ def finalize_login(email, client_id, redirect_uri, state, response_type, scope, 
     return response
 
 
-def render_credentials_form(client_id, redirect_uri, state, response_type, scope, error=None):
+def render_credentials_form(client_id, redirect_uri, state, response_type, scope, error=None, notice=None):
     error_html = f'<p style="color:#dc3545;"><strong>{error}</strong></p>' if error else ""
+    if notice:
+        error_html += f'<p style="color:#198754;"><strong>{notice}</strong></p>'
     return f"""
     <!DOCTYPE html>
     <html>
@@ -649,10 +666,13 @@ def authorize_change_password():
     account.password_hash = generate_password_hash(new_pw)
     db.session.commit()
     PENDING_LOGINS.pop(challenge_id, None)
+    clear_sso_sessions_for(entry["email"])
     print(f"[PASSWORD_CHANGED] identity={entry['email']} reason=pwned", flush=True)
-    return finalize_login(
-        entry["email"], entry["client_id"], entry["redirect_uri"], entry["state"],
-        entry["response_type"], entry["scope"], totp_ok=True,
+    # [재로그인] 변경 직후 자동 로그인하지 않고 새 비밀번호로 다시 로그인하게 한다(OWASP Forgot Password
+    # Cheat Sheet: 새 비밀번호 설정 뒤 일반 로그인 절차를 거치게 함). 기존 SSO 세션도 위에서 모두 끊었다.
+    return render_credentials_form(
+        entry["client_id"], entry["redirect_uri"], entry["state"], entry["response_type"], entry["scope"],
+        notice="비밀번호가 변경되었습니다. 새 비밀번호로 다시 로그인해주세요.",
     )
 
 

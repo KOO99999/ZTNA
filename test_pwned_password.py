@@ -117,11 +117,16 @@ with patch.object(aa, "Account", SimpleNamespace(query=FQ())), \
     ok("이전 비번과 동일 거부", "이전 비밀번호" in t(change(OLD)))
     ok("유출된 새 비번 거부", "유출" in t(change("leakedleaked12", pwned={"leakedleaked12": 5})))
     ok("거부 중에는 해시 불변", aa.check_password_hash(acct.password_hash, OLD) and not commits)
+    # 변경 전에 이 계정의 기존 SSO 세션이 있었다고 가정 -> 변경 후 모두 무효화돼야 함
+    aa.SSO_SESSIONS.clear()
+    old_tok = aa.create_sso_session("u@xmcda.store"); other_tok = aa.create_sso_session("other@xmcda.store")
     r = change(NEW)
-    ok("변경 성공 -> 로그인 완료(redirect)", r.status_code == 302 and "code=" in r.headers["Location"], (r.status_code, t(r)[:80]))
+    ok("변경 성공 -> 자동 로그인 안 함(200, 로그인 화면)", r.status_code == 200 and "code=" not in r.headers.get("Location", "")
+       and "다시 로그인" in t(r), (r.status_code, t(r)[:80]))
     ok("해시 교체 + 커밋", aa.check_password_hash(acct.password_hash, NEW) and not aa.check_password_hash(acct.password_hash, OLD) and commits)
-    ok("그때 위험도 평가 1회(totp_ok)", len(risk_calls) == 1 and risk_calls[0][1].get("security_mfa_passed") is True
-       and "pwned_password" not in risk_calls[0][1], risk_calls)
+    ok("변경 직후 위험도 평가 없음(재로그인 때 평가)", len(risk_calls) == 0, risk_calls)
+    ok("기존 SSO 세션 무효화", old_tok not in aa.SSO_SESSIONS and aa.get_sso_session_email(old_tok) is None)
+    ok("다른 사용자 SSO 세션은 유지", other_tok in aa.SSO_SESSIONS)
     ok("challenge 소모(재사용 불가)", cid not in aa.PENDING_LOGINS)
     r = change("another passphrase 99")
     ok("재사용 시 만료 안내", "만료" in t(r))
@@ -153,6 +158,19 @@ with patch.object(aa, "Account", SimpleNamespace(query=FQ())), \
     aa.PENDING_LOGINS.clear()
     c, html = login(OLD, {OLD: 1}, "n@xmcda.store")
     ok("TOTP 없는 계정: 바로 변경 화면", "change-password" in html)
+
+# SSO 30분 무활동 만료
+import time as _t
+aa.SSO_SESSIONS.clear()
+tk = aa.create_sso_session("u@xmcda.store")
+ok("방금 만든 세션 유효", aa.get_sso_session_email(tk) == "u@xmcda.store")
+aa.SSO_SESSIONS[tk]["last_seen"] = _t.time() - (aa.SSO_IDLE_SECONDS - 60)
+ok("29분 무활동: 유효 + last_seen 갱신", aa.get_sso_session_email(tk) == "u@xmcda.store" and _t.time() - aa.SSO_SESSIONS[tk]["last_seen"] < 5)
+aa.SSO_SESSIONS[tk]["last_seen"] = _t.time() - (aa.SSO_IDLE_SECONDS + 60)
+ok("31분 무활동: 만료", aa.get_sso_session_email(tk) is None and tk not in aa.SSO_SESSIONS)
+tk = aa.create_sso_session("u@xmcda.store")
+aa.SSO_SESSIONS[tk]["expires_at"] = _t.time() - 1
+ok("절대 만료(8h) 지나면 무효", aa.get_sso_session_email(tk) is None)
 
 # 로그에 비번이 안 남는지(소스 수준)
 src = open(os.path.join(HERE, "auth_app.py"), encoding="utf-8").read()

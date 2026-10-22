@@ -74,7 +74,6 @@ TIER_THRESHOLDS = {
 
 RESOURCE_TIERS = {
     "/admin": "top_secret",
-    "/api/db-data": "top_secret",
     "/hr": "confidential",
     "/dev": "confidential",
     "/marketing": "internal",
@@ -89,7 +88,7 @@ STEP_UP_MARGIN = 20            # 임계값 ~ +MARGIN 구간을 "경계구간"(St
 
 
 def get_resource_tier(resource_path):
-    """resource_path(예: '/admin', '/api/db-data?type=x')에 맞는 등급 이름을 조회.
+    """resource_path(예: '/admin', '/admin?x=1')에 맞는 등급 이름을 조회.
     - 정확히 일치하면 그 등급을 사용
     - 하위 경로(예: '/admin/users')는 가장 긴 접두어가 일치하는 항목의 등급을 사용
     - 둘 다 없으면 None (임계값은 DEFAULT_THRESHOLD로 안전 처리)

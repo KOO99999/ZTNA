@@ -123,9 +123,9 @@ def check_risk(identity, country, resource_path):
 
 def resource_path_for(host, path):
     """요청이 어느 자원인지. index.js(Worker)의 extractResourcePath와 같은 규칙:
-    admin 서브도메인이면 /admin 또는 /api/db-data, 그 외에는 요청 경로 그대로."""
+    admin 서브도메인이면 경로와 무관하게 /admin, 그 외에는 요청 경로 그대로."""
     if (host or "").startswith("admin."):
-        return "/api/db-data" if path == "/api/db-data" else "/admin"
+        return "/admin"
     return path.rstrip("/") or "/"
 
 

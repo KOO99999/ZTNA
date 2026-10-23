@@ -37,9 +37,13 @@ resource "aws_instance" "auth_server" {
     oidc_client_id          = var.oidc_client_id
     oidc_client_secret      = var.oidc_client_secret
 
-    # 자원별로 열 수 있는 소속 표(main.tf locals). /stepup이 "권한 없음" 안내 화면을 고를 때만 쓰며,
+    # 자원(앱 호스트)별로 열 수 있는 소속 표(main.tf locals). /stepup이 "권한 없음" 안내 화면을 고를 때만 쓰며,
     # 접근 허용/차단을 정하는 값이 아니다(실제 차단은 Access 정책과 앞단 판단 서비스가 함).
     path_permissions = local.path_permissions_env
+    # 보호 대상 앱 호스트 목록(main.tf locals.app_hosts). 복귀 주소 허용 목록과 로그아웃할 앱 목록으로 쓴다.
+    app_hosts = local.app_hosts_env
+    # Cloudflare 팀 도메인. 로그아웃 마지막에 여기 로그아웃 주소로 이동해 Access 전체 세션 쿠키까지 지운다.
+    cf_team_domain = var.cloudflare_team_domain
     # 서버 시작 때 DB 소속(accounts.department)을 맞추는 목록(main.tf locals). 컬럼이 없으면 같이 추가한다.
     account_departments = local.account_departments_env
     # 서버 시작 때 이 SSM 파라미터(SecureString, Terraform 밖에서 관리)에서 계정 정보를 읽어 DB에 없는 계정을 만든다(auth_seed.tf).

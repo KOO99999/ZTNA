@@ -13,16 +13,17 @@ from types import SimpleNamespace
 HERE = os.path.dirname(os.path.abspath(__file__))
 src = open(os.path.join(HERE, "auth_app.py"), encoding="utf-8").read()
 tree = ast.parse(src)
-want = ["_safe_return_url", "_original_url_candidate", "_resolve_return_url",
+want = ["_app_hosts", "_safe_return_url", "_original_url_candidate", "_resolve_return_url",
         "_parse_path_permissions", "_parse_account_departments", "_resource_key", "check_department_access", "render_no_permission"]
 funcs = {n.name: ast.get_source_segment(src, n) for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in want}
 assert sorted(funcs) == sorted(want), f"함수를 찾지 못함: {set(want) - set(funcs)}"
 
 os.environ["DOMAIN_NAME"] = "auth.xmcda.store"
 req = SimpleNamespace(args={}, referrer=None)
-ns = {"os": os, "urlparse": urlparse, "request": req, "escape": escape}
+import re
+ns = {"os": os, "urlparse": urlparse, "request": req, "escape": escape, "re": re}
 exec("\n\n".join(funcs[n] for n in want), ns)
-ns["PATH_PERMISSIONS"] = ns["_parse_path_permissions"]("/dev=dev;/marketing=marketing;/hr=hr;admin=admin")
+ns["PATH_PERMISSIONS"] = ns["_parse_path_permissions"]("dev.xmcda.store=dev;marketing.xmcda.store=marketing;hr.xmcda.store=hr;admin.xmcda.store=admin")
 resolve = ns["_resolve_return_url"]
 
 def run(args=None, referrer=None):
@@ -48,63 +49,79 @@ check("소속 목록 이상한 항목 건너뜀", pad("noequals;=dev;c@x.com=;d@
 check("소속 목록 공백 제거", pad(" e@x.com = dev ; "), {"e@x.com": "dev"})
 
 H = "https://xmcda.store"
-check("original_url /dev (실제 관찰값)", run({"original_url": "xmcda.store/dev"}), H + "/dev")
-check("original_url /hr", run({"original_url": "xmcda.store/hr"}), H + "/hr")
+DEV = "https://dev.xmcda.store"
+HR = "https://hr.xmcda.store"
+# [서브도메인 분리] 앱 호스트 목록: 환경변수 APP_HOSTS(Terraform locals.app_hosts), 없으면 기본 구성
+os.environ.pop("APP_HOSTS", None)
+check("APP_HOSTS 없으면 기본 5개 호스트", ns["_app_hosts"](),
+      ["xmcda.store", "dev.xmcda.store", "marketing.xmcda.store", "hr.xmcda.store", "admin.xmcda.store"])
+os.environ["APP_HOSTS"] = "xmcda.store, DEV.xmcda.store,bad host,<x>,hr.xmcda.store"
+check("APP_HOSTS: 소문자/공백 정리, 호스트에 못 쓰는 문자가 든 항목은 버림", ns["_app_hosts"](), ["xmcda.store", "dev.xmcda.store", "hr.xmcda.store"])
+os.environ["APP_HOSTS"] = "xmcda.store,dev.xmcda.store,marketing.xmcda.store,hr.xmcda.store,admin.xmcda.store"
+
+check("original_url dev 서브도메인(새 주소)", run({"original_url": "dev.xmcda.store/"}), DEV + "/")
+check("original_url hr 하위 경로", run({"original_url": "hr.xmcda.store/a"}), HR + "/a")
 check("original_url admin", run({"original_url": "admin.xmcda.store/"}), "https://admin.xmcda.store/")
-check("original_url 쿼리 포함", run({"original_url": "xmcda.store/dev?a=1&b=2"}), H + "/dev?a=1&b=2")
-check("original_url https:// 이미 있음", run({"original_url": "https://xmcda.store/dev"}), H + "/dev")
+check("original_url 쿼리 포함", run({"original_url": "dev.xmcda.store/?a=1&b=2"}), DEV + "/?a=1&b=2")
+check("original_url https:// 이미 있음", run({"original_url": "https://dev.xmcda.store/"}), DEV + "/")
+check("original_url 포털 홈", run({"original_url": "xmcda.store/"}), H + "/")
 check("없으면 홈", run({}), H)
+check("목록에 없는 서브도메인 거부(auth 등)", run({"original_url": "auth.xmcda.store/x"}), H)
 check("외부 도메인 거부", run({"original_url": "evil.com/login"}), H)
-check("비슷한 도메인 거부", run({"original_url": "xmcda.store.evil.com/dev"}), H)
+check("비슷한 도메인 거부", run({"original_url": "dev.xmcda.store.evil.com/"}), H)
 check("앞부분만 같은 도메인 거부", run({"original_url": "evilxmcda.store/dev"}), H)
-check("@ 우회 거부", run({"original_url": "xmcda.store@evil.com/x"}), H)
+check("@ 우회 거부", run({"original_url": "dev.xmcda.store@evil.com/x"}), H)
 check("// 시작 거부", run({"original_url": "//evil.com/x"}), H)
-check("http 거부", run({"original_url": "http://xmcda.store/dev"}), H)
+check("http 거부", run({"original_url": "http://dev.xmcda.store/"}), H)
 check("javascript: 거부", run({"original_url": "javascript:alert(1)"}), H)
-check("따옴표 포함 거부(XSS)", run({"original_url": 'xmcda.store/dev"onload="x'}), H)
-check("역슬래시 거부", run({"original_url": "xmcda.store\\@evil.com"}), H)
-check("공백/개행 거부", run({"original_url": "xmcda.store/dev\r\nX: y"}), H)
-check("포트 거부", run({"original_url": "xmcda.store:8443/dev"}), H)
-check("return_url이 original_url보다 우선", run({"return_url": "https://xmcda.store/marketing", "original_url": "xmcda.store/dev"}), H + "/marketing")
-check("잘못된 return_url이면 original_url 사용", run({"return_url": "https://evil.com", "original_url": "xmcda.store/dev"}), H + "/dev")
-check("original_url 없으면 Referer 사용", run({}, "https://xmcda.store/hr/page"), H + "/hr")
+check("따옴표 포함 거부(XSS)", run({"original_url": 'dev.xmcda.store/"onload="x'}), H)
+check("역슬래시 거부", run({"original_url": "dev.xmcda.store\\@evil.com"}), H)
+check("공백/개행 거부", run({"original_url": "dev.xmcda.store/\r\nX: y"}), H)
+check("포트 거부", run({"original_url": "dev.xmcda.store:8443/"}), H)
+check("return_url이 original_url보다 우선", run({"return_url": "https://marketing.xmcda.store/", "original_url": "dev.xmcda.store/"}), "https://marketing.xmcda.store/")
+check("잘못된 return_url이면 original_url 사용", run({"return_url": "https://evil.com", "original_url": "dev.xmcda.store/"}), DEV + "/")
+check("original_url 없으면 Referer의 호스트 사용", run({}, "https://hr.xmcda.store/page"), HR)
 check("original_url이 이상하면 Referer로", run({"original_url": "evil.com"}, "https://admin.xmcda.store/x"), "https://admin.xmcda.store")
+check("Referer가 비슷한 다른 도메인이면 무시(부분 문자열 비교 아님)", run({}, "https://dev.xmcda.store.evil.com/"), H)
+check("Referer에 우리 주소가 경로로만 들어 있으면 무시", run({}, "https://evil.com/dev.xmcda.store"), H)
 
 # ---------- 소속 기반 권한 안내 (함수 단위) ----------
 parse = ns["_parse_path_permissions"]
-check("권한표 파싱", parse("/dev=dev;/hr=hr,legal;admin=admin"), {"/dev": ["dev"], "/hr": ["hr", "legal"], "admin": ["admin"]})
+check("권한표 파싱", parse("dev.xmcda.store=dev;hr.xmcda.store=hr,legal;admin.xmcda.store=admin"),
+      {"dev.xmcda.store": ["dev"], "hr.xmcda.store": ["hr", "legal"], "admin.xmcda.store": ["admin"]})
 check("권한표가 비어 있으면 빈 표", parse(""), {})
 check("권한표가 None이어도 빈 표", parse(None), {})
-check("형식이 깨진 조각은 무시", parse("garbage;/dev=dev;=x;/hr"), {"/dev": ["dev"]})
-check("공백은 정리", parse(" /dev = dev , qa ; admin=admin "), {"/dev": ["dev", "qa"], "admin": ["admin"]})
+check("형식이 깨진 조각은 무시", parse("garbage;dev.xmcda.store=dev;=x;hr.xmcda.store"), {"dev.xmcda.store": ["dev"]})
+check("공백은 정리", parse(" dev.xmcda.store = dev , qa ; admin.xmcda.store=admin "), {"dev.xmcda.store": ["dev", "qa"], "admin.xmcda.store": ["admin"]})
 
 rk = ns["_resource_key"]
-check("자원 키: https://xmcda.store/dev", rk("https://xmcda.store/dev"), "/dev")
-check("자원 키: 하위 경로 /dev/a/b -> /dev", rk("https://xmcda.store/dev/a/b?x=1"), "/dev")
-check("자원 키: 홈", rk("https://xmcda.store"), "/")
-check("자원 키: admin 서브도메인은 경로와 무관하게 admin", rk("https://admin.xmcda.store/anything"), "admin")
+check("자원 키 = 호스트: dev 서브도메인", rk(DEV + "/"), "dev.xmcda.store")
+check("자원 키: 하위 경로/쿼리와 무관하게 호스트", rk(DEV + "/a/b?x=1"), "dev.xmcda.store")
+check("자원 키: 포털 홈", rk(H), "xmcda.store")
+check("자원 키: 대문자 호스트는 소문자로", rk("https://ADMIN.xmcda.store/anything"), "admin.xmcda.store")
 
 acc = ns["check_department_access"]
-check("dev 소속이 /dev -> 허용", acc("dev", H + "/dev"), True)
-check("admin 소속이 /dev -> 거부", acc("admin", H + "/dev"), False)
-check("marketing 소속이 /hr -> 거부", acc("marketing", H + "/hr"), False)
-check("소속이 비어 있으면(None) 보호 자원은 거부", acc(None, H + "/hr"), False)
-check("소속이 빈 문자열이어도 거부", acc("", H + "/hr"), False)
+check("dev 소속이 dev 서브도메인 -> 허용", acc("dev", DEV + "/"), True)
+check("admin 소속이 dev 서브도메인 -> 거부", acc("admin", DEV + "/"), False)
+check("marketing 소속이 hr 서브도메인 -> 거부", acc("marketing", HR + "/"), False)
+check("소속이 비어 있으면(None) 보호 자원은 거부", acc(None, HR + "/"), False)
+check("소속이 빈 문자열이어도 거부", acc("", HR + "/"), False)
 check("admin 소속이 admin 서브도메인 -> 허용", acc("admin", "https://admin.xmcda.store/"), True)
 check("dev 소속이 admin 서브도메인 -> 거부", acc("dev", "https://admin.xmcda.store/"), False)
-check("권한표에 없는 자원(홈)은 판단 불가(None) -> 기존 흐름 유지", acc("dev", H), None)
-check("대소문자가 다르면 같은 소속이 아님(정확히 일치만)", acc("DEV", H + "/dev"), False)
+check("권한표에 없는 자원(포털 홈)은 판단 불가(None) -> 기존 흐름 유지", acc("dev", H), None)
+check("옛 경로 주소(xmcda.store/dev)는 포털 호스트라 판단 불가(None)", acc("admin", H + "/dev"), None)
+check("대소문자가 다르면 같은 소속이 아님(정확히 일치만)", acc("DEV", DEV + "/"), False)
 ns["PATH_PERMISSIONS"] = {}
-check("권한표가 비어 있으면 판단 불가(None) -> 기존 흐름 유지", acc("dev", H + "/dev"), None)
-ns["PATH_PERMISSIONS"] = parse("/dev=dev;/marketing=marketing;/hr=hr;admin=admin")
+check("권한표가 비어 있으면 판단 불가(None) -> 기존 흐름 유지", acc("dev", DEV + "/"), None)
+ns["PATH_PERMISSIONS"] = parse("dev.xmcda.store=dev;marketing.xmcda.store=marketing;hr.xmcda.store=hr;admin.xmcda.store=admin")
 
-html = ns["render_no_permission"]("kim@xmcda.store", "marketing", H + "/hr")
+html = ns["render_no_permission"]("kim@xmcda.store", "marketing", HR + "/")
 check("권한 없음 화면: 계정/소속/필요 소속/홈/로그아웃 링크 포함",
       all(x in html for x in ("kim@xmcda.store", ">marketing<", ">hr<", 'href="https://xmcda.store/"', 'href="/logout"')), True)
 check("권한 없음 화면에 TOTP 입력 폼이 없음", ("totp" not in html.lower()) and ("<form" not in html), True)
-evil = ns["render_no_permission"]("<script>alert(1)</script>@x.com", '"><img src=x onerror=alert(2)>', H + "/hr")
+evil = ns["render_no_permission"]("<script>alert(1)</script>@x.com", '"><img src=x onerror=alert(2)>', HR + "/")
 check("권한 없음 화면은 계정/소속 값을 HTML 이스케이프(XSS 방지)", ("<script>alert(1)" not in evil) and ("<img src=x" not in evil), True)
-nodept = ns["render_no_permission"]("kim@xmcda.store", None, H + "/hr")
+nodept = ns["render_no_permission"]("kim@xmcda.store", None, HR + "/")
 check("소속이 없으면 '(지정되지 않음)' 표시", "(지정되지 않음)" in nodept, True)
 
 # ==========================================================================
@@ -124,7 +141,7 @@ else:
     os.environ.update(DB_HOST="h", DB_NAME="n", DB_USER="u", DB_PASSWORD="p", OIDC_CLIENT_ID="cid",
                       OIDC_CLIENT_SECRET="sec", PDP_EVALUATE_URL="https://pdp.test/evaluate",
                       EVALUATE_SHARED_SECRET="test-secret-local-only",
-                      PATH_PERMISSIONS="/dev=dev;/marketing=marketing;/hr=hr;admin=admin",
+                      PATH_PERMISSIONS="dev.xmcda.store=dev;marketing.xmcda.store=marketing;hr.xmcda.store=hr;admin.xmcda.store=admin",
                       AUTO_MIGRATE_SCHEMA="0")   # 자동 마이그레이션은 실제 DB가 필요해서 끔(별도 검증)
     flask_sqlalchemy.SQLAlchemy.create_all = lambda self, *a, **k: None   # 테스트에서는 실제 DB에 연결하지 않음
     sys.path.insert(0, HERE)
@@ -154,7 +171,7 @@ else:
          patch.object(aa, "check_brute_force", lambda e: False), \
          patch.object(aa, "evaluate_login_risk", lambda i, s: risk_calls.append((i, s)) or {"recorded": True}):
 
-        def stepup_get(email, original="xmcda.store/dev", extra=None):
+        def stepup_get(email, original="dev.xmcda.store/", extra=None):
             c.set_cookie(aa.SSO_COOKIE_NAME, login_cookie(email), domain="localhost")
             q = {"original_url": original}
             q.update(extra or {})
@@ -167,7 +184,7 @@ else:
         t = r.get_data(as_text=True)
         check("admin 계정이 /dev로 막힘 -> TOTP를 묻지 않고 '권한 없음'(403)", (r.status_code, "totp_code" in t, "접근 권한이 없습니다" in t), (403, False, True))
         ok("권한 없음 화면에 계정의 소속(admin)과 필요한 소속(dev)이 보임", ">admin<" in t and ">dev<" in t)
-        r = stepup_get("mkt1@xmcda.store", original="xmcda.store/hr")
+        r = stepup_get("mkt1@xmcda.store", original="hr.xmcda.store/")
         check("marketing 계정이 /hr -> '권한 없음'(403)", (r.status_code, "접근 권한이 없습니다" in r.get_data(as_text=True)), (403, True))
         r = stepup_get("dev1@xmcda.store", original="admin.xmcda.store/")
         check("dev 계정이 admin 콘솔 -> '권한 없음'(403)", (r.status_code, "접근 권한이 없습니다" in r.get_data(as_text=True)), (403, True))
@@ -177,26 +194,26 @@ else:
         check("소속이 지정되지 않은 계정이 보호 자원 -> '권한 없음'(403)", (r.status_code, "(지정되지 않음)" in r.get_data(as_text=True)), (403, True))
         r = stepup_get("admin1@xmcda.store", original="xmcda.store/")
         check("권한표에 없는 자원(홈)은 기존대로 TOTP 화면", (r.status_code, "totp_code" in r.get_data(as_text=True)), (200, True))
-        r = stepup_get("admin1@xmcda.store", original=None, extra={"return_url": "https://xmcda.store/dev"})
+        r = stepup_get("admin1@xmcda.store", original=None, extra={"return_url": "https://dev.xmcda.store/"})
         ok("게이트가 보낸 ?return_url= 로 와도 같은 권한 확인", r.status_code == 403, r.status_code)
 
         # POST 직접 호출 우회: 소속이 맞지 않으면 TOTP 검증도, Lambda 기록도 하지 않는다
         risk_calls.clear()
         c.set_cookie(aa.SSO_COOKIE_NAME, login_cookie("admin1@xmcda.store"), domain="localhost")
         good_code = pyotp.TOTP(ACCOUNTS["admin1@xmcda.store"].totp_secret).now()
-        r = c.post("/stepup", data={"return_url": "https://xmcda.store/dev", "totp_code": good_code})
+        r = c.post("/stepup", data={"return_url": "https://dev.xmcda.store/", "totp_code": good_code})
         ok("올바른 TOTP를 직접 POST해도 소속이 다르면 403, MFA 기록 없음",
               r.status_code == 403 and "접근 권한이 없습니다" in r.get_data(as_text=True) and not risk_calls, (r.status_code, risk_calls))
         c.set_cookie(aa.SSO_COOKIE_NAME, login_cookie("dev1@xmcda.store"), domain="localhost")
         good_code = pyotp.TOTP(ACCOUNTS["dev1@xmcda.store"].totp_secret).now()
-        r = c.post("/stepup", data={"return_url": "https://xmcda.store/dev", "totp_code": good_code})
-        ok("소속이 맞는 사용자의 올바른 TOTP -> 인증 완료 + MFA 기록 + 원래 페이지(/dev)로 이동",
-              r.status_code == 200 and "인증되었습니다" in r.get_data(as_text=True) and 'https://xmcda.store/dev' in r.get_data(as_text=True)
+        r = c.post("/stepup", data={"return_url": "https://dev.xmcda.store/", "totp_code": good_code})
+        ok("소속이 맞는 사용자의 올바른 TOTP -> 인증 완료 + MFA 기록 + 원래 페이지(dev 서브도메인)로 이동",
+              r.status_code == 200 and "인증되었습니다" in r.get_data(as_text=True) and 'https://dev.xmcda.store/' in r.get_data(as_text=True)
               and risk_calls and risk_calls[0][1] == {"mfa_reauth": True}, (r.status_code, risk_calls))
 
         # 로그인 안 한 상태
         c.delete_cookie(aa.SSO_COOKIE_NAME, domain="localhost")
-        r = c.get("/stepup", query_string={"original_url": "xmcda.store/dev"})
+        r = c.get("/stepup", query_string={"original_url": "dev.xmcda.store/"})
         ok("로그인(SSO) 없으면 권한 판단 전에 로그인 안내", "로그인이 필요합니다" in r.get_data(as_text=True), r.status_code)
 
         # 토큰의 department 클레임

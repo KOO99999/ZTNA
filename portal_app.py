@@ -238,6 +238,11 @@ def general():
     # 불필요한 중복). Flask는 기본적으로 도메인을 구분 안 해서, 이 체크를 직접 함.
     if request.host.startswith('admin.'):
         return admin_console()
+    # [서브도메인 분리] dev/marketing/hr도 admin과 같은 방식으로 호스트가 곧 앱이다.
+    host = request.host.split(':')[0].lower()
+    for team, page in TEAM_PAGES.items():
+        if host == f"{team}.{PORTAL_DOMAIN}":
+            return page()
 
     html = """
     <p>전 직원 공통 포털 홈입니다.</p>
@@ -395,20 +400,34 @@ def risk_release():
     return redirect(f"/?msg={code}", code=303)
 
 
+# [서브도메인 분리] 예전 경로 주소(xmcda.store/dev 등)는 이제 포털 앱(전 직원 공통) 범위에 들어가서,
+# 여기서 팀 페이지를 그대로 보여주면 다른 팀 직원도 볼 수 있게 된다. 그래서 내용은 절대 보여주지 않고
+# 새 주소(dev.xmcda.store 등)로 보내기만 한다(그 앱의 Access 정책이 다시 판단).
+PORTAL_DOMAIN = AUTH_DOMAIN.replace("auth.", "", 1)
+
+
 @app.route('/dev')
+@app.route('/marketing')
+@app.route('/hr')
+def legacy_team_path():
+    team = request.path.strip('/')
+    return redirect(f"https://{team}.{PORTAL_DOMAIN}/", code=302)
+
+
 def dev_page():
     html = "<p>개발팀 전용 공간입니다. (Cloudflare Access가 개발팀 계정만 통과시킴)</p>"
     return render_page("[Dev Team] 개발팀 페이지", html, is_public=False)
 
-@app.route('/marketing')
 def marketing_page():
     html = "<p>마케팅팀 전용 공간입니다. (Cloudflare Access가 마케팅팀 계정만 통과시킴)</p>"
     return render_page("[Marketing Team] 마케팅팀 페이지", html, is_public=False)
 
-@app.route('/hr')
 def hr_page():
     html = "<p>인사팀 전용 공간입니다. (Cloudflare Access가 인사팀 계정만 통과시킴)</p>"
     return render_page("[HR Team] 인사팀 페이지", html, is_public=False)
+
+
+TEAM_PAGES = {"dev": dev_page, "marketing": marketing_page, "hr": hr_page}
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)

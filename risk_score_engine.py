@@ -72,39 +72,53 @@ TIER_THRESHOLDS = {
     "internal": 60,      # 내부: 마케팅, 포털 공통
 }
 
+# [서브도메인 분리] 자원 식별자를 경로("/hr")에서 "호스트+경로"("hr.xmcda.store/...")로 바꿨다.
+#   앱마다 호스트가 따로라서, 경로만 보면 hr.xmcda.store/와 포털 xmcda.store/가 둘 다 "/"로 구분이 안 된다.
+#   키는 호스트(앱 단위)이고, 나중에 특정 경로만 더 엄격하게 하려면 "호스트/경로" 키를 추가하면 된다
+#   (가장 긴 키가 우선, 경로 경계("/")에서만 일치). 기준 도메인은 Lambda 환경변수 DOMAIN_NAME(main.tf).
+DOMAIN_NAME = os.environ.get("DOMAIN_NAME", "xmcda.store").strip().lower()
+
 RESOURCE_TIERS = {
-    "/admin": "top_secret",
-    "/hr": "confidential",
-    "/dev": "confidential",
-    "/marketing": "internal",
-    "/": "internal",
+    f"admin.{DOMAIN_NAME}": "top_secret",
+    f"hr.{DOMAIN_NAME}": "confidential",
+    f"dev.{DOMAIN_NAME}": "confidential",
+    f"marketing.{DOMAIN_NAME}": "internal",
+    DOMAIN_NAME: "internal",          # 포털(전사 공통)
 }
 
-# 기존 코드/테스트가 쓰는 이름 유지 (경로 -> 임계값). 등급표에서 파생되므로 따로 고칠 곳 없음.
+# 기존 코드/테스트가 쓰는 이름 유지 (자원 -> 임계값). 등급표에서 파생되므로 따로 고칠 곳 없음.
 RESOURCE_THRESHOLDS = {path: TIER_THRESHOLDS[tier] for path, tier in RESOURCE_TIERS.items()}
 DEFAULT_THRESHOLD = 40         # resource_path가 없거나(구버전 호출 등) 목록에 없는 자원 -> 기존 RISK_THRESHOLD와 동일값으로 안전 처리
 
 STEP_UP_MARGIN = 20            # 임계값 ~ +MARGIN 구간을 "경계구간"(Step-up MFA)으로 간주 (자원 무관 고정폭)
 
 
-def get_resource_tier(resource_path):
-    """resource_path(예: '/admin', '/admin?x=1')에 맞는 등급 이름을 조회.
-    - 정확히 일치하면 그 등급을 사용
-    - 하위 경로(예: '/admin/users')는 가장 긴 접두어가 일치하는 항목의 등급을 사용
-    - 둘 다 없으면 None (임계값은 DEFAULT_THRESHOLD로 안전 처리)
-    """
+def normalize_resource(resource_path):
+    """'HR.xmcda.store/a/?x=1' -> 'hr.xmcda.store/a'. 쿼리 제거, 호스트 소문자, 끝 슬래시 제거."""
     if not resource_path:
         return None
+    value = resource_path.split("?")[0].split("#")[0].strip()
+    host, slash, path = value.partition("/")
+    host = host.lower().rstrip(".")
+    if not host:
+        return None
+    path = path.rstrip("/")
+    return f"{host}/{path}" if path else host
 
-    normalized = resource_path.split("?")[0].rstrip("/") or "/"
 
-    if normalized in RESOURCE_TIERS:
-        return RESOURCE_TIERS[normalized]
-
-    for path in sorted(RESOURCE_TIERS.keys(), key=len, reverse=True):
-        if path != "/" and normalized.startswith(path):
-            return RESOURCE_TIERS[path]
-
+def get_resource_tier(resource_path):
+    """resource_path(호스트+경로, 예: 'admin.xmcda.store/', 'hr.xmcda.store/a?x=1')에 맞는 등급 이름.
+    - 가장 긴 키부터 보고, 키와 정확히 같거나 키 뒤가 '/'로 이어질 때만 일치(경로 경계).
+      예: 'dev.xmcda.store'는 'dev.xmcda.store/x'와 일치, 'dev.xmcda.store.evil.com'과는 불일치.
+    - 없으면 None (임계값은 DEFAULT_THRESHOLD로 안전 처리). 옛 형식('/admin')이나 로그인 서버의
+      평가('auth.xmcda.store/authorize')도 여기에 해당한다.
+    """
+    normalized = normalize_resource(resource_path)
+    if not normalized:
+        return None
+    for key in sorted(RESOURCE_TIERS, key=len, reverse=True):
+        if normalized == key or normalized.startswith(key + "/"):
+            return RESOURCE_TIERS[key]
     return None
 
 
@@ -354,7 +368,8 @@ def lambda_handler(event, context):
 
     session_id = body.get("session_id", str(uuid.uuid4()))
 
-    # resource_path: Worker(index.js)가 Access JWT의 request_url을 가공 없이 그대로 전달.
+    # resource_path: 자원 식별자(호스트+경로). Worker(index.js)는 Access JWT의 request_url에서,
+    # 앞단 판단 서비스(zt_risk.py)는 요청의 Host+경로에서 만들어 보낸다. 로그인 서버는 자기 주소를 보낸다.
     # 판단(어떤 임계값을 적용할지)은 여기(PDP)에서 전담 — Worker/PEP는 원본만 넘긴다는
     # 기존 원칙(night_access/unknown_location과 동일)을 그대로 따름.
     resource_path = body.get("resource_path")

@@ -170,6 +170,36 @@ ok("로그아웃: 5개 앱 로그아웃 주소 호출", html.count("/cdn-cgi/acc
 ok("로그아웃: 요청 끝난 뒤 이동(onload/onerror 카운트)", html.count('onload="done()"') == 5 and html.count('onerror="done()"') == 5 and "var remaining = 5" in html)
 ok("로그아웃: 고정 1초 이동 없음 + 5초 안전장치", "1000" not in html and "setTimeout(go, 5000)" in html)
 ok("로그아웃: 스크립트가 이미지보다 먼저 정의", html.index("function done()") < html.index("<img"))
+# [서브도메인 분리] 앱 로그아웃 주소는 호스트 바로 아래(/cdn-cgi/...)여야 동작한다(경로 앱의 /dev/cdn-cgi/...는 실측 404/302)
+ok("로그아웃: 경로 형태(/dev/cdn-cgi) 주소 없음", "/dev/cdn-cgi" not in html and "/hr/cdn-cgi" not in html and "/marketing/cdn-cgi" not in html)
+ok("로그아웃: 5개 앱 호스트 각각의 로그아웃 주소",
+   all(f"https://{h}/cdn-cgi/access/logout" in html for h in ("xmcda.store", "dev.xmcda.store", "marketing.xmcda.store", "hr.xmcda.store", "admin.xmcda.store")))
+# 팀 도메인(Access 전체 세션) 로그아웃으로 마지막 이동 - 이게 없으면 비밀번호 없이 다시 로그인됨(실측)
+os.environ["CF_TEAM_DOMAIN"] = "ancient-test.cloudflareaccess.com"
+html = aa.app.test_client().get("/logout").get_data(as_text=True)
+ok("로그아웃: 마지막 이동지 = 팀 도메인 로그아웃", 'window.location.href = "https://ancient-test.cloudflareaccess.com/cdn-cgi/access/logout"' in html)
+ok("로그아웃: 팀 도메인은 숨은 이미지로 부르지 않음(다른 사이트 쿠키 차단 대비)", '<img src="https://ancient-test.cloudflareaccess.com' not in html)
+for bad in ('evil.com', 'x.cloudflareaccess.com.evil.com', 'a"b.cloudflareaccess.com', ''):
+    os.environ["CF_TEAM_DOMAIN"] = bad
+    h2 = aa.app.test_client().get("/logout").get_data(as_text=True)
+    ok(f"로그아웃: 팀 도메인 값이 이상하면({bad!r}) 포털 홈으로(주입 방지)", 'window.location.href = "https://xmcda.store/"' in h2 and (not bad or bad not in h2))
+os.environ.pop("CF_TEAM_DOMAIN", None)
+os.environ["APP_HOSTS"] = "xmcda.store,dev.xmcda.store"
+h3 = aa.app.test_client().get("/logout").get_data(as_text=True)
+ok("로그아웃: 앱 목록은 APP_HOSTS(Terraform)를 따름", h3.count("/cdn-cgi/access/logout") == 2 and "var remaining = 2" in h3)
+os.environ.pop("APP_HOSTS", None)
+
+# 로그인 평가: 출처 login, 자원 = 로그인 서버 주소, 시각(UTC) 포함 (예전엔 자원 unknown/출처 A/밤에도 0점)
+sent = []
+class _R:
+    def json(self): return {"allow": True}
+with patch.object(aa.requests, "post", lambda url, **kw: sent.append(kw) or _R()):
+    aa.evaluate_login_risk("u@xmcda.store", {"security_mfa_passed": True})
+body = sent[0]["json"]
+ok("로그인 평가 본문: source=login", body.get("source") == "login", body)
+ok("로그인 평가 본문: resource_path=auth.xmcda.store/authorize", body.get("resource_path") == "auth.xmcda.store/authorize", body)
+ok("로그인 평가 본문: request_timestamp(UTC, Z)", re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", body.get("request_timestamp", "")), body)
+ok("로그인 평가 본문: 기존 신호 유지", body.get("security_mfa_passed") is True and body.get("identity") == "u@xmcda.store")
 
 # SSO 30분 무활동 만료
 import time as _t

@@ -19,22 +19,16 @@ import publicJwks from '../public-jwks.json';
 // LAMBDA_EVALUATE_URL은 wrangler.toml의 [vars]에서 관리 (destroy/apply로 API Gateway URL이
 // 바뀌어도 이 파일은 안 건드리고 wrangler.toml 값만 고치면 되도록 분리)
 
-// [RESOURCE_THRESHOLDS] Access JWT의 request_url("도메인/경로" 형태, 예: "xmcda.store/admin")에서
-// 경로 부분만 뽑아낸다. 판단(이 경로가 얼마나 민감한지)은 하지 않고 원본 경로만 그대로
-// 전달한다 — night_access/unknown_location과 동일하게, 실제 판정은 Lambda(PDP)가 전담.
+// [RESOURCE_THRESHOLDS] Access JWT의 request_url("호스트/경로" 형태, 예: "hr.xmcda.store/")에서
+// 자원 식별자 "호스트+경로"를 만든다(쿼리 제외). 판단(이 자원이 얼마나 민감한지)은 하지 않고
+// 원본만 전달한다 — night_access/unknown_location과 동일하게, 실제 판정은 Lambda(PDP)가 전담.
+// [서브도메인 분리] 예전엔 경로만 보내고 admin 호스트만 '/admin'으로 바꿔 끼웠는데, 앱마다 호스트가
+// 따로가 되면서 경로만으로는 자원을 구분할 수 없어 호스트를 같이 보낸다(엔진 RESOURCE_TIERS 키와 같은 형식).
 function extractResourcePath(requestUrl) {
   if (!requestUrl) return null;
   try {
     const parsed = new URL('https://' + requestUrl);
-    // [버그수정] admin_console/admin_api를 admin.xmcda.store 서브도메인으로 옮기면서,
-    // 이 함수가 도메인은 버리고 경로만 봐서 "admin.xmcda.store/"가 포털의 "/"(임계값 60)와
-    // 똑같이 취급되던 문제가 있었음 - resource_threshold가 20이 아니라 60으로 잘못 찍힘.
-    // admin 서브도메인으로 온 요청은 경로와 무관하게 RESOURCE_THRESHOLDS의 /admin 키와
-    // 매칭되도록 호스트 정보를 경로에 반영한다.
-    if (parsed.hostname.startsWith('admin.')) {
-      return '/admin';
-    }
-    return parsed.pathname || '/';
+    return parsed.hostname + (parsed.pathname || '/');
   } catch (e) {
     return null;
   }

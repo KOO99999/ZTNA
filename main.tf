@@ -36,21 +36,37 @@ provider "cloudflare" {
 locals {
   auth_domain = "auth.${var.domain_name}"
 
+  # [서브도메인 분리] 보호 대상 앱 5개의 주소. 예전엔 dev/marketing/hr를 xmcda.store/dev 같은 경로로
+  # 나눴는데, 같은 호스트의 경로 앱들은 (1) 로그인 순간 Access가 한꺼번에 평가하고(실측: /dev 하나만
+  # 들어가도 /, /marketing, /hr까지 같은 1초 안에 평가됨) (2) Cloudflare 로그아웃 주소
+  # (/cdn-cgi/access/logout)가 호스트 바로 아래에서만 동작해 /dev/cdn-cgi/... 는 로그아웃이 안 됐다
+  # (실측: 404/302). 앱마다 호스트를 따로 두면 쿠키·평가·로그아웃이 앱 단위로 자연스럽게 나뉜다.
+  # 이 표 하나에서 Access 앱 도메인, DNS, 터널, 로그인 서버(복귀 주소 허용/로그아웃 목록)가 모두 나온다.
+  app_hosts = {
+    portal    = var.domain_name
+    dev       = "dev.${var.domain_name}"
+    marketing = "marketing.${var.domain_name}"
+    hr        = "hr.${var.domain_name}"
+    admin     = "admin.${var.domain_name}"
+  }
+  app_hosts_env = join(",", [for k in ["portal", "dev", "marketing", "hr", "admin"] : local.app_hosts[k]])
+
   dev_team_emails       = ["employee01@xmcda.store", "employee02@xmcda.store", "employee03@xmcda.store", "employee04@xmcda.store"]
   marketing_team_emails = ["employee05@xmcda.store", "employee06@xmcda.store", "employee07@xmcda.store"]
   hr_team_emails        = ["employee08@xmcda.store", "employee09@xmcda.store"]
   all_employee_emails   = concat(local.dev_team_emails, local.marketing_team_emails, local.hr_team_emails, var.admin_allowed_emails)
 
-  # [접근 권한 안내] 자원(경로)별로 열 수 있는 소속(department). 로그인 서버(auth_app.py)가 환경변수로 받아
+  # [접근 권한 안내] 자원(앱 호스트)별로 열 수 있는 소속(department). 로그인 서버(auth_app.py)가 환경변수로 받아
   # /stepup에서 "소속이 달라서 막힌 것인지, 위험도 때문에 추가 인증이 필요한 것인지"를 구분하는 데 쓴다.
-  # 키: 첫 경로 조각("/dev" 등) 또는 admin 서브도메인("admin"). 값: 그 자원을 열 수 있는 소속 목록.
+  # 키: 자원의 호스트("dev.xmcda.store" 등, 위 app_hosts). 값: 그 자원을 열 수 있는 소속 목록.
+  # 포털(전 직원 공통)은 표에 없음 = 소속 제한 없음.
   # 소속은 DB accounts.department 값이며, 위 *_team_emails 목록과 같은 사람 구성으로 맞춰 둬야 한다
   # (Access 정책은 이메일 그룹으로 허용/차단하고, 이 표는 안내 화면만 고른다 - 두 곳이 어긋나면 안내가 틀릴 뿐 권한이 새지는 않음).
   path_departments = {
-    "/dev"       = ["dev"]
-    "/marketing" = ["marketing"]
-    "/hr"        = ["hr"]
-    "admin"      = ["admin"]
+    (local.app_hosts.dev)       = ["dev"]
+    (local.app_hosts.marketing) = ["marketing"]
+    (local.app_hosts.hr)        = ["hr"]
+    (local.app_hosts.admin)     = ["admin"]
   }
   path_permissions_env = join(";", [for path, depts in local.path_departments : "${path}=${join(",", depts)}"])
 
@@ -235,6 +251,8 @@ resource "aws_lambda_function" "pdp_engine" {
   environment {
     variables = {
       EVALUATE_SHARED_SECRET = var.evaluate_shared_secret
+      # 자원 등급표(호스트 -> 등급)를 만들 때 쓰는 기준 도메인 (risk_score_engine.py RESOURCE_TIERS)
+      DOMAIN_NAME = var.domain_name
     }
   }
 }
@@ -364,7 +382,7 @@ resource "cloudflare_zero_trust_access_group" "admins" {
 resource "cloudflare_zero_trust_access_application" "portal" {
   account_id                = var.cloudflare_account_id
   name                       = "ZT Portal (전사 공통)"
-  domain                     = var.domain_name
+  domain                     = local.app_hosts.portal
   type                       = "self_hosted"
   # [확대] admin_console에서 검증 완료(§14) - 나머지 5개 앱에도 동일 적용
   session_duration           = "15m"
@@ -391,7 +409,7 @@ resource "cloudflare_zero_trust_access_policy" "portal_gate" {
 resource "cloudflare_zero_trust_access_application" "dev" {
   account_id                = var.cloudflare_account_id
   name                       = "ZT Dev Team"
-  domain                     = "${var.domain_name}/dev"
+  domain                     = local.app_hosts.dev
   type                       = "self_hosted"
   session_duration           = "15m"
   custom_deny_url            = "https://auth.xmcda.store/stepup"
@@ -420,7 +438,7 @@ resource "cloudflare_zero_trust_access_policy" "dev_gate" {
 resource "cloudflare_zero_trust_access_application" "marketing" {
   account_id                = var.cloudflare_account_id
   name                       = "ZT Marketing Team"
-  domain                     = "${var.domain_name}/marketing"
+  domain                     = local.app_hosts.marketing
   type                       = "self_hosted"
   session_duration           = "15m"
   custom_deny_url            = "https://auth.xmcda.store/stepup"
@@ -445,7 +463,7 @@ resource "cloudflare_zero_trust_access_policy" "marketing_gate" {
 resource "cloudflare_zero_trust_access_application" "hr" {
   account_id                = var.cloudflare_account_id
   name                       = "ZT HR Team"
-  domain                     = "${var.domain_name}/hr"
+  domain                     = local.app_hosts.hr
   type                       = "self_hosted"
   session_duration           = "15m"
   custom_deny_url            = "https://auth.xmcda.store/stepup"
@@ -475,7 +493,7 @@ resource "cloudflare_zero_trust_access_application" "admin_console" {
   # /dev·/marketing처럼 임계값이 느슨한 형제 앱의 통과 판정이 /admin에도 새어들어와
   # 위험판단이 무력화되는 문제가 있었음(path_cookie_attribute로도 해결 안 됨).
   # 서브도메인은 브라우저 입장에서 완전히 다른 origin이라 이 문제가 구조적으로 발생하지 않음.
-  domain           = "admin.${var.domain_name}"
+  domain           = local.app_hosts.admin
   type             = "self_hosted"
   # [수정] 24시간짜리 세션이 살아있는 동안은 재접속해도 /authorize(로그인서버)를
   # 아예 안 거쳐서, SSO 재사용 보안수정(brute_force면 강제 재로그인)이 실행될
@@ -497,67 +515,12 @@ resource "cloudflare_zero_trust_access_application" "admin_console" {
   custom_deny_url = "https://auth.xmcda.store/stepup"
 
   # [통일 관리 방식] risk_block_shared를 dev/marketing/hr와 동일하게 적용.
-  # (path_cookie_attribute는 provider v4에 없어서, 아래 enable_path_cookie_attribute에서
-  # Cloudflare API를 직접 호출해 5개 앱 전체에 자동으로 켬 - v5로 프로바이더 업그레이드 없이 처리)
+  # (예전에 경로 앱끼리 쿠키를 나누려고 Cloudflare API로 path_cookie_attribute를 켜던
+  # null_resource는 dev/marketing/hr를 서브도메인으로 옮기면서 필요 없어져 삭제함)
   policies = [
     cloudflare_zero_trust_access_policy.risk_block_shared.id,
     cloudflare_zero_trust_access_policy.admin_gate_console.id,
   ]
-}
-
-# [자동화, 5개 앱 전체] provider(v4)가 path_cookie_attribute를 지원하지 않아서,
-# Cloudflare REST API를 직접 호출해 이 필드만 켠다. GET으로 현재 설정 전체를 가져온 뒤
-# path_cookie_attribute만 덮어써서 그대로 PUT하므로, Terraform이 관리하는 다른 필드
-# (policies 등)는 건드리지 않는다. for_each로 5개 앱을 한 번의 apply로 전부 처리.
-locals {
-  path_cookie_target_apps = {
-    portal        = cloudflare_zero_trust_access_application.portal.id
-    dev           = cloudflare_zero_trust_access_application.dev.id
-    marketing     = cloudflare_zero_trust_access_application.marketing.id
-    hr            = cloudflare_zero_trust_access_application.hr.id
-    admin_console = cloudflare_zero_trust_access_application.admin_console.id
-  }
-}
-
-resource "null_resource" "enable_path_cookie_attribute" {
-  for_each = local.path_cookie_target_apps
-
-  triggers = {
-    app_id = each.value
-  }
-
-  provisioner "local-exec" {
-    interpreter = ["PowerShell", "-Command"]
-    command     = <<-EOT
-      $ErrorActionPreference = "Stop"
-      $headers = @{
-        "Authorization" = "Bearer ${var.cloudflare_api_token}"
-        "Content-Type"  = "application/json"
-      }
-      $url = "https://api.cloudflare.com/client/v4/accounts/${var.cloudflare_account_id}/access/apps/${each.value}"
-
-      $current = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
-      if (-not $current.success) {
-        Write-Error "[${each.key}] GET 실패: $($current.errors | ConvertTo-Json -Depth 10)"
-      }
-
-      $body = $current.result
-      # 읽기 전용/응답 전용 필드는 PUT 바디에서 제거 (안 지우면 400 에러 날 수 있음)
-      $body.PSObject.Properties.Remove('id')
-      $body.PSObject.Properties.Remove('aud')
-      $body.PSObject.Properties.Remove('created_at')
-      $body.PSObject.Properties.Remove('updated_at')
-
-      $body | Add-Member -NotePropertyName path_cookie_attribute -NotePropertyValue $true -Force
-
-      $json = $body | ConvertTo-Json -Depth 20
-      $result = Invoke-RestMethod -Uri $url -Headers $headers -Method Put -Body $json
-      if (-not $result.success) {
-        Write-Error "[${each.key}] PUT 실패: $($result.errors | ConvertTo-Json -Depth 10)"
-      }
-      Write-Host "[${each.key}] path_cookie_attribute 설정 완료: $($result.result.path_cookie_attribute)"
-    EOT
-  }
 }
 
 resource "cloudflare_zero_trust_access_policy" "admin_gate_console" {
@@ -618,7 +581,19 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "web_tunnel_config" {
       service  = "http://${aws_instance.auth_server.private_ip}:8080"
     }
     ingress_rule {
-      hostname = "admin.${var.domain_name}"
+      hostname = local.app_hosts.admin
+      service  = "http://localhost:80"
+    }
+    ingress_rule {
+      hostname = local.app_hosts.dev
+      service  = "http://localhost:80"
+    }
+    ingress_rule {
+      hostname = local.app_hosts.marketing
+      service  = "http://localhost:80"
+    }
+    ingress_rule {
+      hostname = local.app_hosts.hr
       service  = "http://localhost:80"
     }
     ingress_rule {
@@ -655,6 +630,19 @@ resource "cloudflare_record" "web_app_dns" {
 resource "cloudflare_record" "admin_dns" {
   zone_id = var.cloudflare_zone_id
   name    = "admin"
+  type    = "CNAME"
+  content = "${cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.id}.cfargotunnel.com"
+  proxied = true
+  ttl     = 1
+}
+
+# [서브도메인 분리] dev/marketing/hr도 admin과 같은 방식(같은 터널, 같은 웹 서버). 1단계 서브도메인이라
+# Cloudflare 무료 인증서(Universal SSL)가 그대로 적용된다(2단계 a.b.xmcda.store는 미적용이라 쓰지 않음).
+resource "cloudflare_record" "team_app_dns" {
+  for_each = toset(["dev", "marketing", "hr"])
+
+  zone_id = var.cloudflare_zone_id
+  name    = each.key
   type    = "CNAME"
   content = "${cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.id}.cfargotunnel.com"
   proxied = true

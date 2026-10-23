@@ -102,23 +102,39 @@ check("portal_app.py 코드에 Lambda 비밀키/주소 참조가 없음", "EVALU
 check("portal_app.py에 check_risk 호출이 남아 있지 않음", "check_risk" not in src)
 
 reset()
-for path, host in [("/", "xmcda.store"), ("/dev", "xmcda.store"), ("/hr", "xmcda.store"),
-                   ("/marketing", "xmcda.store"), ("/", "admin.xmcda.store")]:
+TEAM_TEXT = {"dev": "개발팀 전용", "marketing": "마케팅팀 전용", "hr": "인사팀 전용"}
+for path, host in [("/", "xmcda.store"), ("/", "dev.xmcda.store"), ("/", "hr.xmcda.store"),
+                   ("/", "marketing.xmcda.store"), ("/", "admin.xmcda.store")]:
     r = client.get(path, headers={**H, "Host": host})
     check(f"통과: {host}{path} -> 200, 외부 호출 없음", r.status_code == 200 and len(calls) == 0, f"status={r.status_code} calls={len(calls)}")
+# [서브도메인 분리] 호스트가 곧 앱: 각 서브도메인의 첫 화면이 그 팀 페이지, 포털 홈에는 팀 페이지 내용 없음
+for team, text in TEAM_TEXT.items():
+    check(f"{team}.xmcda.store/ -> {team} 팀 페이지", text in client.get("/", headers={**H, "Host": f"{team}.xmcda.store"}).get_data(as_text=True))
+check("포털 홈(xmcda.store/)에는 팀 페이지 내용 없음",
+      not any(t in client.get("/", headers={**H, "Host": "xmcda.store"}).get_data(as_text=True) for t in TEAM_TEXT.values()))
+check("다른 도메인의 dev.* 호스트는 팀 페이지로 취급하지 않음",
+      "개발팀 전용" not in client.get("/", headers={**H, "Host": "dev.evil.com"}).get_data(as_text=True))
+# 옛 경로 주소(xmcda.store/dev)는 포털 앱(전 직원) 범위라 내용을 보여주면 안 되고, 새 주소로 보내기만 한다
+for team, text in TEAM_TEXT.items():
+    r = client.get(f"/{team}", headers={**H, "Host": "xmcda.store"})
+    check(f"옛 주소 xmcda.store/{team} -> {team}.xmcda.store로 302, 내용 노출 없음",
+          r.status_code == 302 and r.headers.get("Location") == f"https://{team}.xmcda.store/" and text not in r.get_data(as_text=True),
+          (r.status_code, r.headers.get("Location")))
+r = client.get("/dev", headers={"Host": "xmcda.store"})
+check("옛 주소도 JWT 없으면 먼저 차단(403)", r.status_code == 403, r.status_code)
 
 reset()
 r = client.get("/no-such-page", headers=H)
 check("등록되지 않은 경로는 404", r.status_code == 404, f"status={r.status_code}")
 
 # ---------- 2. 화면의 임계값은 판단 서비스가 넘겨준 헤더에서 읽는다 ----------
-def page(path="/hr", host="xmcda.store", **extra_headers):
+def page(path="/", host="hr.xmcda.store", **extra_headers):
     return client.get(path, headers={**H, "Host": host, **extra_headers}).get_data(as_text=True)
 
 check("X-ZT-Threshold: 40 -> '40점' 표시", "40점" in page(**{"X-ZT-Threshold": "40"}))
 check("X-ZT-Threshold: 20 (관리자 콘솔) -> '20점' 표시, 옛 문구('신뢰 점수') 없음",
       "20점" in page("/", "admin.xmcda.store", **{"X-ZT-Threshold": "20"}) and "신뢰 점수" not in page("/", "admin.xmcda.store", **{"X-ZT-Threshold": "20"}))
-check("X-ZT-Threshold: 60 -> '60점' 표시", "60점" in page("/", **{"X-ZT-Threshold": "60"}))
+check("X-ZT-Threshold: 60 -> '60점' 표시", "60점" in page("/", "xmcda.store", **{"X-ZT-Threshold": "60"}))
 check("헤더가 없으면 '확인 불가' 표시", "확인 불가" in page())
 t = page(**{"X-ZT-Threshold": "40<script>alert(1)</script>"})
 check("숫자가 아닌 헤더 값은 표시하지 않고(XSS 방지) '확인 불가'", "확인 불가" in t and "alert(1)" not in t)
@@ -253,7 +269,7 @@ check("인증 헤더 없음(해제 요청) -> 403, 해제 호출 없음", r.stat
 # ---------- 4. Cloudflare JWT 서명 검증 (검증 실패 = 기록 + 즉시 차단) ----------
 import io, contextlib
 
-def blocked_with_log(headers, path="/dev", host="xmcda.store"):
+def blocked_with_log(headers, path="/", host="dev.xmcda.store"):
     """요청을 보내고 (상태코드, 응답, 출력된 로그, Lambda 호출 수)를 돌려준다."""
     reset()
     buf = io.StringIO()
@@ -268,7 +284,7 @@ check("JWT 없음 -> 403, Lambda 호출 없음, 실패 기록(token_missing)",
 r, log, n = blocked_with_log({"Cf-Access-Authenticated-User-Email": "hana@test.com", "CF-IPCountry": "KR"})
 check("평문 이메일 헤더만 있고 JWT 없음(위조 시나리오) -> 차단", r.status_code == 403 and n == 0 and "token_missing" in log)
 
-r, log, n = blocked_with_log({**hdr(), "Cf-Access-Authenticated-User-Email": "admin@test.com"}, path="/hr")
+r, log, n = blocked_with_log({**hdr(), "Cf-Access-Authenticated-User-Email": "admin@test.com"}, host="hr.xmcda.store")
 _txt = r.get_data(as_text=True)
 check("JWT는 hana인데 평문 헤더만 admin으로 바꿔도 신원은 hana(JWT)로 표시됨",
       r.status_code == 200 and "hana@test.com" in _txt and "admin@test.com" not in _txt, f"status={r.status_code}")
@@ -323,13 +339,13 @@ r, log, n = blocked_with_log(hdr(key=EVIL_KEY))
 check("검증 실패 로그에 토큰 원문이 없음", make_token()[:20] not in log and "eyJ" not in log, log)
 
 # 정상 토큰
-r, log, n = blocked_with_log(hdr(aud=("aud-admin",)), path="/dev")
+r, log, n = blocked_with_log(hdr(aud=("aud-admin",)))
 check("정상 토큰(두 번째 허용 aud) -> 통과, 로그에 실패 기록 없음", r.status_code == 200 and "JWT_VERIFY_FAILED" not in log, f"{r.status_code} {log!r}")
 
 r, log, n = blocked_with_log(hdr(aud=("aud-other", "aud-portal")))
 check("aud 목록 중 하나라도 허용 목록에 있으면 통과", r.status_code == 200, r.status_code)
 
-r = client.get("/hr", headers=hdr(email="kim@test.com"))
+r = client.get("/", headers={**hdr(email="kim@test.com"), "Host": "hr.xmcda.store"})
 check("화면에 표시되는 계정도 JWT의 email", "kim@test.com" in r.get_data(as_text=True))
 
 # 설정 누락 -> fail-closed
@@ -375,7 +391,7 @@ def rotated_fetch():
 zj._fetch_jwks = rotated_fetch
 zj._jwks.update({"keys": {"kid-good": GOOD_KEY.public_key()}, "fetched_at": _time.time() - 120})
 reset()
-r = client.get("/dev", headers=hdr(key=NEW_KEY, kid="kid-new"))
+r = client.get("/", headers={**hdr(key=NEW_KEY, kid="kid-new"), "Host": "dev.xmcda.store"})
 check("Cloudflare 키 교체: 새 kid가 나오면 공개키를 다시 받아 통과", r.status_code == 200, r.status_code)
 zj._fetch_jwks = orig_fetch
 

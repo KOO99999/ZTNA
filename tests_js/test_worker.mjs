@@ -63,7 +63,7 @@ function check(name, cond, detail = '') {
 }
 
 async function accessToken({ key = access.privateKey, kid = 'access-kid', alg = 'RS256', nonce = 'nonce-123', exp = '5m', claims = {} } = {}) {
-  let jwt = new SignJWT({ nonce, email: 'hana@test.com', request_url: 'xmcda.store/dev',
+  let jwt = new SignJWT({ nonce, email: 'hana@test.com', request_url: 'dev.xmcda.store/',
     identity: { email: 'hana@test.com', geo: { country: 'KR' } }, ...claims });
   if (nonce === null) jwt = new SignJWT({ email: 'hana@test.com' });
   return await jwt.setProtectedHeader({ alg, kid }).setIssuedAt().setExpirationTime(exp).sign(key);
@@ -89,7 +89,7 @@ const wrap = (t) => JSON.stringify({ token: t });
   const { res, signed } = await call(wrap(t));
   check('정상 서명 + Lambda 허용 -> success:false(차단 규칙에 해당 안 함), nonce 그대로', res.status === 200 && signed.success === false && signed.nonce === 'nonce-123', JSON.stringify(signed));
   check('Lambda에 검증된 토큰의 identity/국가/경로가 전달됨',
-    lambdaCalls.length === 1 && lambdaCalls[0].body.identity === 'hana@test.com' && lambdaCalls[0].body.geo_country === 'KR' && lambdaCalls[0].body.resource_path === '/dev', JSON.stringify(lambdaCalls[0]?.body));
+    lambdaCalls.length === 1 && lambdaCalls[0].body.identity === 'hana@test.com' && lambdaCalls[0].body.geo_country === 'KR' && lambdaCalls[0].body.resource_path === 'dev.xmcda.store/', JSON.stringify(lambdaCalls[0]?.body));
   check('Lambda 호출에 공유비밀키 헤더', lambdaCalls[0].headers['X-Evaluate-Secret'] === 'secret-for-test');
 }
 {
@@ -104,7 +104,7 @@ const wrap = (t) => JSON.stringify({ token: t });
 }
 {
   const { signed } = await call(wrap(await accessToken({ claims: { request_url: 'admin.xmcda.store/' } })));
-  check('admin 서브도메인 요청 -> resource_path=/admin', lambdaCalls[0].body.resource_path === '/admin', lambdaCalls[0]?.body.resource_path);
+  check('admin 서브도메인 요청 -> resource_path=admin.xmcda.store/ (호스트+경로)', lambdaCalls[0].body.resource_path === 'admin.xmcda.store/', lambdaCalls[0]?.body.resource_path);
 }
 
 // ---------- 서명 검증 실패 = 차단 응답 + Lambda 호출 없음 ----------

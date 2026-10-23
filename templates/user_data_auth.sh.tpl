@@ -17,7 +17,7 @@ chown -R root:root /opt/ztauth
 chmod 755 /opt/ztauth
 chmod 644 /opt/ztauth/auth_app.py
 
-# PATH_PERMISSIONS: 자원별로 열 수 있는 소속 표 ("경로=소속,소속;경로=소속"). 세미콜론이 들어 있어서
+# PATH_PERMISSIONS: 자원(호스트)별로 열 수 있는 소속 표 ("호스트=소속,소속;호스트=소속"). 세미콜론이 들어 있어서
 # 작은따옴표로 감싼다(systemd EnvironmentFile과 셸에서 `. /etc/ztauth/env` 둘 다 안전).
 cat << 'ZTENV' > /etc/ztauth/env
 DB_HOST=${db_host}
@@ -30,6 +30,8 @@ DOMAIN_NAME=${domain_name}
 OIDC_CLIENT_ID=${oidc_client_id}
 OIDC_CLIENT_SECRET=${oidc_client_secret}
 PATH_PERMISSIONS='${path_permissions}'
+APP_HOSTS=${app_hosts}
+CF_TEAM_DOMAIN=${cf_team_domain}
 ACCOUNT_DEPARTMENTS='${account_departments}'
 SEED_PARAM_NAME=${seed_param_name}
 AWS_REGION=${aws_region}

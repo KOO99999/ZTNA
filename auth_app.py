@@ -196,7 +196,11 @@ PDP_EVALUATE_URL = os.environ.get('PDP_EVALUATE_URL')
 EVALUATE_SHARED_SECRET = os.environ.get('EVALUATE_SHARED_SECRET')
 
 
+# [로그인 평가 구분] 예전엔 자원/출처/시각 없이 보내서 관리자 로그에 "자원 unknown, 출처 A(Access와 혼동),
+# 밤인데도 0점"으로 찍혔다. 이제 출처는 login, 자원은 이 로그인 서버의 주소, 시각은 지금(UTC)을 함께 보낸다.
+# 자원(auth.xmcda.store/authorize)은 엔진 등급표에 없으므로 임계값은 예전과 같은 기본값(40)이 적용된다.
 def evaluate_login_risk(identity, signals):
+    login_host = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store')
     try:
         resp = requests.post(
             PDP_EVALUATE_URL,
@@ -207,6 +211,9 @@ def evaluate_login_risk(identity, signals):
             json={
                 "identity": identity,
                 "session_id": str(uuid.uuid4()),
+                "source": "login",
+                "resource_path": f"{login_host}/authorize",
+                "request_timestamp": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                 **signals,
             },
             timeout=3,
@@ -751,13 +758,23 @@ def render_stepup_success(return_url):
 # 실려오는 것이 실제로 관찰됐지만 Cloudflare 문서에는 정의돼 있지 않다. 그래서 이 값은 규격이
 # 아니라 "관찰된 동작"으로만 쓰고(_original_url_candidate), 없으면 브라우저가 이
 # 페이지로 넘어오기 직전 있었던 곳(Referer 헤더)을 근거로 추정한다. 확실한 값은 아니라서
-# 우리가 아는 앱 도메인(admin 서브도메인)에 해당할 때만 그리로 보내고, 그 외에는 항상
+# 우리가 아는 앱 호스트(_app_hosts)에 해당할 때만 그리로 보내고, 그 외에는 항상
 # 안전한 기본값(포털 홈)으로 보낸다.
+def _app_hosts():
+    """보호 대상 앱 호스트 목록(Terraform locals.app_hosts -> 환경변수 APP_HOSTS, 쉼표 구분).
+    복귀 주소 허용 목록과 로그아웃할 앱 목록으로 쓴다. 값이 없으면 기본 구성(포털+dev/marketing/hr/admin)을 쓴다."""
+    portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
+    raw = os.environ.get('APP_HOSTS', '')
+    # 호스트 이름에 쓸 수 있는 문자만 허용(이 값은 HTML 속성/로그아웃 주소에 그대로 들어간다)
+    hosts = [h.strip().lower() for h in raw.split(',') if re.fullmatch(r'[A-Za-z0-9.-]+', h.strip())]
+    return hosts or [portal_domain] + [f'{p}.{portal_domain}' for p in ('dev', 'marketing', 'hr', 'admin')]
+
+
 def _safe_return_url(candidate):
     """사용자가 넘긴 복귀 주소(쿼리스트링 return_url, 폼의 hidden 값)를 검증한다.
     이 값은 HTML 속성과 JS 문자열, window.location에 그대로 들어가므로, 검증 없이 쓰면
     (1) 아무 외부 사이트로 보내는 open redirect, (2) 따옴표를 섞은 값으로 스크립트가 끼어드는
-    XSS가 가능해진다. 우리 도메인(portal/admin 서브도메인)의 https 주소이고 위험 문자가
+    XSS가 가능해진다. 우리 앱 호스트(_app_hosts)의 https 주소이고 위험 문자가
     없을 때만 통과시키고, 아니면 None을 돌려 호출한 쪽이 안전한 기본값을 쓰게 한다."""
     if not candidate:
         return None
@@ -771,13 +788,13 @@ def _safe_return_url(candidate):
         return None
     if parsed.scheme != 'https' or port is not None or parsed.username or parsed.password:
         return None
-    if parsed.hostname not in (portal_domain, f'admin.{portal_domain}'):
+    if (parsed.hostname or '').lower() not in _app_hosts():
         return None
     return candidate
 
 
 def _original_url_candidate(raw):
-    """Access가 커스텀 거부 URL로 보낼 때 붙여주는 ?original_url=xmcda.store/dev 를 읽는다.
+    """Access가 커스텀 거부 URL로 보낼 때 붙여주는 ?original_url=dev.xmcda.store/ 를 읽는다.
     실제 리다이렉트 URL에서 관찰한 값이며 Cloudflare 문서에는 정의돼 있지 않다(그래서 규격으로
     믿지 않고, 없거나 이상하면 아래 Referer/기본값으로 그대로 넘어간다). 관찰된 값에는
     https://가 없으므로 붙여 주되, 최종 통과 여부는 반드시 _safe_return_url(우리 도메인
@@ -797,7 +814,7 @@ def _original_url_candidate(raw):
 #
 # 이 표는 안내 화면을 고르는 용도일 뿐 접근을 허용하지 않는다. 실제 허용/차단은 Cloudflare Access 정책과
 # nginx 앞단 판단 서비스가 하므로, 표가 없거나 틀려도 권한이 새지 않는다(최악의 경우 안내 화면이 달라질 뿐).
-# 형식: "경로=소속,소속;경로=소속" (예: /dev=dev;/hr=hr;admin=admin). admin 서브도메인은 키가 admin.
+# 형식: "호스트=소속,소속;호스트=소속" (예: dev.xmcda.store=dev;hr.xmcda.store=hr). 포털은 표에 없음 = 제한 없음.
 def _parse_path_permissions(raw):
     perms = {}
     for item in (raw or '').split(';'):
@@ -812,12 +829,8 @@ PATH_PERMISSIONS = _parse_path_permissions(os.environ.get('PATH_PERMISSIONS'))
 
 
 def _resource_key(url):
-    """복귀 주소가 어느 자원인지: admin 서브도메인이면 'admin', 아니면 첫 경로 조각('/dev', '/hr' ...), 홈은 '/'."""
-    parsed = urlparse(url)
-    if (parsed.hostname or '').startswith('admin.'):
-        return 'admin'
-    segments = [seg for seg in parsed.path.split('/') if seg]
-    return '/' + segments[0] if segments else '/'
+    """복귀 주소가 어느 자원인지 = 호스트(예: 'hr.xmcda.store'). 앱마다 서브도메인이 따로라 호스트가 곧 자원이다."""
+    return (urlparse(url).hostname or '').lower()
 
 
 def check_department_access(department, url):
@@ -886,14 +899,14 @@ def _resolve_return_url():
     from_access = _original_url_candidate(request.args.get('original_url'))
     if from_access:
         return from_access
-    referrer = request.referrer or ''
-    # [확대] admin 서브도메인만 알아보던 걸, custom_deny_url을 새로 붙인 5개 앱
-    # (portal/dev/marketing/hr/admin_console) 전부 인식하도록 확장.
-    if f'admin.{portal_domain}' in referrer:
-        return f'https://admin.{portal_domain}'
-    for path in ('/dev', '/marketing', '/hr'):
-        if f'{portal_domain}{path}' in referrer:
-            return f'https://{portal_domain}{path}'
+    # Referer는 호스트만 본다: 우리 앱 호스트 중 하나면 그 앱의 첫 화면으로, 아니면 포털 홈.
+    # (부분 문자열 비교가 아니라 호스트를 정확히 비교 - 'dev.xmcda.store.evil.com' 같은 주소는 무시)
+    try:
+        referrer_host = (urlparse(request.referrer or '').hostname or '').lower()
+    except ValueError:
+        referrer_host = ''
+    if referrer_host and referrer_host in _app_hosts():
+        return f'https://{referrer_host}'
     return f'https://{portal_domain}'
 
 
@@ -1059,22 +1072,25 @@ def logout():
     if sso_token:
         clear_sso_session(sso_token)
 
-    # [버그수정] 예전엔 xmcda.store 루트의 /cdn-cgi/access/logout 하나만 호출했는데,
-    # (1) path_cookie_attribute로 앱별 세션 쿠키가 경로별로 분리돼 있고
-    # (2) admin_console은 admin.xmcda.store라는 별도 서브도메인이라
-    # 이 한 번의 호출로는 다른 앱들의 세션이 전혀 지워지지 않고 남아있었음
-    # (admin.xmcda.store가 로그아웃 후에도 재인증 없이 그대로 통과되던 원인).
-    # xmcda.store와 admin.xmcda.store는 같은 등록 도메인(site)을 공유하는 서브도메인이라
-    # SameSite 쿠키도 같이 전달되는 same-site 관계임을 이용해, 5개 앱의 로그아웃
-    # 엔드포인트를 전부 숨은 이미지 태그로 호출한 뒤 최종 목적지로 이동시킨다.
+    # 로그아웃은 세 단계로 지운다(OpenID Connect Front-Channel Logout과 같은 구조: 로그인 서버가
+    # 브라우저를 통해 각 앱의 로그아웃 주소를 부른다).
+    #   1) 이 서버의 SSO 세션(위에서 서버 쪽 삭제 + 아래에서 쿠키 삭제)
+    #   2) 앱별 Access 쿠키: 앱 호스트마다 https://<호스트>/cdn-cgi/access/logout 을 숨은 이미지로 호출.
+    #      Cloudflare 로그아웃 주소는 호스트 바로 아래에서만 동작한다(예전 경로 앱의
+    #      xmcda.store/dev/cdn-cgi/... 는 실측 404/302로 로그아웃이 안 됐음 -> 서브도메인으로 분리).
+    #      앱 호스트들은 모두 xmcda.store 계열이라 same-site 요청으로 쿠키가 정상 전달된다.
+    #   3) Access 전체 세션(팀 도메인 쿠키): 마지막에 https://<팀도메인>/cdn-cgi/access/logout 으로 이동.
+    #      이걸 안 지우면 앱 쿠키가 없어도 Access가 비밀번호 없이 새 앱 토큰을 다시 발급해서
+    #      "로그아웃을 두 번 눌러야 되는" 현상이 생겼다(실측으로 확인). 팀 도메인은 다른 사이트
+    #      (cloudflareaccess.com)라 숨은 이미지로 부르면 브라우저가 쿠키를 막을 수 있어, 페이지 이동으로 한다.
     portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
-    logout_urls = [
-        f"https://{portal_domain}/cdn-cgi/access/logout",
-        f"https://{portal_domain}/dev/cdn-cgi/access/logout",
-        f"https://{portal_domain}/marketing/cdn-cgi/access/logout",
-        f"https://{portal_domain}/hr/cdn-cgi/access/logout",
-        f"https://admin.{portal_domain}/cdn-cgi/access/logout",
-    ]
+    logout_urls = [f"https://{host}/cdn-cgi/access/logout" for host in _app_hosts()]
+    team_domain = os.environ.get('CF_TEAM_DOMAIN', '').strip().lower()
+    if re.fullmatch(r'[a-z0-9-]+\.cloudflareaccess\.com', team_domain):
+        final_url = f"https://{team_domain}/cdn-cgi/access/logout"
+    else:
+        # 팀 도메인 설정이 없거나 형식이 이상하면(주입 방지) 예전처럼 포털 홈으로 보낸다.
+        final_url = f"https://{portal_domain}/"
     logout_pixels = "\n        ".join(
         f'<img src="{url}" style="display:none" onload="done()" onerror="done()">' for url in logout_urls
     )
@@ -1085,7 +1101,7 @@ def logout():
     <head><meta charset="utf-8"><title>로그아웃 중...</title></head>
     <body>
         <script>
-          // [버그수정] 예전엔 고정 1초 뒤에 이동해서, 5개 로그아웃 요청이 끝나기 전에 페이지가
+          // [버그수정] 예전엔 고정 1초 뒤에 이동해서, 앱 로그아웃 요청이 끝나기 전에 페이지가
           // 넘어가면 일부 세션 쿠키가 안 지워져 로그아웃을 두 번 눌러야 했음.
           // 요청이 전부 끝나면(성공/실패 무관) 이동하고, 응답이 없어도 5초 뒤엔 이동한다.
           var remaining = {len(logout_urls)};
@@ -1093,7 +1109,7 @@ def logout():
           function go() {{
             if (moved) return;
             moved = true;
-            window.location.href = "https://{portal_domain}/";
+            window.location.href = "{final_url}";
           }}
           function done() {{
             remaining -= 1;

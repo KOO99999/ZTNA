@@ -61,7 +61,7 @@ def reset(resp=None, st=200, err=False):
     status, boom = st, err
 
 client = ag.app.test_client()
-def ask(tok="__good__", country="KR", uri="/hr", host="xmcda.store", extra=None):
+def ask(tok="__good__", country="KR", uri="/", host="hr.xmcda.store", extra=None):
     h = {"X-Original-URI": uri, "X-Original-Host": host}
     if country:
         h["CF-IPCountry"] = country
@@ -83,14 +83,17 @@ check("통과 응답에 검증된 신원(X-ZT-Identity)", r.headers.get("X-ZT-Id
 check("Lambda에 보내는 identity는 JWT의 email, 국가는 CF-IPCountry 헤더",
       calls[0]["identity"] == "hana@test.com" and calls[0]["geo_country"] == "KR" and calls[0]["source"] == "B", calls[0])
 
-reset(); ask(uri="/api/db-data?type=admin_logs", host="admin.xmcda.store")
-check("admin 서브도메인 + 임의 경로 -> resource_path=/admin (쿼리 제거)", calls[0]["resource_path"] == "/admin", calls[0]["resource_path"])
+# [서브도메인 분리] 자원 식별자 = 호스트+경로(쿼리 제외). 등급 판단은 엔진이 호스트 기준으로 한다.
+reset(); ask(uri="/api/x?type=admin_logs", host="admin.xmcda.store")
+check("admin 서브도메인 + 임의 경로 -> admin.xmcda.store/api/x (쿼리 제거)", calls[0]["resource_path"] == "admin.xmcda.store/api/x", calls[0]["resource_path"])
 reset(); ask(uri="/", host="admin.xmcda.store")
-check("admin 서브도메인 / -> resource_path=/admin", calls[0]["resource_path"] == "/admin")
-reset(); ask(uri="/hr/?x=1")
-check("끝 슬래시와 쿼리는 판단 경로에서 제거 (/hr)", calls[0]["resource_path"] == "/hr", calls[0]["resource_path"])
-reset(); ask(uri="/%68r")
-check("퍼센트 인코딩 경로도 앱과 같은 경로(/hr)로 판단", calls[0]["resource_path"] == "/hr", calls[0]["resource_path"])
+check("admin 서브도메인 / -> admin.xmcda.store/", calls[0]["resource_path"] == "admin.xmcda.store/", calls[0]["resource_path"])
+reset(); ask(uri="/?x=1")
+check("hr 서브도메인 첫 화면 -> hr.xmcda.store/ (쿼리 제거)", calls[0]["resource_path"] == "hr.xmcda.store/", calls[0]["resource_path"])
+reset(); ask(uri="/", host="HR.xmcda.store:443")
+check("호스트 대문자/포트는 정규화 -> hr.xmcda.store/", calls[0]["resource_path"] == "hr.xmcda.store/", calls[0]["resource_path"])
+reset(); ask(uri="/%61")
+check("퍼센트 인코딩 경로도 앱과 같은 경로로 판단 (hr.xmcda.store/a)", calls[0]["resource_path"] == "hr.xmcda.store/a", calls[0]["resource_path"])
 
 # 통과 응답에는 앱 화면용 임계값/등급이 실린다 (nginx가 꺼내 앱에 넘김). 캐시에서 나온 응답도 같아야 함.
 reset(); r1, _ = ask(); r2, _ = ask()
@@ -169,14 +172,14 @@ ask(); ask()
 check("차단 결과는 캐시하지 않음(재인증 후 바로 풀려야 함)", len(calls) == 2, len(calls))
 
 # ---------- /deny: 차단 응답 만들기 ----------
-def deny(action, uri="/hr?x=1", host="xmcda.store"):
+def deny(action, uri="/a?x=1", host="hr.xmcda.store"):
     return client.get("/deny", headers={"X-ZT-Action": action, "X-Original-URI": uri, "X-Original-Host": host})
 
 r = deny("step_up_mfa_required")
 loc = r.headers.get("Location", "")
 check("step-up(페이지) -> 302, 인증 페이지로 이동 + 원래 주소(쿼리 포함) 보존",
       r.status_code == 302 and loc.startswith("https://auth.xmcda.store/stepup?return_url=")
-      and "return_url=https%3A%2F%2Fxmcda.store%2Fhr%3Fx%3D1" in loc, loc)
+      and "return_url=https%3A%2F%2Fhr.xmcda.store%2Fa%3Fx%3D1" in loc, loc)
 r = deny("step_up_mfa_required", uri="/api/db-data?type=admin_logs", host="admin.xmcda.store")
 body = r.get_json()
 check("step-up(API) -> 403 JSON StepUpRequired, 돌아올 곳은 관리자 페이지",

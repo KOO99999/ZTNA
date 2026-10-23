@@ -122,11 +122,13 @@ def check_risk(identity, country, resource_path):
 
 
 def resource_path_for(host, path):
-    """요청이 어느 자원인지. index.js(Worker)의 extractResourcePath와 같은 규칙:
-    admin 서브도메인이면 경로와 무관하게 /admin, 그 외에는 요청 경로 그대로."""
-    if (host or "").startswith("admin."):
-        return "/admin"
-    return path.rstrip("/") or "/"
+    """요청이 어느 자원인지 = "호스트+경로"(쿼리 제외). index.js(Worker)의 extractResourcePath와 같은 형식이고,
+    등급 판단은 엔진(RESOURCE_TIERS)이 한다. 호스트는 소문자로, 포트가 붙어 있으면 뗀다."""
+    host = (host or "").split(":")[0].strip().lower()
+    path = (path or "/").split("?")[0]
+    if not path.startswith("/"):
+        path = "/" + path
+    return host + path
 
 
 def stepup_url(auth_domain, host, path, query, is_api):

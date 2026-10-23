@@ -178,6 +178,12 @@ ingress:
     service: http://${auth_private_ip}:8080
   - hostname: admin.${domain_name}
     service: http://localhost:80
+  - hostname: dev.${domain_name}
+    service: http://localhost:80
+  - hostname: marketing.${domain_name}
+    service: http://localhost:80
+  - hostname: hr.${domain_name}
+    service: http://localhost:80
   - hostname: ${domain_name}
     service: http://localhost:80
   - service: http_status:404

@@ -181,13 +181,13 @@ print()
 
 run_case(
     "[RESOURCE_THRESHOLDS] 목록에 없는 resource_path -> DEFAULT_THRESHOLD(40)로 안전 처리",
-    {"session_id": "r2", "identity": "hana@test.com", "unknown_location": True, "resource_path": "/no-such-page"},
+    {"session_id": "r2", "identity": "hana@test.com", "unknown_location": True, "resource_path": "unknown.xmcda.store/"},
     expect_allow=True, expect_action="allow"
 )
 
 run_case(
     "[RESOURCE_THRESHOLDS] /admin(임계값20): unknown_location(40점) 단독 -> 기본(40)이면 통과지만 admin은 Step-up",
-    {"session_id": "r3", "identity": "hana@test.com", "unknown_location": True, "resource_path": "/admin"},
+    {"session_id": "r3", "identity": "hana@test.com", "unknown_location": True, "resource_path": "admin.xmcda.store/"},
     expect_allow=False, expect_action="step_up_mfa_required"
 )
 print(">>> 같은 신호(unknown_location)라도 자원이 /admin이면 위 r1과 다르게 걸려야 정상")
@@ -195,13 +195,13 @@ print()
 
 run_case(
     "[RESOURCE_THRESHOLDS] /admin 하위 경로(/admin/users)도 접두어 매칭으로 동일 임계값(20) 적용",
-    {"session_id": "r4", "identity": "hana@test.com", "unknown_location": True, "resource_path": "/admin/users"},
+    {"session_id": "r4", "identity": "hana@test.com", "unknown_location": True, "resource_path": "admin.xmcda.store/users"},
     expect_allow=False, expect_action="step_up_mfa_required"
 )
 
 run_case(
     "[RESOURCE_THRESHOLDS] /dev(기밀, 임계값40): night_access+unknown_location(60점) -> 경계구간이라 Step-up",
-    {"session_id": "r5", "identity": "hana@test.com", "night_access": True, "unknown_location": True, "resource_path": "/dev"},
+    {"session_id": "r5", "identity": "hana@test.com", "night_access": True, "unknown_location": True, "resource_path": "dev.xmcda.store/"},
     expect_allow=False, expect_action="step_up_mfa_required"
 )
 print(">>> [v12] /dev가 60->40으로 바뀌어 s8과 같은 결과여야 정상 (v11까지는 통과였음)")
@@ -209,13 +209,13 @@ print()
 
 run_case(
     "[v12] /hr(기밀, 임계값40): 같은 신호 조합 -> /dev와 동일하게 Step-up",
-    {"session_id": "r5b", "identity": "hana@test.com", "night_access": True, "unknown_location": True, "resource_path": "/hr"},
+    {"session_id": "r5b", "identity": "hana@test.com", "night_access": True, "unknown_location": True, "resource_path": "hr.xmcda.store/"},
     expect_allow=False, expect_action="step_up_mfa_required"
 )
 
 run_case(
     "[v12] /marketing(내부, 임계값60): night_access+unknown_location(60점) -> 통과",
-    {"session_id": "r5c", "identity": "hana@test.com", "night_access": True, "unknown_location": True, "resource_path": "/marketing"},
+    {"session_id": "r5c", "identity": "hana@test.com", "night_access": True, "unknown_location": True, "resource_path": "marketing.xmcda.store/"},
     expect_allow=True, expect_action="allow"
 )
 print(">>> 내부 등급만 가장 관대해야 정상")
@@ -223,13 +223,13 @@ print()
 
 run_case(
     "[RESOURCE_THRESHOLDS] /admin(임계값20)에 쿼리스트링이 붙어도 정상 매칭",
-    {"session_id": "r6", "identity": "hana@test.com", "unknown_location": True, "resource_path": "/admin?type=admin_logs"},
+    {"session_id": "r6", "identity": "hana@test.com", "unknown_location": True, "resource_path": "admin.xmcda.store/?type=admin_logs"},
     expect_allow=False, expect_action="step_up_mfa_required"
 )
 
 run_case(
     "[RESOURCE_THRESHOLDS] security 위험(waf_sqli)은 resource_path와 무관하게 여전히 MFA 전까지 무조건 차단",
-    {"session_id": "r7", "identity": "attacker@test.com", "waf_sqli": True, "resource_path": "/dev"},
+    {"session_id": "r7", "identity": "attacker@test.com", "waf_sqli": True, "resource_path": "dev.xmcda.store/"},
     expect_allow=False, expect_action="block_until_mfa"
 )
 print(">>> /dev는 임계값이 관대해도, security 신호는 §4 로직이 threshold보다 먼저 적용되어야 정상")
@@ -294,18 +294,25 @@ def check_tier(name, path, expect_tier, expect_threshold):
         print(f"    !! 기대값: tier={expect_tier}, threshold={expect_threshold}")
     print()
 
-check_tier("[v12] /admin -> top_secret(20)", "/admin", "top_secret", 20)
-check_tier("[v12] /admin?type=x -> top_secret(20)", "/admin?type=x", "top_secret", 20)
-check_tier("[v12] /hr -> confidential(40)", "/hr", "confidential", 40)
-check_tier("[v12] /dev -> confidential(40), /hr과 같은 등급", "/dev", "confidential", 40)
-check_tier("[v12] /dev/sub 접두어 매칭 -> confidential(40)", "/dev/sub", "confidential", 40)
-check_tier("[v12] /marketing -> internal(60)", "/marketing", "internal", 60)
-check_tier("[v12] / -> internal(60)", "/", "internal", 60)
-check_tier("[v12] 목록에 없는 경로 -> 등급 없음, DEFAULT_THRESHOLD(40)", "/no-such-page", None, 40)
+check_tier("[v12] /admin -> top_secret(20)", "admin.xmcda.store/", "top_secret", 20)
+check_tier("[v12] /admin?type=x -> top_secret(20)", "admin.xmcda.store/?type=x", "top_secret", 20)
+check_tier("[v12] /hr -> confidential(40)", "hr.xmcda.store/", "confidential", 40)
+check_tier("[v12] /dev -> confidential(40), /hr과 같은 등급", "dev.xmcda.store/", "confidential", 40)
+check_tier("[v12] /dev/sub 접두어 매칭 -> confidential(40)", "dev.xmcda.store/sub", "confidential", 40)
+check_tier("[v12] /marketing -> internal(60)", "marketing.xmcda.store/", "internal", 60)
+check_tier("[v12] / -> internal(60)", "xmcda.store/", "internal", 60)
+check_tier("[v12] 목록에 없는 경로 -> 등급 없음, DEFAULT_THRESHOLD(40)", "unknown.xmcda.store/", None, 40)
 check_tier("[v12] resource_path 없음 -> 등급 없음, DEFAULT_THRESHOLD(40)", None, None, 40)
+# [서브도메인 분리] 자원 식별자 = 호스트+경로. 키는 호스트, 경로 경계("/")에서만 일치
+check_tier("[서브도메인] 호스트 대문자/끝 슬래시 정규화 -> HR.xmcda.store// = confidential", "HR.xmcda.store//", "confidential", 40)
+check_tier("[서브도메인] 호스트만(경로 없음)도 매칭 -> admin.xmcda.store", "admin.xmcda.store", "top_secret", 20)
+check_tier("[서브도메인] 비슷한 다른 호스트(dev.xmcda.store.evil.com)는 불일치", "dev.xmcda.store.evil.com/", None, 40)
+check_tier("[서브도메인] 접두어만 같은 호스트(devx.xmcda.store)는 불일치", "devx.xmcda.store/", None, 40)
+check_tier("[서브도메인] 옛 형식(/admin)은 등급 없음 -> DEFAULT(40)", "/admin", None, 40)
+check_tier("[서브도메인] 로그인 서버 평가(auth.xmcda.store/authorize) -> 등급 없음, DEFAULT(40)", "auth.xmcda.store/authorize", None, 40)
 
 _r = json.loads(engine.lambda_handler(
-    {"headers": TEST_HEADERS, "body": json.dumps({"session_id": "t1", "identity": "hana@test.com", "resource_path": "/dev"})}, None
+    {"headers": TEST_HEADERS, "body": json.dumps({"session_id": "t1", "identity": "hana@test.com", "resource_path": "dev.xmcda.store/"})}, None
 )["body"])
 print(f"[{'PASS' if _r.get('resource_tier') == 'confidential' else 'FAIL'}] [v12] 응답에 resource_tier 포함")
 print(f"    -> resource_tier={_r.get('resource_tier')}")
@@ -399,25 +406,25 @@ def _call(body, mfa_record=None):
 
 with patch.object(engine.time, "time", return_value=_kst(14)):
     now14 = int(_kst(14))
-    r = _call({"session_id": "c1", "identity": "hana@test.com", "resource_path": "/dev"})
+    r = _call({"session_id": "c1", "identity": "hana@test.com", "resource_path": "dev.xmcda.store/"})
     t("[캐시TTL] 응답: /dev 허용 -> cache_ttl_seconds=90", r["allow"] and r.get("cache_ttl_seconds") == 90, r.get("cache_ttl_seconds"))
-    r = _call({"session_id": "c2", "identity": "hana@test.com", "resource_path": "/marketing"})
+    r = _call({"session_id": "c2", "identity": "hana@test.com", "resource_path": "marketing.xmcda.store/"})
     t("[캐시TTL] 응답: /marketing 허용 -> 300", r.get("cache_ttl_seconds") == 300, r.get("cache_ttl_seconds"))
-    r = _call({"session_id": "c3", "identity": "hana@test.com", "resource_path": "/admin"})
+    r = _call({"session_id": "c3", "identity": "hana@test.com", "resource_path": "admin.xmcda.store/"})
     t("[캐시TTL] 응답: /admin 허용 -> 0 (매 요청 검사)", r["allow"] and r.get("cache_ttl_seconds") == 0, r.get("cache_ttl_seconds"))
-    r = _call({"session_id": "c4", "identity": "hana@test.com", "resource_path": "/no-such-page"})
+    r = _call({"session_id": "c4", "identity": "hana@test.com", "resource_path": "unknown.xmcda.store/"})
     t("[캐시TTL] 응답: 목록에 없는 자원 -> 0", r.get("cache_ttl_seconds") == 0, r.get("cache_ttl_seconds"))
-    r = _call({"session_id": "c5", "identity": "x@test.com", "resource_path": "/dev", "waf_sqli": True})
+    r = _call({"session_id": "c5", "identity": "x@test.com", "resource_path": "dev.xmcda.store/", "waf_sqli": True})
     t("[캐시TTL] 응답: 차단 -> 0", (not r["allow"]) and r.get("cache_ttl_seconds") == 0, r.get("cache_ttl_seconds"))
-    r = _call({"session_id": "c6", "identity": "hana@test.com", "resource_path": "/dev", "night_access": True, "unknown_location": True})
+    r = _call({"session_id": "c6", "identity": "hana@test.com", "resource_path": "dev.xmcda.store/", "night_access": True, "unknown_location": True})
     t("[캐시TTL] 응답: step-up 필요 -> 0", r["action"] == "step_up_mfa_required" and r.get("cache_ttl_seconds") == 0, r)
-    r = _call({"session_id": "c7", "identity": "hana@test.com", "resource_path": "/dev", "night_access": True, "unknown_location": True},
+    r = _call({"session_id": "c7", "identity": "hana@test.com", "resource_path": "dev.xmcda.store/", "night_access": True, "unknown_location": True},
               mfa_record={"identity": "hana@test.com", "expires_at": now14 + 30})
     t("[캐시TTL] 응답: step-up 재인증 통과 -> MFA 남은 시간(30초)을 넘지 않음",
       r["action"] == "step_up_mfa_verified" and r.get("cache_ttl_seconds") == 30, r)
 
 with patch.object(engine.time, "time", return_value=_kst(21, 58)):
-    r = _call({"session_id": "c8", "identity": "hana@test.com", "resource_path": "/marketing"})
+    r = _call({"session_id": "c8", "identity": "hana@test.com", "resource_path": "marketing.xmcda.store/"})
     t("[캐시TTL] 응답: 21:58의 /marketing -> 야간 경계(120초)로 끊김", r.get("cache_ttl_seconds") == 120, r.get("cache_ttl_seconds"))
 
 # 비밀키 유출 방지: event 원문을 로그로 찍지 않는다 (예전에는 print(event)로 x-evaluate-secret이 CloudWatch에 남았음)
@@ -472,21 +479,21 @@ def _call_flagged(body, items):
     raw = engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps(body)}, None)
     return raw["statusCode"], json.loads(raw["body"])
 
-code, r = _call_flagged({"session_id": "u5", "identity": "kim@test.com", "resource_path": "/dev"},
+code, r = _call_flagged({"session_id": "u5", "identity": "kim@test.com", "resource_path": "dev.xmcda.store/"},
                         [_flag("kim@test.com", "threat_intel_match")])
 t("[UserRisk] active 신호가 있으면 아무 신호 없이 와도 차단", code == 200 and (not r["allow"]) and r["action"] == "block_until_mfa", r)
 t("[UserRisk] 차단 이유에 user_risk_active가 표시됨", "user_risk_active:threat_intel_match" in r["reasons"], r["reasons"])
 t("[UserRisk] 차단이면 캐시 유효시간 0", r.get("cache_ttl_seconds") == 0)
 
-code, r = _call_flagged({"session_id": "u6", "identity": "kim@test.com", "resource_path": "/dev", "security_mfa_passed": True},
+code, r = _call_flagged({"session_id": "u6", "identity": "kim@test.com", "resource_path": "dev.xmcda.store/", "security_mfa_passed": True},
                         [_flag("kim@test.com", "waf_sqli")])
 t("[UserRisk] MFA를 통과해도 걸린 신호는 풀리지 않음(resettable=False)", not r["allow"], r)
 
-code, r = _call_flagged({"session_id": "u7", "identity": "kim@test.com", "resource_path": "/dev"},
+code, r = _call_flagged({"session_id": "u7", "identity": "kim@test.com", "resource_path": "dev.xmcda.store/"},
                         [_flag("kim@test.com", "waf_sqli", status="released")])
 t("[UserRisk] released(해제된) 항목은 판단에 반영되지 않음", code == 200 and r["allow"], r)
 
-code, r = _call_flagged({"session_id": "u8", "identity": "kim@test.com", "resource_path": "/dev"},
+code, r = _call_flagged({"session_id": "u8", "identity": "kim@test.com", "resource_path": "dev.xmcda.store/"},
                         [_flag("kim@test.com", "night_access")])
 t("[UserRisk] sticky 대상이 아닌 신호 이름이 저장돼 있어도 무시", code == 200 and r["allow"], r)
 
@@ -511,7 +518,7 @@ mock_user_risk.query.side_effect = RuntimeError("dynamodb down")
 _b = io.StringIO()
 with contextlib.redirect_stdout(_b):
     raw = engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps(
-        {"session_id": "u10", "identity": "kim@test.com", "resource_path": "/dev"})}, None)
+        {"session_id": "u10", "identity": "kim@test.com", "resource_path": "dev.xmcda.store/"})}, None)
 t("[UserRisk] 조회 실패는 통과시키지 않고 500(fail-closed)", raw["statusCode"] == 500 and json.loads(raw["body"]).get("error") == "user_risk_unavailable", raw)
 t("[UserRisk] 조회 실패 시 판정 로그(put_item)도 남기지 않음(판단하지 않았으므로)", mock_table.put_item.call_count == 0)
 mock_user_risk.query.side_effect = None

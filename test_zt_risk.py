@@ -157,21 +157,23 @@ check("zt_risk에 야간 경계 계산이 없음(Lambda가 정함)", not hasattr
 
 # ---------- 4. Lambda로 보내는 내용 ----------
 reset()
-zr.check_risk("hana@test.com", "KR", "/dev")
+zr.check_risk("hana@test.com", "KR", "dev.xmcda.store/")
 sent = calls[0]
 check("Lambda 호출에 비밀키 헤더 포함", sent["headers"].get("X-Evaluate-Secret") == "test-secret-local-only")
 check("Lambda 호출 본문: identity/geo_country/resource_path/source",
       sent["json"]["identity"] == "hana@test.com" and sent["json"]["geo_country"] == "KR"
-      and sent["json"]["resource_path"] == "/dev" and sent["json"]["source"] == "B", sent["json"])
+      and sent["json"]["resource_path"] == "dev.xmcda.store/" and sent["json"]["source"] == "B", sent["json"])
 check("Lambda 호출 본문에 UTC ISO8601 request_timestamp 포함",
       sent["json"]["request_timestamp"].endswith("+00:00"), sent["json"]["request_timestamp"])
 check("Lambda 호출 timeout 설정됨", sent["timeout"] == zr.PDP_TIMEOUT_SECONDS)
 
 # ---------- 5. 자원 매핑 / step-up 주소 ----------
-check("admin 서브도메인 / -> /admin", zr.resource_path_for("admin.xmcda.store", "/") == "/admin")
-check("admin 서브도메인 임의 경로 -> /admin", zr.resource_path_for("admin.xmcda.store", "/anything/else") == "/admin")
-check("포털 홈 -> /", zr.resource_path_for("xmcda.store", "/") == "/")
-check("끝의 슬래시 제거: /dev/ -> /dev", zr.resource_path_for("xmcda.store", "/dev/") == "/dev")
+# [서브도메인 분리] 자원 식별자 = 호스트+경로(쿼리 제외). Worker(index.js)와 같은 형식.
+check("admin 서브도메인 / -> admin.xmcda.store/", zr.resource_path_for("admin.xmcda.store", "/") == "admin.xmcda.store/")
+check("hr 서브도메인 하위 경로 -> hr.xmcda.store/a/b", zr.resource_path_for("hr.xmcda.store", "/a/b") == "hr.xmcda.store/a/b")
+check("포털 홈 -> xmcda.store/", zr.resource_path_for("xmcda.store", "/") == "xmcda.store/")
+check("쿼리 제거, 호스트 소문자, 포트 제거", zr.resource_path_for("DEV.xmcda.store:443", "/x?y=1") == "dev.xmcda.store/x")
+check("경로가 비어 있으면 /", zr.resource_path_for("dev.xmcda.store", "") == "dev.xmcda.store/")
 u = zr.stepup_url("auth.xmcda.store", "xmcda.store", "/hr", "x=1", False)
 check("step-up 주소의 return_url이 원래 주소(쿼리 포함)", u == "https://auth.xmcda.store/stepup?return_url=https%3A%2F%2Fxmcda.store%2Fhr%3Fx%3D1", u)
 u = zr.stepup_url("auth.xmcda.store", "admin.xmcda.store", "/api/db-data", "type=a", True)

@@ -11,7 +11,7 @@ apt-get install -y python3-pip curl
 # ==========================================================================
 # gunicorn은 --no-control-socket 옵션이 있는 버전(26.2.0에서 확인)으로 고정함. 이 옵션이 없는 옛 버전이
 # 깔리면 서비스가 시작되지 않으므로, 버전을 올릴 때는 옵션 존재 여부를 먼저 확인할 것.
-pip3 install flask "gunicorn==26.2.0" pyjwt cryptography requests
+pip3 install flask "gunicorn==26.2.0" pyjwt cryptography requests boto3
 
 useradd --system --no-create-home --shell /usr/sbin/nologin ztgate || true
 mkdir -p /opt/ztgate /etc/ztgate
@@ -89,14 +89,55 @@ done
 #   (앱은 이제 서명 검증된 JWT의 email만 사용하며, 평문 이메일 헤더는 무시함).
 # ==========================================================================
 apt-get install -y nginx
+# [Web->WAS mTLS] 내부 CA 인증서 + 이 서버(웹)의 클라이언트 인증서/개인키를 SSM에서 받는다(mtls.tf, 자기 것만 읽기 권한).
+# nginx는 시작할 때 root로 이 파일들을 읽으므로 개인키는 root만 읽을 수 있게 둔다. IAM 권한 반영을 기다려 최대 5분 재시도.
+mkdir -p /etc/zt-mtls
+for i in $(seq 1 30); do
+  if python3 -c "
+import boto3
+ssm = boto3.client('ssm', region_name='${aws_region}')
+for name, out in (('ca_cert', 'ca.crt'), ('web_cert', 'me.crt'), ('web_key', 'me.key')):
+    v = ssm.get_parameter(Name='${mtls_param_prefix}/' + name, WithDecryption=True)['Parameter']['Value']
+    open('/etc/zt-mtls/' + out, 'w').write(v)
+"; then echo "mtls material ok after $i tries"; break; fi
+  sleep 10
+done
+chown root:root /etc/zt-mtls/me.key && chmod 600 /etc/zt-mtls/me.key
+chmod 644 /etc/zt-mtls/ca.crt /etc/zt-mtls/me.crt
+
 cat << 'NGINX' > /etc/nginx/sites-available/default
 map $request_uri $zt_unavailable_target {
     ~^/api/  @zt_unavailable_api;
     default  @zt_unavailable;
 }
 
+# [Web->WAS mTLS] 로그인 서버(auth.xmcda.store)도 이 nginx를 거쳐 mTLS로 보낸다. 예전엔 cloudflared가 인증 서버로
+# 평문 HTTP를 바로 보냈다. 로그인 서버 자체는 위험도 판단(auth_request) 대상이 아니므로 그대로 넘기기만 한다
+# (로그인 화면을 보기 전에 Access 토큰을 요구하면 로그인을 할 수 없다).
 server {
     listen 80;
+    server_name ${auth_domain};
+
+    location / {
+        proxy_pass https://${auth_private_ip}:8080;
+        proxy_ssl_name auth.zt.internal;
+        # [Web->WAS mTLS] 앱 서버로 TLS 접속: 내 클라이언트 인증서(web.zt.internal)를 보여주고,
+        # 앱 서버 인증서가 내부 CA가 발급한 app.zt.internal인지 확인한다(아니면 연결하지 않음 -> 502 -> fail-closed 503).
+        proxy_ssl_certificate         /etc/zt-mtls/me.crt;
+        proxy_ssl_certificate_key     /etc/zt-mtls/me.key;
+        proxy_ssl_trusted_certificate /etc/zt-mtls/ca.crt;
+        proxy_ssl_verify              on;
+        proxy_ssl_verify_depth        2;
+        proxy_ssl_server_name         on;
+        proxy_ssl_protocols           TLSv1.2 TLSv1.3;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+
+server {
+    listen 80 default_server;
 
     location = /_zt_auth {
         internal;
@@ -144,7 +185,17 @@ server {
         error_page 401 403 = @zt_denied;
         error_page 500 502 503 504 = $zt_unavailable_target;
 
-        proxy_pass http://${app_private_ip}:8080;
+        proxy_pass https://${app_private_ip}:8080;
+        proxy_ssl_name app.zt.internal;
+        # [Web->WAS mTLS] 앱 서버로 TLS 접속: 내 클라이언트 인증서(web.zt.internal)를 보여주고,
+        # 앱 서버 인증서가 내부 CA가 발급한 app.zt.internal인지 확인한다(아니면 연결하지 않음 -> 502 -> fail-closed 503).
+        proxy_ssl_certificate         /etc/zt-mtls/me.crt;
+        proxy_ssl_certificate_key     /etc/zt-mtls/me.key;
+        proxy_ssl_trusted_certificate /etc/zt-mtls/ca.crt;
+        proxy_ssl_verify              on;
+        proxy_ssl_verify_depth        2;
+        proxy_ssl_server_name         on;
+        proxy_ssl_protocols           TLSv1.2 TLSv1.3;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -175,7 +226,7 @@ cat << 'CFCONFIG' > /etc/cloudflared/config.yml
 tunnel: ${tunnel_id}
 ingress:
   - hostname: ${auth_domain}
-    service: http://${auth_private_ip}:8080
+    service: http://localhost:80
   - hostname: admin.${domain_name}
     service: http://localhost:80
   - hostname: dev.${domain_name}

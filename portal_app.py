@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import boto3
 
 from zt_jwt import JwtVerifyError, log_jwt_failure, verify_access_jwt
+from zt_mtls import build_server_context, client_allowed, client_cert_cn, mtls_settings
 
 app = Flask(__name__)
 dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
@@ -114,6 +115,19 @@ def _threshold_from_gate():
     """판단 서비스가 nginx를 통해 알려준 '이 요청에 적용된 임계값'(화면 표시용). 정수가 아니면 None."""
     raw = request.headers.get('X-ZT-Threshold', '')
     return int(raw) if raw.isdigit() and len(raw) <= 4 else None
+
+
+# [Web->WAS mTLS] 웹 서버(nginx)의 클라이언트 인증서로 들어온 요청만 받는다(zt_mtls.py). 연결 단계에서 내부 CA
+# 서명이 없는 인증서는 이미 거부되고, 여기서는 그 인증서의 이름이 웹 서버(MTLS_ALLOWED_CLIENT)인지 한 번 더 본다.
+MTLS = mtls_settings()
+
+
+@app.before_request
+def mtls_client_gate():
+    if MTLS and not client_allowed(request.environ, MTLS[3]):
+        print(f"[MTLS_CLIENT_REJECTED] cn={client_cert_cn(request.environ)!r} remote={request.remote_addr}", flush=True)
+        return "forbidden", 403
+    return None
 
 
 @app.before_request
@@ -471,4 +485,5 @@ def hr_page():
 TEAM_PAGES = {"dev": dev_page, "marketing": marketing_page, "hr": hr_page}
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+    ssl_context = build_server_context(*MTLS[:3]) if MTLS else None
+    app.run(host='0.0.0.0', port=8080, ssl_context=ssl_context)

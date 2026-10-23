@@ -33,6 +33,9 @@ resource "aws_instance" "web_server" {
     auth_domain     = local.auth_domain
     auth_private_ip = aws_instance.auth_server.private_ip
     domain_name     = var.domain_name
+    # [Web->WAS mTLS] 부팅 때 SSM에서 받을 클라이언트 인증서(mtls.tf)
+    aws_region        = var.aws_region
+    mtls_param_prefix = local.mtls_param_prefix
 
     # [판단 서비스] nginx auth_request가 요청마다 묻는 auth_gate.py (nginx 옆에서 실행)
     # app_server(ec2_app.tf)에 넘기는 값과 같은 방식/같은 값 + 같은 모듈(zt_jwt.py, zt_risk.py)
@@ -54,6 +57,9 @@ resource "aws_instance" "web_server" {
   tags = {
     Name = "ZT-Web-Server"
   }
+
+  # 부팅 스크립트가 SSM에서 인증서를 읽으므로, 파라미터와 읽기 권한이 먼저 만들어져 있어야 한다.
+  depends_on = [aws_ssm_parameter.mtls_key, aws_ssm_parameter.mtls_cert, aws_ssm_parameter.mtls_ca_cert, aws_iam_role_policy.mtls_read]
 
   lifecycle {
     create_before_destroy = true

@@ -13,9 +13,30 @@ cat << 'APP' > /opt/ztauth/auth_app.py
 ${app_code}
 APP
 
+# mTLS 공통 모듈(zt_mtls.py)
+cat << 'ZTMTLS' > /opt/ztauth/zt_mtls.py
+${zt_mtls_code}
+ZTMTLS
+
+# [Web->WAS mTLS] 내부 CA 인증서 + 이 서버의 인증서/개인키를 SSM에서 받는다(mtls.tf, 자기 것만 읽기 권한).
+# IAM 권한이 막 붙은 직후일 수 있어 최대 5분 재시도한다.
+mkdir -p /etc/zt-mtls
+for i in $(seq 1 30); do
+  if python3 -c "
+import boto3, sys
+ssm = boto3.client('ssm', region_name='${aws_region}')
+for name, out in (('ca_cert', 'ca.crt'), ('${mtls_role}_cert', 'me.crt'), ('${mtls_role}_key', 'me.key')):
+    v = ssm.get_parameter(Name='${mtls_param_prefix}/' + name, WithDecryption=True)['Parameter']['Value']
+    open('/etc/zt-mtls/' + out, 'w').write(v)
+"; then echo "mtls material ok after $i tries"; break; fi
+  sleep 10
+done
+chown root:ztauth /etc/zt-mtls/me.key && chmod 640 /etc/zt-mtls/me.key
+chmod 644 /etc/zt-mtls/ca.crt /etc/zt-mtls/me.crt
+
 chown -R root:root /opt/ztauth
 chmod 755 /opt/ztauth
-chmod 644 /opt/ztauth/auth_app.py
+chmod 644 /opt/ztauth/*.py
 
 # [WAS->DB TLS] AWS 공식 RDS 인증서 묶음(전 리전 공통). 앱이 이 파일로 DB 서버 인증서를 검증한다.
 # 주소 출처: AWS RDS 사용 설명서 "Using SSL/TLS to encrypt a connection to a DB instance".
@@ -31,6 +52,10 @@ DB_NAME=${db_name}
 DB_USER=${app_db_user}
 DB_PASSWORD=${app_db_password}
 DB_SSL_CA=/etc/ztauth/rds-ca.pem
+MTLS_CERT=/etc/zt-mtls/me.crt
+MTLS_KEY=/etc/zt-mtls/me.key
+MTLS_CLIENT_CA=/etc/zt-mtls/ca.crt
+MTLS_ALLOWED_CLIENT=${mtls_allowed_client}
 PDP_EVALUATE_URL=${pdp_evaluate_url}
 EVALUATE_SHARED_SECRET=${evaluate_shared_secret}
 DOMAIN_NAME=${domain_name}

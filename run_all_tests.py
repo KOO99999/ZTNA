@@ -23,6 +23,7 @@ TESTS = [
     ("계정 자동 시딩 (auth_app.py)", "test_seed_accounts.py"),
     ("유출 비밀번호 검사 (auth_app.py)", "test_pwned_password.py"),
     ("DB 최소권한·TLS (auth_app.py)", "test_db_least_privilege.py"),
+    ("Web->WAS mTLS (zt_mtls.py)", "test_mtls.py"),
 ]
 
 env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")

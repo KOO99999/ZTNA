@@ -22,12 +22,37 @@ cat << 'ZTJWT' > /opt/ztapp/zt_jwt.py
 ${zt_jwt_code}
 ZTJWT
 
+# mTLS 공통 모듈(zt_mtls.py)
+cat << 'ZTMTLS' > /opt/ztapp/zt_mtls.py
+${zt_mtls_code}
+ZTMTLS
+
+# [Web->WAS mTLS] 내부 CA 인증서 + 이 서버의 인증서/개인키를 SSM에서 받는다(mtls.tf, 자기 것만 읽기 권한).
+# IAM 권한이 막 붙은 직후일 수 있어 최대 5분 재시도한다.
+mkdir -p /etc/zt-mtls
+for i in $(seq 1 30); do
+  if python3 -c "
+import boto3, sys
+ssm = boto3.client('ssm', region_name='${aws_region}')
+for name, out in (('ca_cert', 'ca.crt'), ('${mtls_role}_cert', 'me.crt'), ('${mtls_role}_key', 'me.key')):
+    v = ssm.get_parameter(Name='${mtls_param_prefix}/' + name, WithDecryption=True)['Parameter']['Value']
+    open('/etc/zt-mtls/' + out, 'w').write(v)
+"; then echo "mtls material ok after $i tries"; break; fi
+  sleep 10
+done
+chown root:ztapp /etc/zt-mtls/me.key && chmod 640 /etc/zt-mtls/me.key
+chmod 644 /etc/zt-mtls/ca.crt /etc/zt-mtls/me.crt
+
 chown -R root:root /opt/ztapp
 chmod 755 /opt/ztapp
 chmod 644 /opt/ztapp/*.py
 
 cat << 'ZTENV' > /etc/ztapp/env
 AUTH_DOMAIN=${auth_domain}
+MTLS_CERT=/etc/zt-mtls/me.crt
+MTLS_KEY=/etc/zt-mtls/me.key
+MTLS_CLIENT_CA=/etc/zt-mtls/ca.crt
+MTLS_ALLOWED_CLIENT=${mtls_allowed_client}
 ZT_DEBUG_HEADERS=${debug_headers}
 CF_TEAM_DOMAIN=${cf_team_domain}
 CF_ACCESS_AUDS=${cf_access_auds}

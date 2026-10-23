@@ -37,6 +37,12 @@ resource "aws_instance" "app_server" {
     risk_admin_function = aws_lambda_function.risk_admin.function_name
     # 포털 홈 "내 업무 앱" 목록용 계정 소속 표(main.tf locals, 로그인 서버와 같은 값). 링크 표시용이며 권한이 아니다.
     account_departments = local.account_departments_env
+    # [Web->WAS mTLS] 부팅 때 SSM에서 받을 인증서(mtls.tf)와, 받아 줄 클라이언트(웹 서버) 인증서 이름
+    zt_mtls_code        = file("${path.module}/zt_mtls.py")
+    aws_region          = var.aws_region
+    mtls_role           = "app"
+    mtls_param_prefix   = local.mtls_param_prefix
+    mtls_allowed_client = local.mtls_names.web
 
     # [JWT 서명 검증] portal_app.py가 Cf-Access-Jwt-Assertion의 서명/발급자/aud/만료를 검증함.
     # aud는 이 서버로 요청을 보내는 Access 앱 6개의 AUD 태그(쉼표 구분). 앱이 재생성되어 AUD가
@@ -54,6 +60,9 @@ resource "aws_instance" "app_server" {
   tags = {
     Name = "ZT-Portal-Server"
   }
+
+  # 부팅 스크립트가 SSM에서 인증서를 읽으므로, 파라미터와 읽기 권한이 먼저 만들어져 있어야 한다.
+  depends_on = [aws_ssm_parameter.mtls_key, aws_ssm_parameter.mtls_cert, aws_ssm_parameter.mtls_ca_cert, aws_iam_role_policy.mtls_read]
 
   lifecycle {
     create_before_destroy = true

@@ -51,12 +51,20 @@ resource "aws_instance" "auth_server" {
     account_departments = local.account_departments_env
     # 서버 시작 때 이 SSM 파라미터(SecureString, Terraform 밖에서 관리)에서 계정 정보를 읽어 DB에 없는 계정을 만든다(auth_seed.tf).
     seed_param_name = local.seed_param_name
+    # [Web->WAS mTLS] 부팅 때 SSM에서 받을 인증서(mtls.tf)와, 받아 줄 클라이언트(웹 서버) 인증서 이름
+    zt_mtls_code        = replace(file("${path.module}/zt_mtls.py"), "/(?m)^[ \\t]*#[^\\n]*\\r?\\n/", "")
+    mtls_role           = "auth"
+    mtls_param_prefix   = local.mtls_param_prefix
+    mtls_allowed_client = local.mtls_names.web
     aws_region      = var.aws_region
   }))
 
   tags = {
     Name = "ZT-Auth-Server"
   }
+
+  # 부팅 스크립트가 SSM에서 인증서를 읽으므로, 파라미터와 읽기 권한이 먼저 만들어져 있어야 한다.
+  depends_on = [aws_ssm_parameter.mtls_key, aws_ssm_parameter.mtls_cert, aws_ssm_parameter.mtls_ca_cert, aws_iam_role_policy.mtls_read]
 
   lifecycle {
     create_before_destroy = true

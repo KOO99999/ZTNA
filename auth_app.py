@@ -18,7 +18,22 @@ import hmac
 from html import escape
 from urllib.parse import urlparse
 
+from zt_mtls import build_server_context, client_allowed, client_cert_cn, mtls_settings
+
 app = Flask(__name__)
+
+# [Web->WAS mTLS] 웹 서버(nginx)의 클라이언트 인증서로 들어온 요청만 받는다(zt_mtls.py). 연결 단계에서 내부 CA
+# 서명이 없는 인증서는 이미 거부되고, 여기서는 그 인증서의 이름이 웹 서버(MTLS_ALLOWED_CLIENT)인지 한 번 더 본다.
+MTLS = mtls_settings()
+
+
+@app.before_request
+def mtls_client_gate():
+    if MTLS and not client_allowed(request.environ, MTLS[3]):
+        print(f"[MTLS_CLIENT_REJECTED] cn={client_cert_cn(request.environ)!r} remote={request.remote_addr}", flush=True)
+        return "forbidden", 403
+    return None
+
 
 DB_HOST = os.environ.get('DB_HOST')
 DB_NAME = os.environ.get('DB_NAME')
@@ -1196,4 +1211,5 @@ if __name__ == '__main__':
         with app.app_context():
             bootstrap_database()
         sys.exit(0)
-    app.run(host='0.0.0.0', port=8080)
+    ssl_context = build_server_context(*MTLS[:3]) if MTLS else None
+    app.run(host='0.0.0.0', port=8080, ssl_context=ssl_context)

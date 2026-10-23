@@ -16,6 +16,11 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.0"
     }
+    # Web->WAS mTLS용 내부 CA/인증서 발급(mtls.tf)
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
   }
 }
 
@@ -622,13 +627,13 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "web_tunnel_config" {
   tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.web_tunnel.id
 
   config {
-    # auth.xmcda.store는 nginx를 거치지 않고 auth_server로 곧장 연결됨.
-    # (nginx가 도메인 구분 없이 모든 경로를 app_server로 넘기던 구조 때문에, 예전엔
-    # login.xmcda.store/admin으로 Access 보호를 완전히 우회할 수 있는 구멍이 있었음.
-    # auth_server 자체엔 /admin 라우트가 코드에 없어서, 이제 경로가 달라도 원천 차단됨)
+    # auth.xmcda.store도 웹 서버 nginx를 거쳐 mTLS로 auth_server에 간다(Web->WAS mTLS).
+    # nginx에는 auth 호스트 전용 server 블록이 따로 있고 그 블록은 auth_server로만 보낸다.
+    # (예전엔 nginx가 도메인 구분 없이 모든 경로를 app_server로 넘기던 구조라 login 호스트로 Access 보호를
+    # 우회할 수 있는 구멍이 있었음 - 호스트별 server 블록과 auth_server에 /admin 라우트가 없다는 점으로 막혀 있음)
     ingress_rule {
       hostname = local.auth_domain
-      service  = "http://${aws_instance.auth_server.private_ip}:8080"
+      service  = "http://localhost:80"
     }
     ingress_rule {
       hostname = local.app_hosts.admin

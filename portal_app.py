@@ -31,10 +31,10 @@ for _item in os.environ.get("ACCOUNT_DEPARTMENTS", "").split(";"):
         ACCOUNT_DEPARTMENTS[_email.strip().lower()] = _dept.strip()
 # 소속 -> 보여줄 앱 (서브도메인 이름, 화면 이름)
 DEPARTMENT_APPS = {
-    "dev": [("dev", "개발팀 페이지")],
-    "marketing": [("marketing", "마케팅팀 페이지")],
-    "hr": [("hr", "인사팀 페이지")],
-    "admin": [("admin", "관리자 콘솔")],
+    "dev": [("dev", "개발팀 페이지", "💻", "소스코드·서버 접근 업무", "기밀")],
+    "marketing": [("marketing", "마케팅팀 페이지", "📣", "캠페인·홍보 자료", "내부")],
+    "hr": [("hr", "인사팀 페이지", "🗂️", "인사·개인정보 업무", "기밀")],
+    "admin": [("admin", "관리자 콘솔", "🛡️", "감사 로그·위험 상태 해제", "최고기밀")],
 }
 # 해제 폼의 CSRF 토큰 서명 키. 서버 시작 때 만들어 환경변수로 넘긴다(여러 워커가 같은 값을 써야 함).
 # 없으면 프로세스마다 임의 값(단일 워커에서만 동작) - 키를 못 읽어도 위조 토큰은 못 만든다.
@@ -180,7 +180,7 @@ def render_page(title, content_html, is_public=False, wide=False):
         user_status_html = "🌐 <strong>접속 상태:</strong> 게스트 (인증 불필요 오픈 서비스)"
     else:
         email_str = user_email if user_email else "인증 정보 없음"
-        user_status_html = f"🔑 <strong>인증된 관리자 계정:</strong> {esc(email_str)}<br>🛡️ <strong>허용 위험점수(이하 통과):</strong> {threshold_str}"
+        user_status_html = f"🔑 <strong>로그인 계정:</strong> {esc(email_str)}<br>🛡️ <strong>허용 위험점수(이하 통과):</strong> {threshold_str}"
         # 로그아웃: SSO 세션(auth_app.py)과 Cloudflare Access 세션을 순차 정리하기 위해
         # 반드시 auth.xmcda.store/logout으로 보내야 함 (chained logout, portal_app.py엔 /logout 라우트 없음)
         user_status_html += '<br><a href="https://auth.xmcda.store/logout">로그아웃</a>'
@@ -230,7 +230,24 @@ def render_page(title, content_html, is_public=False, wide=False):
             .msg-err {{ background: #f8d7da; }}
             button.small {{ margin-top: 0; padding: 4px 10px; font-size: 0.85em; background: #dc3545; }}
             pre {{ background: #1e1e1e; color: #4ec9b0; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.9em; }}
+            .section-title {{ margin: 24px 0 12px; font-size: 1.05em; }}
+            .app-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }}
+            .app-tile {{ display: flex; flex-direction: column; gap: 6px; padding: 18px; border: 1px solid #e3e7ee; border-radius: 12px;
+                         background: #fafbfd; color: inherit; text-decoration: none; transition: box-shadow .15s, transform .15s, border-color .15s; }}
+            .app-tile:hover {{ border-color: #007bff; box-shadow: 0 6px 16px rgba(0,123,255,0.15); transform: translateY(-2px); }}
+            .app-icon {{ font-size: 1.8em; line-height: 1; }}
+            .app-name {{ font-weight: bold; font-size: 1.05em; }}
+            .app-desc {{ color: #666; font-size: 0.85em; }}
+            .app-meta {{ color: #999; font-size: 0.75em; margin-top: 4px; }}
+            .app-tier {{ display: inline-block; background: #e7f1ff; color: #0056b3; border-radius: 10px; padding: 1px 8px; margin-right: 6px; font-weight: bold; }}
+            .app-empty {{ color: #666; background: #f8f9fa; padding: 14px; border-radius: 8px; }}
         </style>
+        <script>
+          // 로그아웃 후 '뒤로 가기'로 브라우저가 저장해 둔 화면(bfcache)을 그대로 꺼내 보여주는 경우가 있다
+          // (Cache-Control: no-store만으로는 브라우저에 따라 막히지 않음). 저장된 화면으로 돌아오면
+          // 다시 불러오게 해서, 서버(Access)가 지금 로그인 상태인지 다시 확인하게 한다.
+          window.addEventListener('pageshow', function (e) {{ if (e.persisted) window.location.reload(); }});
+        </script>
         {inactivity_script}
     </head>
     <body>
@@ -266,10 +283,18 @@ def general():
     dept = ACCOUNT_DEPARTMENTS.get((getattr(g, "identity", "") or "").lower())
     apps = DEPARTMENT_APPS.get(dept, [])
     if apps:
-        links = "".join(f'<li><a href="https://{sub}.{PORTAL_DOMAIN}/">{esc(name)}</a></li>' for sub, name in apps)
-        app_html = f"<h3>내 업무 앱</h3><ul>{links}</ul>"
+        tiles = "".join(
+            f'<a class="app-tile" href="https://{sub}.{PORTAL_DOMAIN}/">'
+            f'<span class="app-icon">{icon}</span>'
+            f'<span class="app-name">{esc(name)}</span>'
+            f'<span class="app-desc">{esc(desc)}</span>'
+            f'<span class="app-meta"><span class="app-tier">{esc(tier)}</span>{esc(sub)}.{esc(PORTAL_DOMAIN)}</span>'
+            f'</a>'
+            for sub, name, icon, desc, tier in apps)
+        app_html = f'<h3 class="section-title">내 업무 앱</h3><div class="app-grid">{tiles}</div>'
     else:
-        app_html = "<h3>내 업무 앱</h3><p>사용할 수 있는 업무 앱이 없습니다. 필요하면 관리자에게 요청하세요.</p>"
+        app_html = ('<h3 class="section-title">내 업무 앱</h3>'
+                    '<p class="app-empty">사용할 수 있는 업무 앱이 없습니다. 필요하면 관리자에게 요청하세요.</p>')
     html = """
     <p>전 직원 공통 포털 홈입니다.</p>
     <ul>

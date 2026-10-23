@@ -94,7 +94,8 @@ ok("앱 서비스: 전용 계정(ztauth)으로 실행", "User=ztauth" in svc)
 def read_tf(name):
     return open(os.path.join(HERE, name), encoding="utf-8").read().replace("\r\n", "\n")
 dbtf = read_tf("database.tf")
-ok("RDS 파라미터 그룹: require_secure_transport = ON", re.search(r'name\s*=\s*"require_secure_transport"\s*\n\s*value\s*=\s*"ON"', dbtf) is not None)
+ok("RDS 파라미터 그룹: require_secure_transport = ON(1)",
+   re.search(r'name\s*=\s*"require_secure_transport"\s*\n(?:\s*#[^\n]*\n)*\s*value\s*=\s*"(1|ON)"', dbtf) is not None)
 ok("RDS 인스턴스에 파라미터 그룹 연결", "parameter_group_name   = aws_db_parameter_group.login_db_params.name" in dbtf)
 ec2 = read_tf("ec2_auth.tf")
 ok("앱 계정 접속 위치 = 앱 서브넷(IP/넷마스크)", "cidrnetmask(aws_subnet.app_subnet.cidr_block)" in ec2)

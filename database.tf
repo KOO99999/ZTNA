@@ -27,7 +27,8 @@ resource "aws_db_parameter_group" "login_db_params" {
 
   parameter {
     name  = "require_secure_transport"
-    value = "ON"
+    # RDS 파라미터 그룹은 이 값을 0/1로 저장한다("ON"으로 적으면 apply할 때마다 바뀐 것으로 나옴). 1 = ON.
+    value = "1"
   }
 
   lifecycle {

@@ -28,8 +28,13 @@ resource "aws_instance" "auth_server" {
     app_code    = replace(file("${path.module}/auth_app.py"), "/(?m)^[ \\t]*#[^\\n]*\\r?\\n/", "")
     db_host     = aws_db_instance.login_db.address
     db_name     = aws_db_instance.login_db.db_name
-    db_user     = aws_db_instance.login_db.username
-    db_password = random_password.db_master_password.result
+    # 앱 서비스가 쓰는 DB 계정 = 앱 전용 계정(행 읽기/쓰기만). 마스터 계정은 부팅 단계(bootstrap)에서만 쓴다.
+    app_db_user     = "zt_auth_app"
+    app_db_password = random_password.db_app_password.result
+    # 앱 계정이 접속할 수 있는 위치 = 앱 서브넷(MySQL 'IP/넷마스크' 형식, 예: 10.0.2.0/255.255.255.0)
+    app_db_host = "${cidrhost(aws_subnet.app_subnet.cidr_block, 0)}/${cidrnetmask(aws_subnet.app_subnet.cidr_block)}"
+    master_db_user     = aws_db_instance.login_db.username
+    master_db_password = random_password.db_master_password.result
 
     pdp_evaluate_url        = "${aws_apigatewayv2_stage.pdp_stage.invoke_url}evaluate"
     evaluate_shared_secret  = var.evaluate_shared_secret

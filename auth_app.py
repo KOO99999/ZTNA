@@ -3,6 +3,7 @@ from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 import json
 import os
+import sys
 import time
 import uuid
 import secrets
@@ -29,6 +30,16 @@ app.config['SQLALCHEMY_DATABASE_URI'] = (
 )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+# [WAS->DB TLS] DB_SSL_CA(AWS RDS 인증서 묶음 파일 경로)가 있으면 TLS로만 접속하고, 서버 인증서가 그 묶음으로
+# 서명됐는지와 인증서의 이름이 접속한 주소(DB_HOST)와 같은지까지 확인한다(가짜 DB 서버로의 중간자 공격 차단).
+# RDS 쪽도 require_secure_transport=ON(database.tf)이라 암호화 안 된 접속은 서버가 거부한다.
+DB_SSL_CA = os.environ.get('DB_SSL_CA')
+if DB_SSL_CA:
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        "connect_args": {"ssl": {"ca": DB_SSL_CA, "check_hostname": True}},
+        "pool_pre_ping": True,
+    }
+
 db = SQLAlchemy(app)
 
 
@@ -43,7 +54,7 @@ class Account(db.Model):
     role = db.Column(db.String(32), default='employee', nullable=False)
     # 소속 부서(dev / marketing / hr / admin). 토큰의 department 클레임과 "접근 권한 없음" 안내 화면에 쓴다.
     # 기존 DB에는 이 컬럼이 없다(db.create_all()은 이미 있는 테이블에 컬럼을 추가해 주지 않음).
-    # 아래 ensure_department_schema()가 서버 시작 때 자동으로 추가한다.
+    # 아래 ensure_department_schema()가 부팅 단계(bootstrap_database, 마스터 계정)에서 자동으로 추가한다.
     department = db.Column(db.String(32), nullable=True)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
@@ -67,12 +78,10 @@ class LoginFailure(db.Model):
     ip_address = db.Column(db.String(45), nullable=True)
 
 
-with app.app_context():
-    db.create_all()
 
 
 # ==========================================================================
-# [자동 마이그레이션] 서버가 켜질 때 accounts.department 컬럼을 보장하고 소속을 채운다.
+# [자동 마이그레이션] 부팅 단계(bootstrap_database)에서 accounts.department 컬럼을 보장하고 소속을 채운다.
 #
 # 왜: db.create_all()은 "없는 테이블"만 만들고 이미 있는 테이블에 컬럼을 추가해 주지 않는다.
 #     옛 DB에 새 코드가 붙으면 없는 컬럼을 SELECT해서 로그인 서버 전체가 오류가 난다.
@@ -127,7 +136,8 @@ def ensure_department_schema():
 
 
 # ==========================================================================
-# [자동 계정 시딩] 서버가 켜질 때 AWS SSM Parameter Store(SecureString)에 저장된 계정 정보로, DB에 없는 계정만 만든다.
+# [자동 계정 시딩] 부팅 단계(bootstrap_database, root)에서 AWS SSM Parameter Store(SecureString)에 저장된 계정 정보로, DB에 없는 계정만 만든다.
+# (앱 서비스는 AWS 권한을 쓰지 않는다 - 인스턴스 메타데이터 접근을 systemd가 막음)
 #
 # 왜: RDS를 새로 만들면 accounts가 비어 있어서 계정을 손으로 다시 만들어야 했다(seed_accounts.py).
 #     비밀번호/TOTP는 Terraform 변수나 user_data에 넣으면 콘솔과 state에 남으므로, 값은 내 PC에서 AWS에 직접 올리고
@@ -187,8 +197,42 @@ def seed_accounts_from_ssm():
     print(f'[SEED] 새 계정 {created}건', flush=True)
 
 
-with app.app_context():
+# ==========================================================================
+# [DB 최소권한] 앱(로그인 서버)이 쓸 전용 DB 계정을 만든다. 부팅 스크립트(root)가 마스터 계정으로 한 번 실행한다.
+#
+# 왜: 예전엔 앱이 RDS 마스터 계정으로 접속해서, 앱이 뚫리면(예: SQL 삽입) 테이블 삭제·계정 생성까지 가능했다.
+# 무엇을: 앱 계정에는 이 DB의 행 읽기/추가/수정/삭제(SELECT/INSERT/UPDATE/DELETE)만 준다(테이블 생성·변경·삭제 불가).
+#        계정 자체에 REQUIRE SSL을 걸어 암호화 안 된 접속을 한 번 더 막고, 접속 가능 위치도 앱 서브넷으로 제한한다.
+# 테이블 생성/컬럼 추가/계정 시딩처럼 권한이 더 필요한 일은 전부 이 부팅 단계(bootstrap_database)에서 끝낸다.
+# ==========================================================================
+_DB_IDENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,31}$')
+_DB_HOST_PATTERN_RE = re.compile(r'^[0-9.%/]{1,64}$')
+_DB_PASSWORD_RE = re.compile(r'^[A-Za-z0-9]{16,128}$')
+
+
+def ensure_app_db_user():
+    from sqlalchemy import text
+    user = os.environ.get('APP_DB_USER', '')
+    password = os.environ.get('APP_DB_PASSWORD', '')
+    host = os.environ.get('APP_DB_HOST', '%')
+    # 이름/위치/DB 이름은 SQL 문장에 그대로 들어가므로(바인딩 불가) 허용 문자만 통과시킨다. 비밀번호는 바인딩한다.
+    if not (_DB_IDENT_RE.match(user) and _DB_PASSWORD_RE.match(password)
+            and _DB_HOST_PATTERN_RE.match(host) and _DB_IDENT_RE.match(DB_NAME or '')):
+        raise ValueError('APP_DB_USER/APP_DB_PASSWORD/APP_DB_HOST/DB_NAME 형식이 올바르지 않음')
+    account = f"`{user}`@'{host}'"
+    db.session.execute(text(f"CREATE USER IF NOT EXISTS {account} IDENTIFIED BY :pw REQUIRE SSL"), {"pw": password})
+    db.session.execute(text(f"ALTER USER {account} IDENTIFIED BY :pw REQUIRE SSL"), {"pw": password})
+    db.session.execute(text(f"GRANT SELECT, INSERT, UPDATE, DELETE ON `{DB_NAME}`.* TO {account}"))
+    db.session.commit()
+    print(f'[BOOTSTRAP] 앱 DB 계정 {user}@{host}: SELECT/INSERT/UPDATE/DELETE, REQUIRE SSL', flush=True)
+
+
+def bootstrap_database():
+    """부팅 스크립트가 마스터 계정으로 한 번 실행: 테이블 생성 -> 컬럼/소속 맞추기 -> 앱 계정 -> 계정 시딩.
+    앱 서비스(ztauth)는 이 함수를 부르지 않고, 앱 계정(행 읽기/쓰기만)으로만 접속한다."""
+    db.create_all()
     ensure_department_schema()
+    ensure_app_db_user()
     seed_accounts_from_ssm()
 
 
@@ -1148,4 +1192,8 @@ def logout():
 
 
 if __name__ == '__main__':
+    if '--bootstrap' in sys.argv:
+        with app.app_context():
+            bootstrap_database()
+        sys.exit(0)
     app.run(host='0.0.0.0', port=8080)

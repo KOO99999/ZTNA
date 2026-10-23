@@ -18,6 +18,30 @@ resource "random_password" "db_master_password" {
   special = false # RDS 마스터 비밀번호 특수문자 제약 회피용
 }
 
+# [WAS->DB TLS 강제] 암호화되지 않은 접속은 DB 서버가 거부한다(오류 3159).
+# AWS 문서: require_secure_transport를 DB 파라미터 그룹에서 ON으로 바꾸면 되고 재부팅은 필요 없다.
+resource "aws_db_parameter_group" "login_db_params" {
+  name_prefix = "zt-login-db-"
+  family      = "mysql8.0"
+  description = "ZT login DB: require TLS for all connections"
+
+  parameter {
+    name  = "require_secure_transport"
+    value = "ON"
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# [DB 최소권한] 앱(로그인 서버) 전용 DB 계정 비밀번호. 계정은 auth 서버 부팅 스크립트가 마스터 계정으로 만든다
+# (auth_app.py ensure_app_db_user: 행 읽기/쓰기만, REQUIRE SSL, 앱 서브넷에서만 접속).
+resource "random_password" "db_app_password" {
+  length  = 32
+  special = false
+}
+
 resource "aws_db_instance" "login_db" {
   identifier     = "zt-login-db"
   engine         = "mysql"
@@ -33,6 +57,7 @@ resource "aws_db_instance" "login_db" {
 
   db_subnet_group_name   = aws_db_subnet_group.login_db_subnet_group.name
   vpc_security_group_ids = [aws_security_group.db_sg.id]
+  parameter_group_name   = aws_db_parameter_group.login_db_params.name
   publicly_accessible    = false
 
   skip_final_snapshot = true # 8주 프로젝트 범위: 운영환경이라면 false + 스냅샷 정책 필요

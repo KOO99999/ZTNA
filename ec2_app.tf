@@ -35,6 +35,8 @@ resource "aws_instance" "app_server" {
     # [관리자 콘솔] 관리자 이메일(앱에서 한 번 더 확인)과 위험 상태 해제 Lambda 이름. 앱은 이 함수를 AWS 권한으로 직접 호출한다.
     admin_emails        = join(",", [for e in var.admin_allowed_emails : lower(e)])
     risk_admin_function = aws_lambda_function.risk_admin.function_name
+    # 포털 홈 "내 업무 앱" 목록용 계정 소속 표(main.tf locals, 로그인 서버와 같은 값). 링크 표시용이며 권한이 아니다.
+    account_departments = local.account_departments_env
 
     # [JWT 서명 검증] portal_app.py가 Cf-Access-Jwt-Assertion의 서명/발급자/aud/만료를 검증함.
     # aud는 이 서버로 요청을 보내는 Access 앱 6개의 AUD 태그(쉼표 구분). 앱이 재생성되어 AUD가

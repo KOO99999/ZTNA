@@ -22,6 +22,20 @@ lambda_client = boto3.client('lambda', region_name='ap-northeast-2')
 # Cloudflare Access가 이미 걸러주지만, 영향이 큰 기능(위험 상태 해제)이라 앱에서도 한 번 더 확인한다.
 ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()}
 RISK_ADMIN_FUNCTION = os.environ.get("RISK_ADMIN_FUNCTION", "")
+# 포털 홈의 "내 업무 앱" 목록용 계정 소속 표("이메일=소속;..."). Terraform locals.account_departments_env와 같은 값으로,
+# 로그인 서버가 DB 소속을 맞출 때 쓰는 목록과 같다. 링크를 보여줄지만 정하며 접근 허용/차단은 Access가 한다.
+ACCOUNT_DEPARTMENTS = {}
+for _item in os.environ.get("ACCOUNT_DEPARTMENTS", "").split(";"):
+    _email, _sep, _dept = _item.partition("=")
+    if _sep and _email.strip() and _dept.strip():
+        ACCOUNT_DEPARTMENTS[_email.strip().lower()] = _dept.strip()
+# 소속 -> 보여줄 앱 (서브도메인 이름, 화면 이름)
+DEPARTMENT_APPS = {
+    "dev": [("dev", "개발팀 페이지")],
+    "marketing": [("marketing", "마케팅팀 페이지")],
+    "hr": [("hr", "인사팀 페이지")],
+    "admin": [("admin", "관리자 콘솔")],
+}
 # 해제 폼의 CSRF 토큰 서명 키. 서버 시작 때 만들어 환경변수로 넘긴다(여러 워커가 같은 값을 써야 함).
 # 없으면 프로세스마다 임의 값(단일 워커에서만 동작) - 키를 못 읽어도 위조 토큰은 못 만든다.
 CSRF_SECRET = (os.environ.get("CSRF_SECRET") or base64.b64encode(os.urandom(32)).decode()).encode()
@@ -32,6 +46,7 @@ KST = timezone(timedelta(hours=9))
 
 
 AUTH_DOMAIN = os.environ.get("AUTH_DOMAIN", "auth.xmcda.store")
+PORTAL_DOMAIN = AUTH_DOMAIN.replace("auth.", "", 1)
 
 # [역할 분담] 위험도 판단(Lambda 호출, 캐시, 차단/재인증 응답)은 nginx 앞단의 판단 서비스(auth_gate.py)가
 # 요청마다 하고, 통과한 요청만 이 앱에 도착한다. 그래서 이 앱은 Lambda를 부르지 않고 비밀키도 갖지 않는다.
@@ -79,8 +94,10 @@ def security_headers(resp):
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
     resp.headers["Referrer-Policy"] = "same-origin"
-    if request.host.startswith("admin."):
-        resp.headers["Cache-Control"] = "no-store"
+    # 모든 화면을 브라우저가 저장하지 않게 한다. 저장되면 로그아웃 후 '뒤로 가기'로 이전 화면이 그대로
+    # 다시 보인다(공용 PC에서 다음 사람이 볼 수 있음). no-store면 뒤로 가기도 서버에 다시 요청하므로
+    # Access가 로그인 화면으로 보낸다. (예전엔 admin 화면에만 붙어 있었음)
+    resp.headers["Cache-Control"] = "no-store"
     return resp
 
 
@@ -244,14 +261,22 @@ def general():
         if host == f"{team}.{PORTAL_DOMAIN}":
             return page()
 
+    # 내 소속에서 쓸 수 있는 앱만 링크로 보여준다(Okta 대시보드·Microsoft My Apps처럼 "내 앱" 목록).
+    # 표시만 정하는 것이고, 링크를 직접 입력해도 실제 허용/차단은 각 앱의 Access 정책이 한다.
+    dept = ACCOUNT_DEPARTMENTS.get((getattr(g, "identity", "") or "").lower())
+    apps = DEPARTMENT_APPS.get(dept, [])
+    if apps:
+        links = "".join(f'<li><a href="https://{sub}.{PORTAL_DOMAIN}/">{esc(name)}</a></li>' for sub, name in apps)
+        app_html = f"<h3>내 업무 앱</h3><ul>{links}</ul>"
+    else:
+        app_html = "<h3>내 업무 앱</h3><p>사용할 수 있는 업무 앱이 없습니다. 필요하면 관리자에게 요청하세요.</p>"
     html = """
     <p>전 직원 공통 포털 홈입니다.</p>
     <ul>
         <li>Cloudflare Access가 전체 직원(all_employees 그룹) 계정만 통과시킴</li>
         <li>서비스 기본 정보 및 공개 게시판 제공</li>
     </ul>
-    <a href="https://admin.xmcda.store"><button style="background-color: #dc3545;">관리자 콘솔 바로가기</button></a>
-    """
+    """ + app_html
     return render_page("[Portal] 전사 공통 대시보드", html, is_public=False)
 
 ADMIN_MESSAGES = {
@@ -403,7 +428,6 @@ def risk_release():
 # [서브도메인 분리] 팀 페이지는 각 서브도메인(dev.xmcda.store 등)의 첫 화면으로만 연다.
 # 예전 경로 주소(xmcda.store/dev 등)는 라우트 자체를 지웠다(404). 그 주소는 이제 포털 앱(전 직원 공통)
 # 범위라, 거기서 팀 페이지를 보여주면 다른 팀 직원도 볼 수 있게 되기 때문이다.
-PORTAL_DOMAIN = AUTH_DOMAIN.replace("auth.", "", 1)
 
 
 def dev_page():

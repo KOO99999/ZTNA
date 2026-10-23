@@ -427,6 +427,7 @@ resource "cloudflare_zero_trust_access_application" "dev" {
   # [통일 관리 방식 재시도] Deny(risk_block_shared)와 Allow(dev_gate) 둘 다 이 리스트 하나로만 관리함(관리 방식 섞음 방지).
   # 리스트 순서 = precedence (먼저 = Deny 먼저 평가)
   policies = [
+    cloudflare_zero_trust_access_policy.block_non_members["dev"].id,
     cloudflare_zero_trust_access_policy.risk_block_shared.id,
     cloudflare_zero_trust_access_policy.dev_gate.id,
   ]
@@ -458,6 +459,7 @@ resource "cloudflare_zero_trust_access_application" "marketing" {
   app_launcher_visible       = false
 
   policies = [
+    cloudflare_zero_trust_access_policy.block_non_members["marketing"].id,
     cloudflare_zero_trust_access_policy.risk_block_shared.id,
     cloudflare_zero_trust_access_policy.marketing_gate.id,
   ]
@@ -487,6 +489,7 @@ resource "cloudflare_zero_trust_access_application" "hr" {
   app_launcher_visible       = false
 
   policies = [
+    cloudflare_zero_trust_access_policy.block_non_members["hr"].id,
     cloudflare_zero_trust_access_policy.risk_block_shared.id,
     cloudflare_zero_trust_access_policy.hr_gate.id,
   ]
@@ -498,6 +501,36 @@ resource "cloudflare_zero_trust_access_policy" "hr_gate" {
   decision   = "allow"
   include {
     group = [cloudflare_zero_trust_access_group.hr_team.id]
+  }
+}
+
+# [소속 먼저 확인] 팀 앱마다 정책 순서를 ① 이 팀이 아니면 차단 → ② 위험도 차단(외부 평가) → ③ 팀 허용으로 둔다.
+# Cloudflare 문서: Block/Allow 정책은 목록 위에서부터 검사하고 처음 걸린 정책에서 결정이 끝난다.
+# 예전엔 위험도 차단이 맨 위라 다른 팀 직원도 위험도 평가(Lambda 호출)부터 받고 나서 소속에서 막혔다
+# (로그엔 위험도 allow인데 화면은 "권한 없음"). 이제 다른 팀은 ①에서 끝나 평가가 일어나지 않는다.
+# 허용(③)을 맨 위로 올리면 팀원이 위험도 검사 없이 통과하므로 순서를 바꾸면 안 된다.
+# 막힌 사람은 지금처럼 custom_deny_url(/stepup)로 가서 "접근 권한 없음" 화면을 본다.
+resource "cloudflare_zero_trust_access_policy" "block_non_members" {
+  for_each = {
+    dev       = cloudflare_zero_trust_access_group.dev_team.id
+    marketing = cloudflare_zero_trust_access_group.marketing_team.id
+    hr        = cloudflare_zero_trust_access_group.hr_team.id
+    admin     = cloudflare_zero_trust_access_group.admins.id
+  }
+
+  account_id = var.cloudflare_account_id
+  name       = "${each.key} - Block Non-Members"
+  decision   = "deny"
+
+  include {
+    everyone = true
+  }
+  exclude {
+    group = [each.value]
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
@@ -534,6 +567,7 @@ resource "cloudflare_zero_trust_access_application" "admin_console" {
   # (예전에 경로 앱끼리 쿠키를 나누려고 Cloudflare API로 path_cookie_attribute를 켜던
   # null_resource는 dev/marketing/hr를 서브도메인으로 옮기면서 필요 없어져 삭제함)
   policies = [
+    cloudflare_zero_trust_access_policy.block_non_members["admin"].id,
     cloudflare_zero_trust_access_policy.risk_block_shared.id,
     cloudflare_zero_trust_access_policy.admin_gate_console.id,
   ]

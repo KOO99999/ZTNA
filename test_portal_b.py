@@ -19,6 +19,7 @@ os.environ["CF_ACCESS_AUDS"] = "aud-portal,aud-admin"
 os.environ["ADMIN_EMAILS"] = "hana@test.com,root@test.com"
 os.environ["RISK_ADMIN_FUNCTION"] = "risk_admin"
 os.environ["CSRF_SECRET"] = "test-csrf-secret"
+os.environ["ACCOUNT_DEPARTMENTS"] = "kim@test.com=dev;lee@test.com=hr;hana@test.com=admin;bad-item;=x"
 os.environ.pop("PDP_EVALUATE_URL", None)
 os.environ.pop("EVALUATE_SHARED_SECRET", None)
 sys.modules['boto3'] = MagicMock()
@@ -112,6 +113,21 @@ for team, text in TEAM_TEXT.items():
     check(f"{team}.xmcda.store/ -> {team} 팀 페이지", text in client.get("/", headers={**H, "Host": f"{team}.xmcda.store"}).get_data(as_text=True))
 check("포털 홈(xmcda.store/)에는 팀 페이지 내용 없음",
       not any(t in client.get("/", headers={**H, "Host": "xmcda.store"}).get_data(as_text=True) for t in TEAM_TEXT.values()))
+# 모든 화면 no-store (로그아웃 후 뒤로 가기로 이전 화면이 보이지 않게)
+for host in ("xmcda.store", "dev.xmcda.store", "admin.xmcda.store"):
+    check(f"{host}/ 응답에 Cache-Control: no-store", client.get("/", headers={**H, "Host": host}).headers.get("Cache-Control") == "no-store")
+# 포털 홈 "내 업무 앱": 내 소속 앱만 링크
+def home(email):
+    return client.get("/", headers={**hdr(email=email), "Host": "xmcda.store"}).get_data(as_text=True)
+t = home("kim@test.com")
+check("dev 소속: 개발팀 링크만", 'href="https://dev.xmcda.store/"' in t and "hr.xmcda.store" not in t and "admin.xmcda.store" not in t and "marketing.xmcda.store" not in t)
+t = home("lee@test.com")
+check("hr 소속: 인사팀 링크만", 'href="https://hr.xmcda.store/"' in t and "dev.xmcda.store" not in t and "admin.xmcda.store" not in t)
+t = home("hana@test.com")
+check("admin 소속: 관리자 콘솔 링크", 'href="https://admin.xmcda.store/"' in t and "dev.xmcda.store" not in t)
+t = home("nobody@test.com")
+check("소속 표에 없는 계정: 앱 링크 없음 + 안내", "사용할 수 있는 업무 앱이 없습니다" in t and ".xmcda.store/\"" not in t)
+check("소속 표의 깨진 항목은 무시", set(pa.ACCOUNT_DEPARTMENTS) == {"kim@test.com", "lee@test.com", "hana@test.com"}, pa.ACCOUNT_DEPARTMENTS)
 check("다른 도메인의 dev.* 호스트는 팀 페이지로 취급하지 않음",
       "개발팀 전용" not in client.get("/", headers={**H, "Host": "dev.evil.com"}).get_data(as_text=True))
 # 옛 경로 주소(xmcda.store/dev)는 포털 앱(전 직원) 범위라 라우트를 지움 -> 404, 내용 노출 없음

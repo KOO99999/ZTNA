@@ -114,14 +114,10 @@ check("포털 홈(xmcda.store/)에는 팀 페이지 내용 없음",
       not any(t in client.get("/", headers={**H, "Host": "xmcda.store"}).get_data(as_text=True) for t in TEAM_TEXT.values()))
 check("다른 도메인의 dev.* 호스트는 팀 페이지로 취급하지 않음",
       "개발팀 전용" not in client.get("/", headers={**H, "Host": "dev.evil.com"}).get_data(as_text=True))
-# 옛 경로 주소(xmcda.store/dev)는 포털 앱(전 직원) 범위라 내용을 보여주면 안 되고, 새 주소로 보내기만 한다
+# 옛 경로 주소(xmcda.store/dev)는 포털 앱(전 직원) 범위라 라우트를 지움 -> 404, 내용 노출 없음
 for team, text in TEAM_TEXT.items():
     r = client.get(f"/{team}", headers={**H, "Host": "xmcda.store"})
-    check(f"옛 주소 xmcda.store/{team} -> {team}.xmcda.store로 302, 내용 노출 없음",
-          r.status_code == 302 and r.headers.get("Location") == f"https://{team}.xmcda.store/" and text not in r.get_data(as_text=True),
-          (r.status_code, r.headers.get("Location")))
-r = client.get("/dev", headers={"Host": "xmcda.store"})
-check("옛 주소도 JWT 없으면 먼저 차단(403)", r.status_code == 403, r.status_code)
+    check(f"옛 주소 xmcda.store/{team} -> 404, 내용 노출 없음", r.status_code == 404 and text not in r.get_data(as_text=True), r.status_code)
 
 reset()
 r = client.get("/no-such-page", headers=H)
@@ -258,7 +254,7 @@ check("보안 헤더(nosniff, DENY, frame-ancestors, no-store)", r.headers.get("
 check("ADMIN_EMAILS가 비어 있으면 모두 관리자 아님", not pa._is_admin("") and not pa._is_admin(None) and pa._is_admin("HANA@test.com"))
 
 reset()
-r = client.get("/dev", headers={"CF-IPCountry": "KR"})
+r = client.get("/", headers={"CF-IPCountry": "KR", "Host": "dev.xmcda.store"})
 check("인증 헤더 없음 -> 403", r.status_code == 403, f"status={r.status_code}")
 r = client.get("/", headers={"CF-IPCountry": "KR", "Host": "admin.xmcda.store"})
 check("인증 헤더 없음(관리자 콘솔) -> 403", r.status_code == 403, r.status_code)
@@ -359,7 +355,8 @@ zj.CF_ISSUER, zj.CF_ACCESS_AUDS = saved
 # 공개키 가져오기: 캐시 / 실패 / 키 교체
 zj._jwks.update({"keys": {}, "fetched_at": 0.0})
 jwks_fetches.clear()
-client.get("/dev", headers=hdr()); client.get("/dev", headers=hdr()); client.get("/dev", headers=hdr())
+DH = lambda **kw: {**hdr(**kw), "Host": "dev.xmcda.store"}
+client.get("/", headers=DH()); client.get("/", headers=DH()); client.get("/", headers=DH())
 check("공개키 목록은 캐시되어 요청마다 받지 않음(1회)", len(jwks_fetches) == 1, len(jwks_fetches))
 
 def failing_fetch():
@@ -381,7 +378,7 @@ zj._fetch_jwks = orig_fetch
 zj._jwks.update({"keys": {"kid-good": GOOD_KEY.public_key()}, "fetched_at": _time.time()})
 jwks_fetches.clear()
 for _ in range(5):
-    client.get("/dev", headers=hdr(kid="kid-unknown"))
+    client.get("/", headers=DH(kid="kid-unknown"))
 check("모르는 kid가 반복돼도 공개키 재요청 폭주 없음(1분 최소 간격)", len(jwks_fetches) == 0, len(jwks_fetches))
 
 # 키 교체: 캐시에 없는 새 kid가 나타나면(1분 이상 지났을 때) 다시 받아서 통과

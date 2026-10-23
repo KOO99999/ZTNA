@@ -400,18 +400,10 @@ def risk_release():
     return redirect(f"/?msg={code}", code=303)
 
 
-# [서브도메인 분리] 예전 경로 주소(xmcda.store/dev 등)는 이제 포털 앱(전 직원 공통) 범위에 들어가서,
-# 여기서 팀 페이지를 그대로 보여주면 다른 팀 직원도 볼 수 있게 된다. 그래서 내용은 절대 보여주지 않고
-# 새 주소(dev.xmcda.store 등)로 보내기만 한다(그 앱의 Access 정책이 다시 판단).
+# [서브도메인 분리] 팀 페이지는 각 서브도메인(dev.xmcda.store 등)의 첫 화면으로만 연다.
+# 예전 경로 주소(xmcda.store/dev 등)는 라우트 자체를 지웠다(404). 그 주소는 이제 포털 앱(전 직원 공통)
+# 범위라, 거기서 팀 페이지를 보여주면 다른 팀 직원도 볼 수 있게 되기 때문이다.
 PORTAL_DOMAIN = AUTH_DOMAIN.replace("auth.", "", 1)
-
-
-@app.route('/dev')
-@app.route('/marketing')
-@app.route('/hr')
-def legacy_team_path():
-    team = request.path.strip('/')
-    return redirect(f"https://{team}.{PORTAL_DOMAIN}/", code=302)
 
 
 def dev_page():

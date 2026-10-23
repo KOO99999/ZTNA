@@ -31,7 +31,6 @@ OIDC_CLIENT_ID=${oidc_client_id}
 OIDC_CLIENT_SECRET=${oidc_client_secret}
 PATH_PERMISSIONS='${path_permissions}'
 APP_HOSTS=${app_hosts}
-CF_TEAM_DOMAIN=${cf_team_domain}
 ACCOUNT_DEPARTMENTS='${account_departments}'
 SEED_PARAM_NAME=${seed_param_name}
 AWS_REGION=${aws_region}

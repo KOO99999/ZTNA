@@ -1066,6 +1066,32 @@ def jwks():
     })
 
 
+@app.route('/logged-out')
+def logged_out():
+    """로그아웃 완료 안내. 다시 로그인은 포털로 보내면 Access가 이 서버의 로그인 화면으로 데려온다."""
+    portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
+    response = make_response(f"""
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="utf-8"><title>로그아웃됨 - ZT Login Server</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
+        .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 420px; margin: 60px auto; }}
+        a.btn {{ display: inline-block; margin-top: 10px; padding: 10px 16px; border-radius: 6px; background: #007bff; color: white; text-decoration: none; font-weight: bold; }}
+    </style></head>
+    <body>
+        <div class="card">
+            <h2>로그아웃되었습니다</h2>
+            <p style="font-size:0.9em; color:#555;">모든 업무 화면에서 로그아웃했습니다. 공용 PC라면 브라우저 창도 닫아 주세요.</p>
+            <a class="btn" href="https://{escape(portal_domain)}/">다시 로그인</a>
+        </div>
+    </body>
+    </html>
+    """)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
 @app.route('/logout')
 def logout():
     sso_token = request.cookies.get(SSO_COOKIE_NAME)
@@ -1079,18 +1105,13 @@ def logout():
     #      Cloudflare 로그아웃 주소는 호스트 바로 아래에서만 동작한다(예전 경로 앱의
     #      xmcda.store/dev/cdn-cgi/... 는 실측 404/302로 로그아웃이 안 됐음 -> 서브도메인으로 분리).
     #      앱 호스트들은 모두 xmcda.store 계열이라 same-site 요청으로 쿠키가 정상 전달된다.
-    #   3) Access 전체 세션(팀 도메인 쿠키): 마지막에 https://<팀도메인>/cdn-cgi/access/logout 으로 이동.
-    #      이걸 안 지우면 앱 쿠키가 없어도 Access가 비밀번호 없이 새 앱 토큰을 다시 발급해서
-    #      "로그아웃을 두 번 눌러야 되는" 현상이 생겼다(실측으로 확인). 팀 도메인은 다른 사이트
-    #      (cloudflareaccess.com)라 숨은 이미지로 부르면 브라우저가 쿠키를 막을 수 있어, 페이지 이동으로 한다.
-    portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
+    #   3) 끝나면 이 서버의 "로그아웃되었습니다" 화면(/logged-out)으로 이동.
+    #      경로 앱 구조에서는 Access 전체 세션(팀 도메인 쿠키)이 남아 비밀번호 없이 다시 로그인되는 문제가
+    #      있었는데(실측), 서브도메인 구조에서 앱 로그아웃을 모두 부른 뒤 팀 도메인 로그아웃 주소에 가 보니
+    #      "쿠키 없음/로그아웃 실패"가 떴고 포털에 다시 들어가면 로그인 화면이 나왔다(실측) = 앱 로그아웃
+    #      단계에서 이미 정리된다. 그래서 Cloudflare 오류 화면 대신 우리 안내 화면으로 끝낸다.
     logout_urls = [f"https://{host}/cdn-cgi/access/logout" for host in _app_hosts()]
-    team_domain = os.environ.get('CF_TEAM_DOMAIN', '').strip().lower()
-    if re.fullmatch(r'[a-z0-9-]+\.cloudflareaccess\.com', team_domain):
-        final_url = f"https://{team_domain}/cdn-cgi/access/logout"
-    else:
-        # 팀 도메인 설정이 없거나 형식이 이상하면(주입 방지) 예전처럼 포털 홈으로 보낸다.
-        final_url = f"https://{portal_domain}/"
+    final_url = "/logged-out"
     logout_pixels = "\n        ".join(
         f'<img src="{url}" style="display:none" onload="done()" onerror="done()">' for url in logout_urls
     )

@@ -174,16 +174,13 @@ ok("로그아웃: 스크립트가 이미지보다 먼저 정의", html.index("fu
 ok("로그아웃: 경로 형태(/dev/cdn-cgi) 주소 없음", "/dev/cdn-cgi" not in html and "/hr/cdn-cgi" not in html and "/marketing/cdn-cgi" not in html)
 ok("로그아웃: 5개 앱 호스트 각각의 로그아웃 주소",
    all(f"https://{h}/cdn-cgi/access/logout" in html for h in ("xmcda.store", "dev.xmcda.store", "marketing.xmcda.store", "hr.xmcda.store", "admin.xmcda.store")))
-# 팀 도메인(Access 전체 세션) 로그아웃으로 마지막 이동 - 이게 없으면 비밀번호 없이 다시 로그인됨(실측)
-os.environ["CF_TEAM_DOMAIN"] = "ancient-test.cloudflareaccess.com"
-html = aa.app.test_client().get("/logout").get_data(as_text=True)
-ok("로그아웃: 마지막 이동지 = 팀 도메인 로그아웃", 'window.location.href = "https://ancient-test.cloudflareaccess.com/cdn-cgi/access/logout"' in html)
-ok("로그아웃: 팀 도메인은 숨은 이미지로 부르지 않음(다른 사이트 쿠키 차단 대비)", '<img src="https://ancient-test.cloudflareaccess.com' not in html)
-for bad in ('evil.com', 'x.cloudflareaccess.com.evil.com', 'a"b.cloudflareaccess.com', ''):
-    os.environ["CF_TEAM_DOMAIN"] = bad
-    h2 = aa.app.test_client().get("/logout").get_data(as_text=True)
-    ok(f"로그아웃: 팀 도메인 값이 이상하면({bad!r}) 포털 홈으로(주입 방지)", 'window.location.href = "https://xmcda.store/"' in h2 and (not bad or bad not in h2))
-os.environ.pop("CF_TEAM_DOMAIN", None)
+# 앱 로그아웃이 끝나면 우리 "로그아웃되었습니다" 화면으로 이동(Cloudflare 오류 화면 대신)
+ok("로그아웃: 마지막 이동지 = /logged-out", 'window.location.href = "/logged-out"' in html)
+ok("로그아웃: Cloudflare 팀 도메인 주소로 보내지 않음", "cloudflareaccess.com" not in html)
+r = aa.app.test_client().get("/logged-out")
+lo = r.get_data(as_text=True)
+ok("로그아웃 완료 화면: 안내 문구 + 다시 로그인(포털) 버튼 + 캐시 안 함",
+   r.status_code == 200 and "로그아웃되었습니다" in lo and 'href="https://xmcda.store/"' in lo and r.headers.get("Cache-Control") == "no-store")
 os.environ["APP_HOSTS"] = "xmcda.store,dev.xmcda.store"
 h3 = aa.app.test_client().get("/logout").get_data(as_text=True)
 ok("로그아웃: 앱 목록은 APP_HOSTS(Terraform)를 따름", h3.count("/cdn-cgi/access/logout") == 2 and "var remaining = 2" in h3)

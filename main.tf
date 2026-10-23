@@ -389,6 +389,10 @@ resource "cloudflare_zero_trust_access_application" "portal" {
   custom_deny_url            = "https://auth.xmcda.store/stepup"
   allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   auto_redirect_to_identity  = true
+  # [중복 평가 실험] Cloudflare 앱 런처(직원용 앱 목록 화면)에 표시하지 않음. 우리는 런처 대신 자체 포털을 쓴다.
+  # 로그 패턴상 Access가 로그인할 때 "런처에 보이는 앱"을 전부 미리 평가하는 것으로 보여(런처에서 숨긴
+  # admin만 직접 들어갈 때 1번 평가됨) admin과 같이 숨긴다. 문서로 확인한 동작이 아니라 실측 확인 대상.
+  app_launcher_visible       = false
 
   # [통일 관리 방식 확장] 로그인 필수 + 세션 위험화 가능성은 다른 페이지와 동일해 risk_block_shared 추가.
   policies = [
@@ -415,6 +419,10 @@ resource "cloudflare_zero_trust_access_application" "dev" {
   custom_deny_url            = "https://auth.xmcda.store/stepup"
   allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   auto_redirect_to_identity  = true
+  # [중복 평가 실험] Cloudflare 앱 런처(직원용 앱 목록 화면)에 표시하지 않음. 우리는 런처 대신 자체 포털을 쓴다.
+  # 로그 패턴상 Access가 로그인할 때 "런처에 보이는 앱"을 전부 미리 평가하는 것으로 보여(런처에서 숨긴
+  # admin만 직접 들어갈 때 1번 평가됨) admin과 같이 숨긴다. 문서로 확인한 동작이 아니라 실측 확인 대상.
+  app_launcher_visible       = false
 
   # [통일 관리 방식 재시도] Deny(risk_block_shared)와 Allow(dev_gate) 둘 다 이 리스트 하나로만 관리함(관리 방식 섞음 방지).
   # 리스트 순서 = precedence (먼저 = Deny 먼저 평가)
@@ -444,6 +452,10 @@ resource "cloudflare_zero_trust_access_application" "marketing" {
   custom_deny_url            = "https://auth.xmcda.store/stepup"
   allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   auto_redirect_to_identity  = true
+  # [중복 평가 실험] Cloudflare 앱 런처(직원용 앱 목록 화면)에 표시하지 않음. 우리는 런처 대신 자체 포털을 쓴다.
+  # 로그 패턴상 Access가 로그인할 때 "런처에 보이는 앱"을 전부 미리 평가하는 것으로 보여(런처에서 숨긴
+  # admin만 직접 들어갈 때 1번 평가됨) admin과 같이 숨긴다. 문서로 확인한 동작이 아니라 실측 확인 대상.
+  app_launcher_visible       = false
 
   policies = [
     cloudflare_zero_trust_access_policy.risk_block_shared.id,
@@ -469,6 +481,10 @@ resource "cloudflare_zero_trust_access_application" "hr" {
   custom_deny_url            = "https://auth.xmcda.store/stepup"
   allowed_idps               = [cloudflare_zero_trust_access_identity_provider.login_server.id]
   auto_redirect_to_identity  = true
+  # [중복 평가 실험] Cloudflare 앱 런처(직원용 앱 목록 화면)에 표시하지 않음. 우리는 런처 대신 자체 포털을 쓴다.
+  # 로그 패턴상 Access가 로그인할 때 "런처에 보이는 앱"을 전부 미리 평가하는 것으로 보여(런처에서 숨긴
+  # admin만 직접 들어갈 때 1번 평가됨) admin과 같이 숨긴다. 문서로 확인한 동작이 아니라 실측 확인 대상.
+  app_launcher_visible       = false
 
   policies = [
     cloudflare_zero_trust_access_policy.risk_block_shared.id,

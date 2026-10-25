@@ -258,6 +258,10 @@ resource "aws_lambda_function" "pdp_engine" {
       EVALUATE_SHARED_SECRET = var.evaluate_shared_secret
       # 자원 등급표(호스트 -> 등급)를 만들 때 쓰는 기준 도메인 (risk_score_engine.py RESOURCE_TIERS)
       DOMAIN_NAME = var.domain_name
+      # [기기 신뢰] 필수 기기 검사 이름(device_posture.tf)과, 기기 등록 사용자 조회용 Cloudflare 읽기 전용 토큰
+      DEVICE_POSTURE_RULE_NAME = cloudflare_zero_trust_device_posture_rule.windows_firewall.name
+      CF_ACCOUNT_ID            = var.cloudflare_account_id
+      CF_DEVICE_API_TOKEN      = var.cloudflare_device_read_token
     }
   }
 }

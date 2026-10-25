@@ -85,3 +85,13 @@ variable "debug_headers_route" {
   default     = false
   description = "portal_app.py의 /debug-headers 임시 확인 라우트 활성화 여부 (확인 후 반드시 false)"
 }
+
+# [기기 신뢰] 위험도 엔진(Lambda)이 기기 ID로 "그 기기를 등록한 사용자"를 조회할 때 쓰는 Cloudflare API 토큰.
+# 읽기 전용(Account > Zero Trust > Read)으로 따로 만든다. Terraform용 토큰(편집 권한)을 Lambda에 넣지 않기 위해서다(최소권한).
+# 비워 두면 기기 주인 확인만 건너뛰고, 기기 상태(WARP 연결/방화벽) 신호는 그대로 동작한다.
+variable "cloudflare_device_read_token" {
+  type        = string
+  sensitive   = true
+  default     = ""
+  description = "기기 등록 사용자 조회용 Cloudflare API 토큰 (Zero Trust Read 전용, terraform.tfvars)"
+}

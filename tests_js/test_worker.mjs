@@ -103,6 +103,21 @@ const wrap = (t) => JSON.stringify({ token: t });
   check('옛 방식(본문이 JWT 문자열 그대로)도 서명 검증 후 처리', signed && signed.nonce === 'old-format' && signed.success === false);
 }
 {
+  const posture = { 'r1': { type: 'firewall', rule_name: 'ZT - Windows Firewall On', success: true, check: { firewall: true } },
+                    'r2': { type: 'warp', rule_name: 'WARP', success: false } };
+  await call(wrap(await accessToken({ claims: { identity: { email: 'hana@test.com', geo: { country: 'KR' },
+    device_id: '01a16dae-7040-1d67-aca9-b05dc71233c1', devicePosture: posture } } })));
+  const b = lambdaCalls[0]?.body || {};
+  check('기기 정보: device_context/device_id/검사 결과(종류·규칙·통과)만 그대로 엔진에 전달',
+    b.device_context === true && b.device_id === '01a16dae-7040-1d67-aca9-b05dc71233c1'
+    && JSON.stringify(b.device_posture) === JSON.stringify([{ type: 'firewall', rule: 'ZT - Windows Firewall On', success: true },
+                                                            { type: 'warp', rule: 'WARP', success: false }]), JSON.stringify(b));
+  await call(wrap(await accessToken()));
+  const b2 = lambdaCalls[0]?.body || {};
+  check('WARP 없는 기기: device_id=null, 검사 결과 빈 목록(판단은 엔진)', b2.device_context === true && b2.device_id === null
+    && Array.isArray(b2.device_posture) && b2.device_posture.length === 0, JSON.stringify(b2));
+}
+{
   const { signed } = await call(wrap(await accessToken({ claims: { request_url: 'admin.xmcda.store/' } })));
   check('admin 서브도메인 요청 -> resource_path=admin.xmcda.store/ (호스트+경로)', lambdaCalls[0].body.resource_path === 'admin.xmcda.store/', lambdaCalls[0]?.body.resource_path);
 }

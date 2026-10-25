@@ -530,3 +530,81 @@ qk = mock_user_risk.query.call_args.kwargs
 t("[UserRisk] Scan이 아니라 identity 키로 Query하고, 예약어는 이름 치환 사용",
   qk.get("KeyConditionExpression") == "#i = :i" and qk["ExpressionAttributeNames"] == {"#i": "identity"}
   and mock_user_risk.scan.call_count == 0)
+
+# ==========================================================================
+# [기기 신뢰] WARP 기기 검사 결과(devicePosture)와 기기 주인(Cloudflare API) -> 신호
+#   45점: 내부(60) 통과 / 기밀(40) 재인증 / 최고기밀(20) 차단
+# ==========================================================================
+from unittest.mock import patch
+print()
+FW_OK = [{"type": "firewall", "rule": "ZT - Windows Firewall On", "success": True},
+         {"type": "warp", "rule": "WARP", "success": True}]
+FW_FAIL = [{"type": "firewall", "rule": "ZT - Windows Firewall On", "success": False}]
+DEV_ID = "01a16dae-7040-1d67-aca9-b05dc71233c1"
+engine.CF_ACCOUNT_ID, engine.CF_DEVICE_API_TOKEN = "acct", "tok"
+api_calls = []
+
+class _Resp:
+    def __init__(self, email): self.email = email
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def read(self):
+        return json.dumps({"success": True, "result": {"id": DEV_ID, "last_seen_user": {"email": self.email}}}).encode()
+
+def owner_is(email):
+    def fake(req, timeout=None):
+        api_calls.append((req.full_url, req.headers.get("Authorization"), timeout))
+        return _Resp(email)
+    return fake
+
+def dev_case(name, extra, owner, expect_allow, expect_action, resource="dev.xmcda.store/", identity="kim@xmcda.store"):
+    api_calls.clear()
+    with patch.object(engine.urllib.request, "urlopen", owner_is(owner)):
+        run_case(name, {"session_id": "d", "identity": identity, "resource_path": resource, **extra},
+                 expect_allow=expect_allow, expect_action=expect_action)
+
+dev_case("[기기] 등록 기기 + 방화벽 통과 + 본인 기기 -> 기밀(dev) 통과",
+         {"device_context": True, "device_id": DEV_ID, "device_posture": FW_OK}, "kim@xmcda.store", True, "allow")
+t("[기기] 기기 주인 조회: physical-devices API, Bearer 토큰, 짧은 timeout",
+  api_calls and api_calls[0][0].endswith(f"/accounts/acct/devices/physical-devices/{DEV_ID}")
+  and api_calls[0][1] == "Bearer tok" and api_calls[0][2] == 2, api_calls)
+dev_case("[기기] WARP 없는 기기(device_id 없음) -> 기밀(dev)은 재인증",
+         {"device_context": True, "device_id": None, "device_posture": []}, None, False, "step_up_mfa_required")
+t("[기기] 기기 정보가 없으면 주인 조회 API를 부르지 않음", not api_calls, api_calls)
+dev_case("[기기] WARP 없는 기기 -> 내부(포털)는 통과",
+         {"device_context": True}, None, True, "allow", resource="xmcda.store/")
+dev_case("[기기] WARP 없는 기기 -> 최고기밀(admin)은 차단",
+         {"device_context": True}, None, False, "block", resource="admin.xmcda.store/")
+dev_case("[기기] 방화벽 꺼짐 -> 기밀(dev) 재인증",
+         {"device_context": True, "device_id": DEV_ID, "device_posture": FW_FAIL}, "kim@xmcda.store", False, "step_up_mfa_required")
+dev_case("[기기] 필수 검사 결과 없음(만료 등) -> 검사 실패로 처리",
+         {"device_context": True, "device_id": DEV_ID, "device_posture": [{"type": "warp", "rule": "WARP", "success": True}]},
+         "kim@xmcda.store", False, "step_up_mfa_required")
+dev_case("[기기] 남의 기기(등록자 admin != 로그인 kim) -> 기밀(dev) 재인증",
+         {"device_context": True, "device_id": DEV_ID, "device_posture": FW_OK}, "admin@xmcda.store", False, "step_up_mfa_required")
+dev_case("[기기] 기기 주인 비교는 대소문자 무시",
+         {"device_context": True, "device_id": DEV_ID, "device_posture": FW_OK}, "KIM@XMCDA.STORE", True, "allow")
+dev_case("[기기] 해외(40) + 남의 기기(45) + 조합 규칙(20) = 105 -> 포털(60)에서도 차단",
+         {"device_context": True, "device_id": DEV_ID, "device_posture": FW_OK, "geo_country": "US"},
+         "admin@xmcda.store", False, "block", resource="xmcda.store/")
+mock_mfa_table.get_item.return_value = {"Item": {"identity": "kim@xmcda.store", "expires_at": int(time.time()) + 600}}
+api_calls.clear()
+_r = json.loads(engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps(
+    {"session_id": "d2", "identity": "kim@xmcda.store", "resource_path": "dev.xmcda.store/", "device_context": True})}, None)["body"])
+t("[기기] 최근 재인증 기록 + WARP 없는 기기 -> 기밀(dev) step_up_mfa_verified 통과", _r["allow"] is True and _r["action"] == "step_up_mfa_verified", _r)
+mock_mfa_table.get_item.return_value = {}
+
+def failing_urlopen(req, timeout=None):
+    raise OSError("cloudflare api down")
+with patch.object(engine.urllib.request, "urlopen", failing_urlopen):
+    run_case("[기기] 주인 조회 실패 -> 주인 신호 없이 판단(조회 장애로 전원 차단 방지), 상태 신호는 정상 판단",
+             {"session_id": "d3", "identity": "kim@xmcda.store", "resource_path": "dev.xmcda.store/",
+              "device_context": True, "device_id": DEV_ID, "device_posture": FW_OK}, expect_allow=True, expect_action="allow")
+for bad in ("../../etc", "01a16dae/../x", "x" * 100):
+    api_calls.clear()
+    with patch.object(engine.urllib.request, "urlopen", owner_is("admin@xmcda.store")):
+        engine.lookup_device_owner(bad)
+    t(f"[기기] 이상한 device_id({bad[:15]!r})는 API 주소에 넣지 않음", not api_calls, api_calls)
+run_case("[기기] device_context 없는 호출(로그인 서버/웹 서버 앞단)은 기기 신호를 만들지 않음",
+         {"session_id": "d4", "identity": "kim@xmcda.store", "resource_path": "dev.xmcda.store/"}, expect_allow=True, expect_action="allow")
+engine.CF_ACCOUNT_ID, engine.CF_DEVICE_API_TOKEN = "", ""

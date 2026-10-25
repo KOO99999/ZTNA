@@ -10,3 +10,6 @@ evaluate_shared_secret = "REPLACE_ME_WITH_OPENSSL_RAND_HEX_32_OUTPUT"
 cloudflare_team_domain = "your-team.cloudflareaccess.com"
 oidc_client_id     = "zt-login-server"
 oidc_client_secret = "REPLACE_ME_WITH_OPENSSL_RAND_HEX_32_OUTPUT"
+
+# 기기 등록 사용자 조회용(읽기 전용: Account > Zero Trust > Read). 비우면 기기 주인 확인만 꺼짐
+cloudflare_device_read_token = "REPLACE_ME"

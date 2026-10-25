@@ -136,24 +136,14 @@ export default {
     const geoCountry = accessPayload.identity?.geo?.country || null;
     const resourcePath = extractResourcePath(accessPayload.request_url);
 
-    // [기기 신호 확인용, 임시] WARP 기기 검사 결과(devicePosture)와 기기 식별 정보가 Access가 보내는
-    // 신원 정보에 실제로 들어오는지 확인한다. Cloudflare 문서는 get-identity 예시에 devicePosture가 있다고만
-    // 하고, External Evaluation 요청에 포함되는지는 명시하지 않아서 실측으로 확인한다.
-    // 값 전체가 아니라 필드 이름과 검사 결과 요약만 남긴다(개인정보 최소화). 확인이 끝나면 엔진 신호로 바꾼다.
-    if (!verifyFailed) {
-      const idObj = (accessPayload.identity && typeof accessPayload.identity === 'object') ? accessPayload.identity : {};
-      const posture = idObj.devicePosture || {};
-      const postureSummary = Object.values(posture).map((p) => ({
-        type: p && p.type, rule: p && p.rule_name, success: p && p.success,
-      }));
-      console.log('[DEVICE_PROBE]', JSON.stringify({
-        payload_keys: Object.keys(accessPayload),
-        identity_keys: Object.keys(idObj),
-        device_id: idObj.device_id || accessPayload.device_id || null,
-        device_sessions_keys: idObj.device_sessions ? Object.keys(idObj.device_sessions) : null,
-        posture: postureSummary,
-      }));
-    }
+    // [기기 신뢰] WARP 기기 검사 결과(devicePosture)와 기기 ID를 판단 없이 그대로 엔진에 넘긴다.
+    // (실측 확인: Access가 External Evaluation 신원 정보에 devicePosture/device_id를 담아 보냄)
+    // 검사 결과는 종류/규칙 이름/통과 여부만 추린다. 판단(관리 기기인지, 검사 통과인지, 기기 주인이 맞는지)은 엔진이 한다.
+    const idObj = (accessPayload.identity && typeof accessPayload.identity === 'object') ? accessPayload.identity : {};
+    const deviceId = (typeof idObj.device_id === 'string' && idObj.device_id) ? idObj.device_id : null;
+    const devicePosture = Object.values(idObj.devicePosture || {}).map((p) => ({
+      type: p && p.type, rule: p && p.rule_name, success: p && p.success === true,
+    }));
 
     // 1) 우리 Trust Score Engine(Lambda) 호출
     let trustResult;
@@ -175,6 +165,9 @@ export default {
             request_timestamp: requestTimestamp,
             geo_country: geoCountry,
             resource_path: resourcePath,
+            device_context: true,
+            device_id: deviceId,
+            device_posture: devicePosture,
             // TODO: 실제로는 클라이언트 IP 등 추가 위협 신호도 여기서 함께 실어 보내야 함
           }),
         });

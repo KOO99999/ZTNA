@@ -1,6 +1,8 @@
 import json
 import os
+import re
 import time
+import urllib.request
 import uuid
 import boto3
 from datetime import datetime, timedelta, timezone
@@ -43,10 +45,20 @@ RISK_MATRIX = {
     "threat_intel_match": {"risk": 86, "group": "security", "resettable": False},
     "waf_sqli": {"risk": 94, "group": "security", "resettable": False},
     "device_fingerprint_mismatch": {"risk": 76, "group": "security", "resettable": False},
+
+    # --- device: 기기 신뢰(WARP 기기 검사, Cloudflare가 검사하고 결과를 Access 신원 정보로 넘겨줌) ---
+    #     MFA로 기기 상태가 바뀌지는 않지만, 경계구간에서는 최근 재인증(step-up)으로 통과할 수 있게 behavioral로 둔다
+    #     (관리자 해제가 필요한 sticky 신호로 두면 개인 PC/공용 PC를 쓰는 정상 직원이 계속 막힘).
+    #     45점 = 내부(60) 통과 / 기밀(40) 재인증 / 최고기밀(20) 차단. 팀 판단 수치(표준 근거 없음) - 보고서에 명시.
+    "device_unmanaged": {"risk": 45, "group": "behavioral"},       # WARP 미등록/미연결 기기(기기 정보 없음)
+    "device_posture_failed": {"risk": 45, "group": "behavioral"},  # 등록 기기지만 필수 기기 검사(방화벽) 실패/결과 없음
+    "device_owner_mismatch": {"risk": 45, "group": "behavioral"},  # 기기 등록 사용자 != 로그인한 사람
 }
 
 COMBINATION_RULES = [
     (("unknown_location", "waf_sqli"), 30, "interaction_location_waf"),
+    # 해외에서 남의 기기로 접속 = 계정 탈취 후 다른 장비 사용 가능성이 높은 조합
+    (("unknown_location", "device_owner_mismatch"), 20, "interaction_location_device_owner"),
     (("brute_force", "threat_intel_match"), 20, "interaction_bruteforce_threatintel"),
 ]
 
@@ -104,6 +116,54 @@ def normalize_resource(resource_path):
         return None
     path = path.rstrip("/")
     return f"{host}/{path}" if path else host
+
+
+# ==========================================================================
+# [기기 신뢰] WARP 기기 검사 결과를 신호로 바꾼다.
+#   - 검사 자체는 Cloudflare(WARP)가 하고, Access가 신원 정보(devicePosture, device_id)에 담아 Worker로 보낸다.
+#     Worker는 판단 없이 그대로 넘기고(device_context=True), 여기(PDP)서 판단한다.
+#   - 기기 등록 사용자는 Cloudflare API(physical-devices)의 last_seen_user.email로 확인한다(읽기 전용 토큰).
+#   - device_context가 없는 호출(로그인 서버, 웹 서버 앞단)은 기기 정보를 모르므로 기기 신호를 만들지 않는다.
+# ==========================================================================
+DEVICE_POSTURE_RULE_NAME = os.environ.get("DEVICE_POSTURE_RULE_NAME", "ZT - Windows Firewall On")
+CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID", "")
+CF_DEVICE_API_TOKEN = os.environ.get("CF_DEVICE_API_TOKEN", "")
+_DEVICE_ID_RE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
+
+
+def lookup_device_owner(device_id):
+    """기기 ID로 Cloudflare에 등록된 기기 사용자 이메일을 조회. 설정이 없거나 실패하면 None.
+    실패 시 주인 불일치 신호를 만들지 않는다(조회 장애로 전 직원이 막히지 않게). 기기 상태 신호는 그대로 판단된다."""
+    if not (CF_ACCOUNT_ID and CF_DEVICE_API_TOKEN and _DEVICE_ID_RE.match(device_id or "")):
+        return None
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/devices/physical-devices/{device_id}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {CF_DEVICE_API_TOKEN}"})
+    try:
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read().decode())
+        email = ((data.get("result") or {}).get("last_seen_user") or {}).get("email")
+        return email.strip().lower() if isinstance(email, str) and email.strip() else None
+    except Exception as e:
+        print("[DEVICE_OWNER_LOOKUP_FAILED]", type(e).__name__)
+        return None
+
+
+def derive_device_signals(body):
+    """Worker가 넘긴 기기 정보로 device_unmanaged / device_posture_failed / device_owner_mismatch를 정한다."""
+    if body.get("device_context") is not True:
+        return
+    device_id = body.get("device_id")
+    if not device_id:
+        body["device_unmanaged"] = True
+        return
+    posture = body.get("device_posture") or []
+    required = [p for p in posture if isinstance(p, dict) and p.get("rule") == DEVICE_POSTURE_RULE_NAME]
+    if not required or not all(p.get("success") is True for p in required):
+        body["device_posture_failed"] = True
+    owner = lookup_device_owner(str(device_id))
+    identity = str(body.get("identity") or "").strip().lower()
+    if owner and identity and owner != identity:
+        body["device_owner_mismatch"] = True
 
 
 def get_resource_tier(resource_path):
@@ -306,6 +366,9 @@ def lambda_handler(event, context):
     geo_country = body.get("geo_country")
     if geo_country is not None and geo_country != HOME_COUNTRY:
         body["unknown_location"] = True
+
+    # 기기 신뢰: WARP 기기 검사 결과/기기 주인 -> 신호 (Worker가 기기 정보를 넘긴 경우에만)
+    derive_device_signals(body)
 
     # --- User Risk: 이 사람에게 이미 걸려 있는 해제 불가 신호를 읽어 같은 신호로 반영 ---
     # 조회에 실패하면 걸려 있는지 알 수 없으므로 통과시키지 않는다(fail-closed, 500 -> 호출자는 차단 처리).

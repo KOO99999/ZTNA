@@ -5,8 +5,9 @@
 #      실무 표준이다(웹사이트는 브라우저 밖의 방화벽/디스크 암호화 상태를 볼 수 없음). 그래서 검사 장치는
 #      직접 만들지 않고 Cloudflare 제품 기능을 구성하고, 그 결과를 위험도 엔진의 신호로 받는 것을 목표로 한다
 #      (탐지/검사는 검증된 도구, 판단은 엔진 한 곳).
-#  지금 단계: 검사 결과(devicePosture)가 Access -> Worker로 넘어오는지 실측 확인(index.js의 [DEVICE_PROBE] 로그).
-#             넘어오는 것이 확인되면 엔진에 "관리되지 않는 기기" 신호를 추가한다.
+#  실측 확인(2026-10-24): Access가 External Evaluation 신원 정보에 devicePosture(검사 결과)와 device_id를 담아
+#             Worker로 보낸다. Worker는 그대로 엔진에 넘기고, 엔진(risk_score_engine.py derive_device_signals)이
+#             device_unmanaged / device_posture_failed / device_owner_mismatch 신호로 판단한다.
 #  사람이 할 일: 시연 PC에 Cloudflare One Client(WARP) 설치 -> 팀 이름(cloudflare_team_domain의 앞부분)으로 등록.
 #             설치/등록은 Terraform으로 할 수 없다.
 #  참고: 계정에 원래 보이는 "WARP", "Gateway" 검사는 Terraform이 만들거나 지우지 않는다.
@@ -20,6 +21,7 @@ resource "cloudflare_zero_trust_device_posture_rule" "windows_firewall" {
   type        = "firewall"
   description = "Windows 방화벽이 켜져 있어야 통과 (ZT 프로젝트 기기 신뢰 신호)"
   # 클라이언트가 이 주기로 검사해서 결과를 보낸다. 결과는 expiration이 지나면 무효(검사가 멈춘 기기를 계속 믿지 않음).
+  # Cloudflare 제약: expiration은 schedule보다 최소 15분 길어야 한다(API 오류 2116로 확인) -> 5분 + 15분 = 20분.
   schedule   = "5m"
   expiration = "20m"
 

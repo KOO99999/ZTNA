@@ -607,4 +607,37 @@ for bad in ("../../etc", "01a16dae/../x", "x" * 100):
     t(f"[기기] 이상한 device_id({bad[:15]!r})는 API 주소에 넣지 않음", not api_calls, api_calls)
 run_case("[기기] device_context 없는 호출(로그인 서버/웹 서버 앞단)은 기기 신호를 만들지 않음",
          {"session_id": "d4", "identity": "kim@xmcda.store", "resource_path": "dev.xmcda.store/"}, expect_allow=True, expect_action="allow")
+
+# [기기 신호 스위치] report: 로그에만 남기고 점수 반영 안 함 / off: 계산도 안 함 / 알 수 없는 값: enforce
+def mode_case(mode, owner):
+    engine.DEVICE_SIGNAL_MODE = mode
+    api_calls.clear()
+    mock_mfa_table.get_item.return_value = {}
+    mock_user_risk.query.return_value = {"Items": []}
+    with patch.object(engine.urllib.request, "urlopen", owner_is(owner)):
+        r = json.loads(engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps(
+            {"session_id": "m", "identity": "kim@xmcda.store", "resource_path": "admin.xmcda.store/",
+             "device_context": True, "device_id": DEV_ID, "device_posture": FW_FAIL})}, None)["body"])
+    return r
+r = mode_case("report", "admin@xmcda.store")
+t("[기기 스위치] report: 방화벽 실패+남의 기기여도 점수 0 -> 최고기밀(admin)도 통과",
+  r["allow"] is True and r["score"] == 0, r)
+t("[기기 스위치] report: 감지한 신호는 reasons에 report-only로 남음",
+  "device_posture_failed (report-only, +0)" in r["reasons"] and "device_owner_mismatch (report-only, +0)" in r["reasons"], r["reasons"])
+r = mode_case("off", "admin@xmcda.store")
+t("[기기 스위치] off: 기기 신호 없음 + 주인 조회 API 호출 안 함",
+  r["allow"] is True and not any("device_" in x for x in r["reasons"]) and not api_calls, (r, api_calls))
+r = mode_case("enforce", "admin@xmcda.store")
+t("[기기 스위치] enforce: 점수 반영 -> 최고기밀(admin) 차단", r["allow"] is False, r)
+import os as _os, subprocess as _sp
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+_probe = ("import sys; from unittest.mock import MagicMock; sys.modules['boto3']=MagicMock(); "
+          "sys.path.insert(0, sys.argv[1]); import risk_score_engine as e; print(e.DEVICE_SIGNAL_MODE)")
+for raw, expect in (("REPORT ", "report"), ("off", "off"), ("bogus", "enforce"), (None, "enforce")):
+    _env = {k: v for k, v in _os.environ.items() if k != "DEVICE_SIGNAL_MODE"}
+    if raw is not None:
+        _env["DEVICE_SIGNAL_MODE"] = raw
+    _out = _sp.run([sys.executable, "-c", _probe, _HERE], env=_env, capture_output=True, text=True).stdout.strip()
+    t(f"[기기 스위치] 환경변수 {raw!r} -> {expect} (엔진을 새로 불러와 확인)", _out == expect, _out)
+engine.DEVICE_SIGNAL_MODE = "enforce"
 engine.CF_ACCOUNT_ID, engine.CF_DEVICE_API_TOKEN = "", ""

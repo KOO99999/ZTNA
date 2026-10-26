@@ -13,3 +13,5 @@ oidc_client_secret = "REPLACE_ME_WITH_OPENSSL_RAND_HEX_32_OUTPUT"
 
 # 기기 등록 사용자 조회용(읽기 전용: Account > Zero Trust > Read). 비우면 기기 주인 확인만 꺼짐
 cloudflare_device_read_token = "REPLACE_ME"
+# 기기 신호 스위치: enforce(점수 반영) / report(로그에만, 기본값) / off(계산 안 함)
+device_signal_mode = "report"

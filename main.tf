@@ -262,6 +262,8 @@ resource "aws_lambda_function" "pdp_engine" {
       DEVICE_POSTURE_RULE_NAME = cloudflare_zero_trust_device_posture_rule.windows_firewall.name
       CF_ACCOUNT_ID            = var.cloudflare_account_id
       CF_DEVICE_API_TOKEN      = var.cloudflare_device_read_token
+      # 기기 신호 스위치: enforce(점수 반영) / report(로그에만 남김) / off(계산 안 함)
+      DEVICE_SIGNAL_MODE = var.device_signal_mode
     }
   }
 }

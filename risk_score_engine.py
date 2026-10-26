@@ -128,6 +128,16 @@ def normalize_resource(resource_path):
 DEVICE_POSTURE_RULE_NAME = os.environ.get("DEVICE_POSTURE_RULE_NAME", "ZT - Windows Firewall On")
 CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID", "")
 CF_DEVICE_API_TOKEN = os.environ.get("CF_DEVICE_API_TOKEN", "")
+# [기기 신호 스위치] 다른 신호를 개발/시험하는 동안 기기 신호 때문에 접속이 막히지 않게 켜고 끈다.
+#   enforce: 점수에 반영(실제 판단)
+#   report : 신호는 계산해서 로그(reasons)에만 "report-only, +0"으로 남기고 점수에는 넣지 않음
+#            (Microsoft 조건부 액세스의 "보고 전용(Report-only)" 모드와 같은 개념: 영향을 먼저 관찰한 뒤 켠다)
+#   off    : 계산하지 않음(Cloudflare 기기 주인 조회 API도 부르지 않음)
+#   알 수 없는 값이면 안전한 쪽(enforce)으로 본다.
+DEVICE_SIGNAL_MODES = ("enforce", "report", "off")
+DEVICE_SIGNAL_MODE = os.environ.get("DEVICE_SIGNAL_MODE", "enforce").strip().lower()
+if DEVICE_SIGNAL_MODE not in DEVICE_SIGNAL_MODES:
+    DEVICE_SIGNAL_MODE = "enforce"
 _DEVICE_ID_RE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 
 
@@ -149,21 +159,27 @@ def lookup_device_owner(device_id):
 
 
 def derive_device_signals(body):
-    """Worker가 넘긴 기기 정보로 device_unmanaged / device_posture_failed / device_owner_mismatch를 정한다."""
-    if body.get("device_context") is not True:
-        return
+    """Worker가 넘긴 기기 정보로 device_unmanaged / device_posture_failed / device_owner_mismatch를 정한다.
+    감지한 신호 이름 목록을 돌려준다. enforce 모드일 때만 body에 신호를 넣어 점수에 반영한다."""
+    if DEVICE_SIGNAL_MODE == "off" or body.get("device_context") is not True:
+        return []
+    detected = []
     device_id = body.get("device_id")
     if not device_id:
-        body["device_unmanaged"] = True
-        return
-    posture = body.get("device_posture") or []
-    required = [p for p in posture if isinstance(p, dict) and p.get("rule") == DEVICE_POSTURE_RULE_NAME]
-    if not required or not all(p.get("success") is True for p in required):
-        body["device_posture_failed"] = True
-    owner = lookup_device_owner(str(device_id))
-    identity = str(body.get("identity") or "").strip().lower()
-    if owner and identity and owner != identity:
-        body["device_owner_mismatch"] = True
+        detected.append("device_unmanaged")
+    else:
+        posture = body.get("device_posture") or []
+        required = [p for p in posture if isinstance(p, dict) and p.get("rule") == DEVICE_POSTURE_RULE_NAME]
+        if not required or not all(p.get("success") is True for p in required):
+            detected.append("device_posture_failed")
+        owner = lookup_device_owner(str(device_id))
+        identity = str(body.get("identity") or "").strip().lower()
+        if owner and identity and owner != identity:
+            detected.append("device_owner_mismatch")
+    if DEVICE_SIGNAL_MODE == "enforce":
+        for signal in detected:
+            body[signal] = True
+    return detected
 
 
 def get_resource_tier(resource_path):
@@ -368,7 +384,7 @@ def lambda_handler(event, context):
         body["unknown_location"] = True
 
     # 기기 신뢰: WARP 기기 검사 결과/기기 주인 -> 신호 (Worker가 기기 정보를 넘긴 경우에만)
-    derive_device_signals(body)
+    device_detected = derive_device_signals(body)
 
     # --- User Risk: 이 사람에게 이미 걸려 있는 해제 불가 신호를 읽어 같은 신호로 반영 ---
     # 조회에 실패하면 걸려 있는지 알 수 없으므로 통과시키지 않는다(fail-closed, 500 -> 호출자는 차단 처리).
@@ -395,6 +411,8 @@ def lambda_handler(event, context):
     security_penalty_applied = False
     current_time = int(time.time())
     security_mfa_passed = bool(body.get("security_mfa_passed"))
+    if DEVICE_SIGNAL_MODE == "report":
+        reasons.extend(f"{signal} (report-only, +0)" for signal in device_detected)
 
     # 1. 위협 인덱스 가산 (behavioral/security 구분 + resettable 처리)
     for factor, rule in RISK_MATRIX.items():

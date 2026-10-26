@@ -95,3 +95,16 @@ variable "cloudflare_device_read_token" {
   default     = ""
   description = "기기 등록 사용자 조회용 Cloudflare API 토큰 (Zero Trust Read 전용, terraform.tfvars)"
 }
+
+# 기기 신호 스위치. 다른 신호를 만들고 시험하는 동안은 report로 두면 기기 신호가 판단에 영향을 주지 않고
+# 로그(risk_score_log의 reasons)에만 "report-only, +0"으로 남는다. 시연/최종 단계에서 enforce로 바꾼다.
+# 바꾼 뒤 terraform apply 하면 Lambda 환경변수만 바뀐다(서버 재생성 없음).
+variable "device_signal_mode" {
+  type        = string
+  default     = "report"
+  description = "기기 신호 모드: enforce(점수 반영) / report(로그에만) / off(계산 안 함)"
+  validation {
+    condition     = contains(["enforce", "report", "off"], var.device_signal_mode)
+    error_message = "device_signal_mode는 enforce, report, off 중 하나여야 합니다."
+  }
+}

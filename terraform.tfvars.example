@@ -22,3 +22,5 @@ waf_engine_mode = "On"
 # [위협 IP] AbuseIPDB API 키(무료)와 기준 점수
 abuseipdb_api_key      = "REPLACE_ME"
 threat_intel_min_score = 50
+# [세션 바인딩] 세션 도중 나라가 바뀌면: enforce(다시 로그인 요구) / report(기록만, 기본값) / off
+session_binding_mode = "report"

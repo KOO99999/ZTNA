@@ -233,6 +233,10 @@ else:
         DECISION["value"] = {"found": True, "action": "block", "device_reasons": ["<script>", "device_owner_mismatch"]}
         t = stepup_get("dev1@xmcda.store").get_data(as_text=True)
         ok("모르는 사유 이름은 표시하지 않음, 아는 기기 사유만", "<script>" not in t and "다른 사람 계정으로 등록된 기기" in t)
+        DECISION["value"] = {"found": True, "action": "session_reauth_required", "device_reasons": []}
+        r = stepup_get("dev1@xmcda.store"); t = r.get_data(as_text=True)
+        ok("[세션] 세션 바인딩 위반 -> TOTP 없이 '다시 로그인' 안내(403)",
+           r.status_code == 403 and "totp_code" not in t and "다시 로그인해 주세요" in t and 'href="/logout"' in t, (r.status_code, t[:200]))
         DECISION["value"] = {"found": True, "action": "step_up_mfa_required", "device_reasons": []}
         ok("재인증 필요(step_up_mfa_required) -> TOTP 화면", "totp_code" in stepup_get("dev1@xmcda.store").get_data(as_text=True))
         DECISION["value"] = {"found": True, "action": "block_device", "device_reasons": ["device_unmanaged"]}

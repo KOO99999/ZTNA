@@ -72,6 +72,12 @@ RISK_MATRIX = {
     #   데이터센터/호스팅 IP는 신호로 쓰지 않는다: WARP를 켜면 접속 IP가 Cloudflare 것으로 바뀌어(실측: IPv4 -> IPv6)
     #   정상 관리 기기가 모두 걸린다.
     "anonymous_network": {"risk": 40, "group": "behavioral"},
+
+    # --- session: 세션(출입증)이 다른 곳으로 옮겨진 흔적 = 쿠키 탈취 의심 ---
+    # session_country_change: Access 토큰의 country(로그인한 나라) != 지금 요청 나라(CF-IPCountry).
+    #   점수와 상관없이 "다시 로그인"을 요구한다(아래 session_reauth_required). 정상 사용자는 비밀번호+TOTP로 다시 들어오면
+    #   새 토큰에 지금 나라가 찍혀 풀리고, 쿠키만 훔친 사람은 다시 로그인할 수 없다(Okta Session protection과 같은 대응).
+    "session_country_change": {"risk": 60, "group": "behavioral"},
 }
 
 COMBINATION_RULES = [
@@ -154,6 +160,34 @@ CF_DEVICE_API_TOKEN = os.environ.get("CF_DEVICE_API_TOKEN", "")
 #   off    : 계산하지 않음(Cloudflare 기기 주인 조회 API도 부르지 않음)
 #   알 수 없는 값이면 안전한 쪽(enforce)으로 본다.
 DEVICE_SIGNALS = ("device_unmanaged", "device_owner_mismatch", "device_posture_failed")
+
+# [세션 바인딩 스위치] 세션 도중 위치/네트워크가 바뀌는 것을 탈취로 볼지(오탐 위험이 있어 상용 제품도 모드를 나눔:
+#   Okta Session protection의 Monitoring/Enforced, Microsoft CAE strict location은 소수 시험 후 적용 권고).
+#   enforce: 감지하면 다시 로그인 요구 / report: 로그(reasons)에만 report-only로 / off: 계산 안 함. 알 수 없는 값은 enforce.
+SESSION_SIGNALS = ("session_country_change",)
+SESSION_BINDING_MODE = os.environ.get("SESSION_BINDING_MODE", "enforce").strip().lower()
+if SESSION_BINDING_MODE not in ("enforce", "report", "off"):
+    SESSION_BINDING_MODE = "enforce"
+_COUNTRY_RE = re.compile(r"^[A-Z][A-Z0-9]$")   # ISO 국가 코드 + Cloudflare 특수 코드(T1 = Tor)
+
+
+def derive_session_signals(body):
+    """웹 서버 앞단이 넘긴 session_country(토큰의 로그인 나라)와 geo_country(지금 요청 나라)를 비교한다.
+    감지한 신호 목록을 돌려주고, enforce일 때만 body에 넣어 판단에 반영한다.
+    XX(알 수 없음)처럼 나라 코드가 아니면 비교하지 않는다. T1(Tor)은 Cloudflare가 쓰는 특수 코드라 비교 대상에 넣는다."""
+    if SESSION_BINDING_MODE == "off":
+        return []
+    login_country = str(body.get("session_country") or "").strip().upper()
+    current = str(body.get("geo_country") or "").strip().upper()
+    if not _COUNTRY_RE.match(login_country) or not _COUNTRY_RE.match(current) or "XX" in (login_country, current):
+        return []
+    detected = ["session_country_change"] if login_country != current else []
+    if SESSION_BINDING_MODE == "enforce":
+        for signal in detected:
+            body[signal] = True
+    if detected:
+        print(f"[SESSION_BINDING] identity={body.get('identity')} login_country={login_country} current={current} mode={SESSION_BINDING_MODE}")
+    return detected
 DEVICE_SIGNAL_MODES = ("enforce", "report", "off")
 DEVICE_SIGNAL_MODE = os.environ.get("DEVICE_SIGNAL_MODE", "enforce").strip().lower()
 if DEVICE_SIGNAL_MODE not in DEVICE_SIGNAL_MODES:
@@ -750,6 +784,9 @@ def lambda_handler(event, context):
     # 접속 IP 평판(AbuseIPDB): 로그인 서버/웹 서버 앞단이 넘긴 client_ip가 있을 때만
     derive_ip_signals(body)
 
+    # 세션 바인딩: 로그인한 나라와 지금 나라 비교(웹 서버 앞단이 Access 토큰의 country를 넘긴 경우만)
+    session_detected = derive_session_signals(body)
+
     # --- User Risk: 이 사람에게 이미 걸려 있는 해제 불가 신호를 읽어 같은 신호로 반영 ---
     # 조회에 실패하면 걸려 있는지 알 수 없으므로 통과시키지 않는다(fail-closed, 500 -> 호출자는 차단 처리).
     risk_identity = body.get("identity")
@@ -777,6 +814,8 @@ def lambda_handler(event, context):
     security_mfa_passed = bool(body.get("security_mfa_passed"))
     if DEVICE_SIGNAL_MODE == "report":
         reasons.extend(f"{signal} (report-only, +0)" for signal in device_detected)
+    if SESSION_BINDING_MODE == "report":
+        reasons.extend(f"{signal} (report-only, +0)" for signal in session_detected)
 
     # 1. 위협 인덱스 가산 (behavioral/security 구분 + resettable 처리)
     for factor, rule in RISK_MATRIX.items():
@@ -863,6 +902,14 @@ def lambda_handler(event, context):
         action = "block_device"
         mfa_expires_at = None
         reasons.append("device_not_remediable_by_mfa")
+
+    # [세션 바인딩] 출입증이 다른 곳에서 쓰이는 흔적이면 점수와 상관없이 "다시 로그인"을 요구한다.
+    # TOTP 재인증은 같은 출입증(같은 country)을 그대로 쓰므로 풀리지 않는다 -> 처음부터 다시 로그인해 새 토큰을 받아야 함.
+    if any(s in penalized_signals for s in SESSION_SIGNALS):
+        allow_access = False
+        action = "session_reauth_required"
+        mfa_expires_at = None
+        reasons.append("session_reauth_required")
 
     cache_ttl_seconds = compute_cache_ttl(resource_tier, allow_access, current_time, mfa_expires_at)
 

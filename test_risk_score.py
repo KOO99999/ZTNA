@@ -1020,4 +1020,51 @@ _sw = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.tf"), 
 t("[위협IP 배포] ip_reputation 테이블(TTL) + 엔진은 GetItem/PutItem만 + 키/기준점수 환경변수",
   'resource "aws_dynamodb_table" "ip_reputation"' in _sw and "Resource = [aws_dynamodb_table.ip_reputation.arn]" in _sw
   and "ABUSEIPDB_API_KEY      = var.abuseipdb_api_key" in _sw and "THREAT_INTEL_MIN_SCORE = tostring(var.threat_intel_min_score)" in _sw)
+
+# ==========================================================================
+# [세션 바인딩] Access 토큰 country(로그인 나라) vs CF-IPCountry(지금 나라) -> session_country_change -> 다시 로그인 요구
+# ==========================================================================
+print()
+def sess(name, body, expect_allow, expect_action, mode="enforce"):
+    engine.SESSION_BINDING_MODE = mode
+    mock_decision.reset_mock()
+    r = handler({"session_id": "s", "identity": "kim@xmcda.store", "resource_path": "xmcda.store/", "source": "B", **body})
+    ok_ = r["allow"] is expect_allow and r["action"] == expect_action
+    t(name, ok_, r)
+    return r
+
+r = sess("[세션] 로그인 KR, 지금 KR -> 신호 없음, 통과", {"session_country": "KR", "geo_country": "KR"}, True, "allow")
+r = sess("[세션] 로그인 KR, 지금 US -> 다시 로그인 요구(포털도, 점수와 무관)", {"session_country": "KR", "geo_country": "US"}, False, "session_reauth_required")
+t("[세션] 사유에 session_country_change와 session_reauth_required", "session_country_change (+60)" in r["reasons"] and "session_reauth_required" in r["reasons"], r["reasons"])
+t("[세션] 판단 기록에 session_reauth_required 저장(/stepup이 '다시 로그인' 화면을 고름)",
+  mock_decision.put_item.call_args.kwargs["Item"]["action"] == "session_reauth_required")
+sess("[세션] 로그인 US(출장), 지금 KR -> 다시 로그인 요구(unknown_location으로는 못 잡는 경우)", {"session_country": "US", "geo_country": "KR"}, False, "session_reauth_required")
+sess("[세션] 지금 T1(Cloudflare의 Tor 표시) -> 다른 곳으로 보고 다시 로그인 요구", {"session_country": "KR", "geo_country": "T1"}, False, "session_reauth_required")
+sess("[세션] XX(나라 모름) -> 비교하지 않음", {"session_country": "KR", "geo_country": "XX"}, True, "allow")
+sess("[세션] 토큰에 나라 없음(로그인 서버 평가/Access 평가 등) -> 비교하지 않음", {"geo_country": "US"}, True, "allow", )
+sess("[세션] 이상한 값(소문자 3글자 등)은 비교하지 않음", {"session_country": "kor", "geo_country": "KR"}, True, "allow")
+_mfa = {"identity": "kim@xmcda.store", "expires_at": int(time.time()) + 600}
+mock_mfa_table.get_item.return_value = {"Item": _mfa}
+r = sess("[세션] 최근 TOTP 재인증 기록이 있어도 다시 로그인 요구(재인증은 같은 토큰을 그대로 씀)",
+         {"session_country": "KR", "geo_country": "JP", "resource_path": "admin.xmcda.store/"}, False, "session_reauth_required")
+mock_mfa_table.get_item.return_value = {}
+r = sess("[세션] report 모드: 통과 + report-only 기록", {"session_country": "KR", "geo_country": "US"}, True, "allow", mode="report")
+t("[세션] report 모드 사유", "session_country_change (report-only, +0)" in r["reasons"], r["reasons"])
+r = sess("[세션] off 모드: 계산 안 함", {"session_country": "KR", "geo_country": "US"}, True, "allow", mode="off")
+t("[세션] off 모드 사유 없음", not any("session" in x for x in r["reasons"]), r["reasons"])
+engine.SESSION_BINDING_MODE = "enforce"
+import os as _os2, subprocess as _sp2
+_probe2 = ("import sys; from unittest.mock import MagicMock; sys.modules['boto3']=MagicMock(); "
+           "sys.path.insert(0, sys.argv[1]); import risk_score_engine as e; print(e.SESSION_BINDING_MODE)")
+for raw, expect in (("REPORT", "report"), ("bogus", "enforce"), (None, "enforce")):
+    _env = {k: v for k, v in _os2.environ.items() if k != "SESSION_BINDING_MODE"}
+    if raw is not None:
+        _env["SESSION_BINDING_MODE"] = raw
+    _out = _sp2.run([sys.executable, "-c", _probe2, _os2.path.dirname(_os2.path.abspath(__file__))], env=_env, capture_output=True, text=True).stdout.strip()
+    t(f"[세션] 환경변수 {raw!r} -> {expect}", _out == expect, _out)
+_mt = open(_os2.path.join(_os2.path.dirname(_os2.path.abspath(__file__)), "main.tf"), encoding="utf-8").read()
+_vt = open(_os2.path.join(_os2.path.dirname(_os2.path.abspath(__file__)), "variables.tf"), encoding="utf-8").read()
+t("[세션 배포] SESSION_BINDING_MODE 환경변수 + 변수(기본 report, 세 값만 허용)",
+  "SESSION_BINDING_MODE = var.session_binding_mode" in _mt and 'variable "session_binding_mode"' in _vt
+  and 'contains(["enforce", "report", "off"], var.session_binding_mode)' in _vt)
 engine.CF_ACCOUNT_ID, engine.CF_DEVICE_API_TOKEN = "", ""

@@ -35,9 +35,11 @@ ISS = "https://team-test.cloudflareaccess.com"
 zj._fetch_jwks = lambda: {"kid-good": GOOD.public_key()}
 zj._jwks.update({"keys": {}, "fetched_at": 0.0})
 
-def token(email="hana@test.com", key=None, exp_delta=300, aud=("aud-portal",), drop=()):
+def token(email="hana@test.com", key=None, exp_delta=300, aud=("aud-portal",), drop=(), country=None):
     now = int(_time.time())
     c = {"email": email, "iss": ISS, "aud": list(aud), "iat": now, "exp": now + exp_delta}
+    if country:
+        c["country"] = country
     for d in drop:
         c.pop(d, None)
     return pyjwt.encode(c, key or GOOD, algorithm="RS256", headers={"kid": "kid-good"})
@@ -83,6 +85,9 @@ check("통과 응답에 검증된 신원(X-ZT-Identity)", r.headers.get("X-ZT-Id
 check("Lambda에 보내는 identity는 JWT의 email, 국가는 CF-IPCountry 헤더",
       calls[0]["identity"] == "hana@test.com" and calls[0]["geo_country"] == "KR" and calls[0]["source"] == "B", calls[0])
 
+reset(); ask(tok=token(country="KR"), country="US")
+check("[세션] Lambda에 Access 토큰의 country(로그인 나라)를 session_country로, 지금 나라는 geo_country로 보냄",
+      calls[0].get("session_country") == "KR" and calls[0].get("geo_country") == "US", calls[0])
 reset(); ask(extra={"CF-Connecting-IP": "45.155.205.9"})
 check("[위협IP] Lambda에 접속 IP(CF-Connecting-IP)를 같이 보냄", calls[0].get("client_ip") == "45.155.205.9", calls[0])
 
@@ -201,6 +206,12 @@ text = r.get_data(as_text=True)
 check("차단(페이지) -> 403, 점수/사유 노출 없음", r.status_code == 403 and "score" not in text and "confidential" not in text)
 r = deny("block", uri="/api/db-data", host="admin.xmcda.store")
 check("차단(API) -> 403 JSON Denied", r.status_code == 403 and r.get_json()["status"] == "Denied")
+r = deny("session_reauth_required")
+check("[세션] session_reauth_required -> '다시 로그인이 필요합니다' 화면(403) + 로그아웃 링크, 재인증 안내 아님",
+      r.status_code == 403 and "다시 로그인이 필요합니다" in r.get_data(as_text=True) and "/logout" in r.get_data(as_text=True)
+      and "stepup" not in r.get_data(as_text=True), r.status_code)
+r = deny("session_reauth_required", uri="/api/x")
+check("[세션] API 요청이면 JSON ReauthRequired(403)", r.status_code == 403 and r.get_json().get("status") == "ReauthRequired", r.get_data(as_text=True)[:100])
 r = client.get("/deny", headers={"X-Original-URI": "/hr", "X-Original-Host": "xmcda.store"})
 check("차단 이유 헤더가 없거나 모르는 값이어도 안전하게 403", r.status_code == 403)
 r = deny("some-unknown-action")

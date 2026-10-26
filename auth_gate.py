@@ -55,8 +55,9 @@ def auth():
     identity = claims["email"]
 
     # 2) 위험도: 같은 Lambda(PDP)에 묻는다. 호출 실패/비정상 응답은 zt_risk가 차단으로 돌려준다.
+    # session_country: Access 토큰(서명 검증됨)에 들어 있는 "로그인한 나라". 지금 요청 나라와 다르면 엔진이 탈취를 의심한다.
     result = check_risk(identity, request.headers.get("CF-IPCountry"), resource_path_for(host, path),
-                        request.headers.get("CF-Connecting-IP"))
+                        request.headers.get("CF-Connecting-IP"), claims.get("country"))
     if result["allow"]:
         # 앱은 위험도를 다시 묻지 않는다. 화면에 보여줄 "이 요청에 적용된 임계값"만 여기서 받아 간다
         # (nginx가 auth_request_set으로 꺼내 앱에 넘기며, 항상 이 값으로 덮어써서 클라이언트가 보낸
@@ -94,6 +95,14 @@ def deny():
         if is_api:
             return jsonify({"status": "StepUpRequired", "message": "추가 인증이 필요합니다.", "stepup_url": url}), 403
         return redirect(url, code=302)
+
+    if action == "session_reauth_required":
+        # 출입증(Access 토큰)이 로그인한 나라와 다른 곳에서 쓰이는 중: TOTP 재인증으로는 같은 토큰이 남으므로 다시 로그인해야 한다
+        if is_api:
+            return jsonify({"status": "ReauthRequired", "message": "로그인한 위치와 지금 위치가 달라 다시 로그인이 필요합니다."}), 403
+        return _status_page("다시 로그인이 필요합니다",
+                            "로그인한 위치와 지금 접속 위치가 달라 보안을 위해 세션을 사용할 수 없습니다. "
+                            "아래 로그아웃을 누른 뒤 다시 로그인해 주세요.", 403)
 
     if action == "pdp_unavailable":
         if is_api:

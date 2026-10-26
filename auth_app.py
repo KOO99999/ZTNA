@@ -925,7 +925,7 @@ def render_no_permission(email, department, url):
 # 물어(decision_lookup) 차단이면 차단 화면을 보여준다. 사용자가 직접 고칠 수 있는 기기 사유만 보여주고,
 # 점수나 다른 신호(위치 등)는 보여주지 않는다(공격자에게 무엇을 피하면 되는지 알려주지 않기 위해).
 # block_until_mfa: 보안 신호(관리자 해제 대상)가 걸린 상태. 앱 접근 단계에서는 재인증으로 풀리지 않으므로 차단 화면.
-BLOCK_ACTIONS = ("block", "block_device", "block_until_mfa")
+BLOCK_ACTIONS = ("block", "block_device", "block_until_mfa", "session_reauth_required")
 DEVICE_HELP = {
     "device_unmanaged": ("회사에 등록된 기기가 아닙니다.",
                          "본인 계정으로 Cloudflare One Client(WARP)를 등록하고 연결한 기기에서 다시 접속하세요."),
@@ -949,13 +949,16 @@ def lookup_access_decision(email, return_url):
         return {"found": False}
 
 
-def render_blocked(email, return_url, device_reasons):
+def render_blocked(email, return_url, device_reasons, reauth=False):
     portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
     items = "".join(f"<li><strong>{escape(DEVICE_HELP[r][0])}</strong><br>{escape(DEVICE_HELP[r][1])}</li>"
                     for r in device_reasons if r in DEVICE_HELP)
     body = (f'<p>이 기기에서는 요청한 페이지를 열 수 없습니다. 추가 인증으로 해결되지 않습니다.</p><ul>{items}</ul>'
             f'<a class="btn" href="{escape(return_url)}">다시 시도</a>') if items else \
            '<p>보안 정책에 따라 접근이 차단되었습니다. 계속되면 관리자에게 문의하세요.</p>'
+    if reauth:
+        body = ('<p>로그인한 위치와 지금 접속 위치가 달라 보안을 위해 이 세션을 사용할 수 없습니다. '
+                '추가 인증으로 해결되지 않으니, 아래 "다른 계정으로 로그인"을 눌러 로그아웃한 뒤 다시 로그인해 주세요.</p>')
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>접근 차단 - ZT Login Server</title><style>
 body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
 .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 440px; margin: 60px auto; }}
@@ -969,6 +972,10 @@ a.sub {{ background: #6c757d; }} li {{ margin: 8px 0; }} p {{ font-size: 0.9em; 
 def _blocked_response(email, return_url):
     """엔진의 마지막 판단이 차단이면 차단 화면(403)을, 아니면 None(재인증 화면으로 진행)."""
     decision = lookup_access_decision(email, return_url)
+    if decision.get("found") and decision.get("action") == "session_reauth_required":
+        # 출입증이 로그인한 나라와 다른 곳에서 쓰이는 중: TOTP가 아니라 처음부터 다시 로그인해야 풀린다
+        print(f"[STEPUP_BLOCKED] identity={email} action=session_reauth_required resource={_resource_key(return_url)}", flush=True)
+        return render_blocked(email, return_url, [], reauth=True), 403
     if decision.get("found") and decision.get("action") in BLOCK_ACTIONS:
         reasons = [r for r in (decision.get("device_reasons") or []) if r in DEVICE_HELP]
         print(f"[STEPUP_BLOCKED] identity={email} action={decision.get('action')} device={','.join(reasons) or '-'} "

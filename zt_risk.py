@@ -40,7 +40,7 @@ _cache_lock = threading.Lock()
 _CACHE_MAX_ENTRIES = 1000
 
 
-def _call_pdp(identity, country, resource_path, client_ip=None):
+def _call_pdp(identity, country, resource_path, client_ip=None, session_country=None):
     """Lambda(PDP) 호출. 실패하면 fail-closed(차단) 결과를 돌려준다 - Worker와 같은 정책."""
     if not PDP_EVALUATE_URL or not EVALUATE_SHARED_SECRET:
         print("[B_PDP_CONFIG_MISSING] PDP_EVALUATE_URL/EVALUATE_SHARED_SECRET 환경변수 없음", flush=True)
@@ -60,6 +60,8 @@ def _call_pdp(identity, country, resource_path, client_ip=None):
                 "resource_path": resource_path,
                 # 접속 IP(Cloudflare가 넣는 CF-Connecting-IP): 엔진이 IP 평판(AbuseIPDB)을 본다
                 "client_ip": client_ip,
+                # 세션 바인딩: Access 토큰의 로그인 나라(엔진이 geo_country와 비교)
+                "session_country": session_country,
                 "source": "B",
             },
             timeout=PDP_TIMEOUT_SECONDS,
@@ -82,7 +84,7 @@ def _call_pdp(identity, country, resource_path, client_ip=None):
         return {"allow": False, "action": "pdp_unavailable", "error": True}
 
 
-def check_risk(identity, country, resource_path, client_ip=None):
+def check_risk(identity, country, resource_path, client_ip=None, session_country=None):
     """이 앱에서 Lambda를 부르는 유일한 통로.
 
     캐시 규칙:
@@ -98,11 +100,12 @@ def check_risk(identity, country, resource_path, client_ip=None):
     with _cache_lock:
         entry = _cache.get(key)
         if entry:
-            if entry["expires_at"] > now and entry["country"] == country and entry.get("client_ip") == client_ip:
+            if (entry["expires_at"] > now and entry["country"] == country and entry.get("client_ip") == client_ip
+                    and entry.get("session_country") == session_country):
                 return {**entry["result"], "from_cache": True}
             del _cache[key]
 
-    result = _call_pdp(identity, country, resource_path, client_ip)
+    result = _call_pdp(identity, country, resource_path, client_ip, session_country)
     result["from_cache"] = False
 
     if result["allow"] and not result["error"]:
@@ -120,6 +123,7 @@ def check_risk(identity, country, resource_path, client_ip=None):
                         "expires_at": now + ttl,
                         "country": country,
                         "client_ip": client_ip,
+                        "session_country": session_country,
                         "result": {k: v for k, v in result.items() if k != "from_cache"},
                     }
     return result

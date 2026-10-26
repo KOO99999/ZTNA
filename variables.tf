@@ -151,3 +151,16 @@ variable "threat_intel_min_score" {
     error_message = "threat_intel_min_score는 1~100 사이여야 합니다."
   }
 }
+
+# 세션 바인딩 스위치. 세션 도중 로그인한 나라(Access 토큰 country)와 지금 나라가 다르면 쿠키 탈취로 의심한다.
+# 오탐 위험이 있어 상용 제품도 기록 모드와 적용 모드를 나눈다(Okta Session protection: Monitoring/Enforced).
+#   report = 로그(risk_score_log reasons)에만 남김(기본값) / enforce = 다시 로그인 요구 / off = 계산 안 함
+variable "session_binding_mode" {
+  type        = string
+  default     = "report"
+  description = "세션 바인딩 모드: enforce / report / off"
+  validation {
+    condition     = contains(["enforce", "report", "off"], var.session_binding_mode)
+    error_message = "session_binding_mode는 enforce, report, off 중 하나여야 합니다."
+  }
+}

@@ -332,6 +332,8 @@ resource "aws_lambda_function" "pdp_engine" {
       # [위협 IP] AbuseIPDB 키(무료 계정)와 위협 판정 기준 점수(abuseConfidenceScore 이상이면 threat_intel_match)
       ABUSEIPDB_API_KEY      = var.abuseipdb_api_key
       THREAT_INTEL_MIN_SCORE = tostring(var.threat_intel_min_score)
+      # [세션 바인딩] 세션 도중 위치(나라) 변경을 탈취로 볼지: enforce(다시 로그인 요구) / report(기록만) / off
+      SESSION_BINDING_MODE = var.session_binding_mode
     }
   }
 }

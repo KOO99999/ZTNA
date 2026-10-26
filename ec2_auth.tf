@@ -26,8 +26,9 @@ resource "aws_instance" "auth_server" {
   user_data_base64 = base64gzip(templatefile("${path.module}/templates/user_data_auth.sh.tpl", {
     # 앱 코드는 user_data에 넣지 않고 S3에서 받는다(code_bucket.tf, user_data 16KB 한도).
     # 코드 버전(해시)을 넣어 두면 코드가 바뀔 때 user_data가 바뀌어 서버가 새로 만들어진다.
-    code_bucket       = aws_s3_bucket.app_code.id
-    auth_code_version = md5(join(",", [for k in sort(keys(local.auth_code_files)) : aws_s3_object.auth_code[k].etag]))
+    # 둘 다 계획 단계에서 알 수 있는 값만 쓴다(버킷 이름은 계정 ID 기반, 해시는 로컬 파일에서 계산) - code_bucket.tf 참고
+    code_bucket       = local.code_bucket_name
+    auth_code_version = md5(join(",", [for k in sort(keys(local.auth_code_files)) : filemd5(local.auth_code_files[k])]))
     db_host     = aws_db_instance.login_db.address
     db_name     = aws_db_instance.login_db.db_name
     # 앱 서비스가 쓰는 DB 계정 = 앱 전용 계정(행 읽기/쓰기만). 마스터 계정은 부팅 단계(bootstrap)에서만 쓴다.

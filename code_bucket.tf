@@ -10,12 +10,16 @@
 #  코드가 바뀌면: 파일 해시(md5)를 user_data에 넣어 두었으므로 user_data가 바뀌고, 서버가 새로 만들어진다
 #                (user_data_replace_on_change = true, 예전과 같은 동작).
 # ==========================================
-resource "random_id" "code_bucket" {
-  byte_length = 4
+# 버킷 이름은 계정 ID + 리전으로 정한다(전 세계에서 겹치지 않음). 무작위 값을 쓰면 처음 apply 때 이름이 "아직 모름"이 되고,
+# 그 이름이 들어가는 인증 서버 user_data도 계획 단계에서 모르는 값이 되어 AWS provider가
+# "Provider produced inconsistent final plan" 오류를 낸다(계획은 수정, 실행 중에는 교체로 바뀜).
+# 계획 단계에서 알 수 있는 값만 user_data에 넣으면 이 오류가 생기지 않는다.
+locals {
+  code_bucket_name = "zt-app-code-${data.aws_caller_identity.current.account_id}-${var.aws_region}"
 }
 
 resource "aws_s3_bucket" "app_code" {
-  bucket = "zt-app-code-${random_id.code_bucket.hex}"
+  bucket = local.code_bucket_name
   # 매일 destroy/apply 하므로 안에 파일이 있어도 지울 수 있게 한다(코드는 Git에 있으므로 버킷은 언제든 다시 만들 수 있음).
   force_destroy = true
 

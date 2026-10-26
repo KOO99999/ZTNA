@@ -119,3 +119,15 @@ variable "cloudflare_access_revoke_token" {
   default     = ""
   description = "기기 상태가 나빠진 사용자의 Access 세션을 끊는 Cloudflare 토큰 (Access Organizations Edit 전용, terraform.tfvars)"
 }
+
+# WAF(ModSecurity) 동작 모드. On = 공격 요청을 막고 그 사람에게 위험을 건다.
+# DetectionOnly = 막지 않고 웹 서버 로그에만 남긴다(오탐 확인용, 엔진에도 알리지 않음).
+variable "waf_engine_mode" {
+  type        = string
+  default     = "On"
+  description = "ModSecurity SecRuleEngine 값: On 또는 DetectionOnly"
+  validation {
+    condition     = contains(["On", "DetectionOnly"], var.waf_engine_mode)
+    error_message = "waf_engine_mode는 On 또는 DetectionOnly여야 합니다."
+  }
+}

@@ -17,3 +17,5 @@ cloudflare_device_read_token = "REPLACE_ME"
 device_signal_mode = "report"
 # 기기 상태가 나빠진 사용자의 세션 끊기용 토큰 (Access: Organizations, Identity Providers, and Groups - Edit 전용)
 cloudflare_access_revoke_token = "REPLACE_ME"
+# WAF(ModSecurity) 동작 모드: On(막음) / DetectionOnly(기록만, 오탐 확인용)
+waf_engine_mode = "On"

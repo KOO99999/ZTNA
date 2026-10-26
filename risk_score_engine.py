@@ -48,6 +48,9 @@ RISK_MATRIX = {
     "brute_force": {"risk": 58, "group": "security", "resettable": True},
     "threat_intel_match": {"risk": 86, "group": "security", "resettable": False},
     "waf_sqli": {"risk": 94, "group": "security", "resettable": False},
+    # WAF(ModSecurity+CRS)가 막은 SQL 삽입 외 공격(XSS/RCE/LFI/RFI 등). 로그인한 사람이 앱 안에서 공격한 증거라
+    # SQL 삽입과 같은 무게로 둔다. MFA로 풀리지 않고 관리자가 해제해야 한다(waf_sqli와 같은 이유).
+    "waf_attack": {"risk": 94, "group": "security", "resettable": False},
     "device_fingerprint_mismatch": {"risk": 76, "group": "security", "resettable": False},
 
     # --- device: 기기 신뢰(WARP 기기 검사, Cloudflare가 검사하고 결과를 Access 신원 정보로 넘겨줌) ---

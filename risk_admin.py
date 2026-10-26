@@ -30,7 +30,7 @@ user_risk_table = dynamodb.Table('user_risk')
 audit_table = dynamodb.Table('risk_score_log')
 
 # risk_score_engine.STICKY_SIGNALS와 같아야 한다(test_risk_admin.py가 두 값이 같은지 검사함).
-STICKY_SIGNALS = ("threat_intel_match", "waf_sqli", "device_fingerprint_mismatch")
+STICKY_SIGNALS = ("threat_intel_match", "waf_sqli", "waf_attack", "device_fingerprint_mismatch")
 
 MAX_LIST_ITEMS = 500
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-']{1,64}@[A-Za-z0-9.\-]{1,190}$")

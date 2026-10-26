@@ -267,3 +267,21 @@ data "aws_ami" "ubuntu" {
     values = ["hvm"]
   }
 }
+
+# 웹 서버 전용 Ubuntu 24.04: nginx용 ModSecurity 연결 모듈(libnginx-mod-http-modsecurity)이 24.04 저장소에는 있고
+# 22.04 저장소에는 없다(패키지 목록에서 확인). 직접 빌드하지 않고 배포판 패키지를 쓰기 위해 웹 서버만 24.04로 둔다.
+# 24.04 이미지 이름은 hvm-ssd-gp3 경로를 쓴다(Canonical 공식 AMI 이름 규칙).
+data "aws_ami" "ubuntu_noble" {
+  most_recent = true
+  owners      = ["099720109477"]
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}

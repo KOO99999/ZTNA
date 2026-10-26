@@ -1,5 +1,5 @@
 # ==========================================
-# 앱 코드 배포용 S3 버킷 (로그인 서버 코드)
+# 앱 코드 배포용 S3 버킷 (로그인 서버 코드, 웹 서버 판단 서비스 코드)
 #
 #  왜: 예전에는 auth_app.py를 user_data 안에 통째로 넣었다. EC2 user_data는 16KB 한도가 있고(AWS EC2 User Guide,
 #      "User data is limited to 16 KB"), 압축해도 한도에 거의 닿아 기능을 더 넣을 수 없게 됐다.
@@ -68,6 +68,13 @@ locals {
     "auth/auth_app.py" = "${path.module}/auth_app.py"
     "auth/zt_mtls.py"  = "${path.module}/zt_mtls.py"
   }
+  # 웹 서버(판단 서비스)가 내려받는 코드 파일
+  web_code_files = {
+    "web/auth_gate.py" = "${path.module}/auth_gate.py"
+    "web/zt_jwt.py"    = "${path.module}/zt_jwt.py"
+    "web/zt_risk.py"   = "${path.module}/zt_risk.py"
+    "web/zt_waf.py"    = "${path.module}/zt_waf.py"
+  }
 }
 
 resource "aws_s3_object" "auth_code" {
@@ -91,6 +98,31 @@ resource "aws_iam_role_policy" "auth_code_read" {
       Effect   = "Allow"
       Action   = ["s3:GetObject"]
       Resource = [for o in aws_s3_object.auth_code : "${aws_s3_bucket.app_code.arn}/${o.key}"]
+    }]
+  })
+}
+
+resource "aws_s3_object" "web_code" {
+  for_each = local.web_code_files
+  bucket   = aws_s3_bucket.app_code.id
+  key      = each.key
+  source   = each.value
+  etag     = filemd5(each.value)
+
+  depends_on = [aws_s3_bucket_server_side_encryption_configuration.app_code]
+}
+
+# 웹 서버 역할: 자기 코드 파일만 읽기(버킷 목록 보기, 쓰기, 다른 파일 읽기 없음)
+resource "aws_iam_role_policy" "web_code_read" {
+  name = "zt-web-code-read"
+  role = aws_iam_role.ec2_role.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid      = "ReadOwnCode"
+      Effect   = "Allow"
+      Action   = ["s3:GetObject"]
+      Resource = [for o in aws_s3_object.web_code : "${aws_s3_bucket.app_code.arn}/${o.key}"]
     }]
   })
 }

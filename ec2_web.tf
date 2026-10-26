@@ -3,7 +3,8 @@
 #    인터넷과 직접 마주하는 유일한 계층. nginx가 앱에 넘기기 전에 판단 서비스에 먼저 묻는다(auth_request).
 # ==========================================
 resource "aws_instance" "web_server" {
-  ami                  = data.aws_ami.ubuntu.id
+  # ModSecurity nginx 모듈 패키지 때문에 웹 서버만 Ubuntu 24.04(network.tf ubuntu_noble)
+  ami                  = data.aws_ami.ubuntu_noble.id
   instance_type        = "t3.micro"
   subnet_id            = aws_subnet.web_subnet.id
   availability_zone    = "ap-northeast-2a"
@@ -37,11 +38,14 @@ resource "aws_instance" "web_server" {
     aws_region        = var.aws_region
     mtls_param_prefix = local.mtls_param_prefix
 
-    # [판단 서비스] nginx auth_request가 요청마다 묻는 auth_gate.py (nginx 옆에서 실행)
-    # app_server(ec2_app.tf)에 넘기는 값과 같은 방식/같은 값 + 같은 모듈(zt_jwt.py, zt_risk.py)
-    auth_gate_code         = file("${path.module}/auth_gate.py")
-    zt_jwt_code            = file("${path.module}/zt_jwt.py")
-    zt_risk_code           = file("${path.module}/zt_risk.py")
+    # [판단 서비스] nginx auth_request가 요청마다 묻는 auth_gate.py와 모듈(zt_jwt, zt_risk, zt_waf)은
+    # user_data에 넣지 않고 S3에서 받는다(code_bucket.tf, 16KB 한도). 계획 단계에서 알 수 있는 값만 넣는다.
+    code_bucket      = local.code_bucket_name
+    web_code_version = md5(join(",", [for k in sort(keys(local.web_code_files)) : filemd5(local.web_code_files[k])]))
+    # [WAF] 동작 모드, CRS 버전(커밋 해시로 고정)
+    waf_engine_mode = var.waf_engine_mode
+    crs_version     = "v3.3.9"
+    crs_commit      = "29240641f78ddb535313eec2a322a89e6520b7e5"
     pdp_evaluate_url       = "${aws_apigatewayv2_stage.pdp_stage.invoke_url}evaluate"
     evaluate_shared_secret = var.evaluate_shared_secret
     cf_team_domain         = var.cloudflare_team_domain
@@ -59,7 +63,9 @@ resource "aws_instance" "web_server" {
   }
 
   # 부팅 스크립트가 SSM에서 인증서를 읽으므로, 파라미터와 읽기 권한이 먼저 만들어져 있어야 한다.
-  depends_on = [aws_ssm_parameter.mtls_key, aws_ssm_parameter.mtls_cert, aws_ssm_parameter.mtls_ca_cert, aws_iam_role_policy.mtls_read]
+  # 코드는 S3에서 받으므로 코드 파일과 읽기 권한도 먼저 있어야 한다.
+  depends_on = [aws_ssm_parameter.mtls_key, aws_ssm_parameter.mtls_cert, aws_ssm_parameter.mtls_ca_cert, aws_iam_role_policy.mtls_read,
+  aws_s3_object.web_code, aws_iam_role_policy.web_code_read]
 
   lifecycle {
     create_before_destroy = true

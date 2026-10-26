@@ -450,8 +450,8 @@ t("[보안] 틀린 비밀키로 거부된 호출의 로그에도 입력값이 �
 def _flag(identity, signal, status="active"):
     return {"identity": identity, "signal": signal, "status": status, "set_at": now}
 
-t("[UserRisk] STICKY_SIGNALS는 resettable=False인 security 신호 3개",
-  sorted(engine.STICKY_SIGNALS) == ["device_fingerprint_mismatch", "threat_intel_match", "waf_sqli"], engine.STICKY_SIGNALS)
+t("[UserRisk] STICKY_SIGNALS는 resettable=False인 security 신호 4개",
+  sorted(engine.STICKY_SIGNALS) == ["device_fingerprint_mismatch", "threat_intel_match", "waf_attack", "waf_sqli"], engine.STICKY_SIGNALS)
 
 # 1) persist_risk=true + 감지 -> 저장
 r = _call({"session_id": "u1", "identity": "kim@test.com", "waf_sqli": True, "persist_risk": True, "source": "B"})
@@ -463,6 +463,13 @@ t("[UserRisk] persist_risk=true: 감지된 waf_sqli를 user_risk에 active로 �
 t("[UserRisk] 해제된(released) 항목은 같은 조건식으로 다시 active가 될 수 있음(재감지)",
   "<> :active" in calls[0].kwargs["ConditionExpression"])
 
+# 1-1) WAF 신원 연결(zt_waf.py)이 보내는 모양: source=waf, waf_attack + persist_risk
+r = _call({"session_id": "u1w", "identity": "lee@test.com", "waf_attack": True, "persist_risk": True, "source": "waf",
+           "resource_path": "hr.xmcda.store/files"})
+calls = mock_user_risk.update_item.call_args_list
+t("[UserRisk] WAF 알림(waf_attack, source=waf): user_risk에 저장 + 그 요청은 차단(94점)",
+  len(calls) == 1 and calls[0].kwargs["Key"] == {"identity": "lee@test.com", "signal": "waf_attack"}
+  and calls[0].kwargs["ExpressionAttributeValues"][":src"] == "waf" and r["allow"] is False and r["score"] >= 94, (calls, r))
 # 2) persist_risk 없음 -> 저장 안 함 (로그인 폼 등 인증 전 입력으로 남의 계정을 잠그는 공격 방지)
 r = _call({"session_id": "u2", "identity": "victim@test.com", "waf_sqli": True})
 t("[UserRisk] persist_risk가 없으면 저장하지 않음(남의 이메일을 적어 잠그는 공격 방지)", mock_user_risk.update_item.call_count == 0)
@@ -485,6 +492,11 @@ def _call_flagged(body, items):
     mock_user_risk.query.return_value = {"Items": items}
     raw = engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps(body)}, None)
     return raw["statusCode"], json.loads(raw["body"])
+
+_code, r = _call_flagged({"session_id": "u1x", "identity": "lee@test.com", "resource_path": "xmcda.store/", "source": "B"},
+                  [_flag("lee@test.com", "waf_attack")])
+t("[UserRisk] 저장된 waf_attack이 있으면 다른 앱(포털) 요청도 차단(관리자가 해제할 때까지)",
+  r["allow"] is False and "waf_attack (+94)" in r["reasons"], r)
 
 code, r = _call_flagged({"session_id": "u5", "identity": "kim@test.com", "resource_path": "dev.xmcda.store/"},
                         [_flag("kim@test.com", "threat_intel_match")])

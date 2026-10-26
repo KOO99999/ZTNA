@@ -24,6 +24,7 @@ TESTS = [
     ("유출 비밀번호 검사 (auth_app.py)", "test_pwned_password.py"),
     ("DB 최소권한·TLS (auth_app.py)", "test_db_least_privilege.py"),
     ("Web->WAS mTLS (zt_mtls.py)", "test_mtls.py"),
+    ("WAF 신원 연결 (zt_waf.py)", "test_waf.py"),
 ]
 
 env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")

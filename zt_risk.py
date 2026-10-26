@@ -121,6 +121,14 @@ def check_risk(identity, country, resource_path):
     return result
 
 
+def invalidate_identity(identity):
+    """이 사람의 '통과' 캐시를 모두 지운다(WAF가 이 사람의 공격을 막았을 때 등 - 다음 요청은 엔진에 다시 묻는다)."""
+    identity = (identity or "").strip().lower()
+    with _cache_lock:
+        for key in [k for k in _cache if str(k[0]).strip().lower() == identity]:
+            del _cache[key]
+
+
 def resource_path_for(host, path):
     """요청이 어느 자원인지 = "호스트+경로"(쿼리 제외). index.js(Worker)의 extractResourcePath와 같은 형식이고,
     등급 판단은 엔진(RESOURCE_TIERS)이 한다. 호스트는 소문자로, 포트가 붙어 있으면 뗀다."""

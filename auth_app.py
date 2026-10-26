@@ -283,18 +283,12 @@ def evaluate_login_risk(identity, signals):
         return {"allow": False, "action": "lambda_call_failed"}
 
 
-# [팀원 추가, 병합] SQL 인젝션 패턴 탐지 - waf_sqli 신호를 처음으로 실제 코드에 연결.
-# WAF가 아니라 로그인 폼 입력값 자체에서 패턴을 감지하는 방식으로 "WAF는 JWT를
-# 파싱하지 않는다"는 기존 미해결 문제(§3-3-1)를 우회 해결함.
-SQLI_PATTERN = re.compile(
-    r"(--|;|/\*|\*/|\bUNION\b|\bSELECT\b|\bDROP\b|\bINSERT\b|'\s*OR\s*'|'\s*=\s*')",
-    re.IGNORECASE,
-)
-
-def detect_sqli(value):
-    if not value:
-        return False
-    return bool(SQLI_PATTERN.search(value))
+# [WAF] 예전에는 로그인 폼 입력값을 정규식으로 검사해 waf_sqli를 기록했다. 이제 로그인 서버 앞 nginx의
+# ModSecurity + OWASP CRS가 이 요청을 검사하고 막는다(user_data_web.sh.tpl). 정규식을 뺀 이유:
+#   1) ';', '--', 작은따옴표가 들어간 정상 비밀번호까지 막았다(예: "abc;123").
+#   2) 로그인 전이라 입력한 이메일이 본인 것인지 모르는데, 그 이메일 이름으로 공격 기록을 남겼다(남의 이메일을 적으면 그 사람 기록이 됨).
+#   3) CRS는 libinjection 기반 탐지 등 검증된 규칙 묶음이라 정규식 한 줄보다 탐지 범위가 넓다.
+# 로그인 전 공격은 신원이 없으므로 WAF가 막기만 하고, 사람에게 위험을 거는 연결은 로그인한 요청(앱)에서만 한다(zt_waf.py).
 
 
 _rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -594,18 +588,6 @@ def authorize():
     email = request.form.get('email', '').strip().lower()
     password = request.form.get('password', '')
     client_ip = request.headers.get('CF-Connecting-IP', request.remote_addr)
-
-    # [팀원 추가, 병합] SQL 인젝션 패턴 사전 검사 - 자격증명 확인보다 먼저 걸러냄
-    if detect_sqli(email) or detect_sqli(password):
-        risk_result = evaluate_login_risk(
-            email or 'unknown',
-            {"waf_sqli": True, "security_mfa_passed": False},
-        )
-        print(f"[WAF_BLOCKED] identity={email} action={risk_result.get('action')}", flush=True)
-        return render_credentials_form(
-            client_id, redirect_uri, state, response_type, scope,
-            error="비정상적인 요청이 감지되어 접속이 차단되었습니다."
-        )
 
     account = Account.query.filter_by(email=email).first()
     credentials_ok = bool(account) and check_password_hash(account.password_hash, password)

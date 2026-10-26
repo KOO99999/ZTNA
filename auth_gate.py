@@ -20,6 +20,12 @@ from zt_risk import check_risk, resource_path_for, stepup_url
 
 AUTH_DOMAIN = os.environ.get("AUTH_DOMAIN", "auth.xmcda.store")
 
+# [WAF 신원 연결] ModSecurity 감사 로그를 따라 읽어, 로그인한 사람의 공격을 엔진에 알린다(zt_waf.py).
+# 위험도 캐시와 같은 프로세스에 있어야 알린 즉시 그 사람의 캐시를 지울 수 있다(gunicorn workers=1).
+if os.environ.get("ZT_WAF_ENABLED") == "1":
+    import zt_waf
+    zt_waf.start()
+
 app = Flask(__name__)
 
 

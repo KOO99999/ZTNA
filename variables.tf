@@ -164,3 +164,29 @@ variable "session_binding_mode" {
     error_message = "session_binding_mode는 enforce, report, off 중 하나여야 합니다."
   }
 }
+
+# [이동 속도] MaxMind GeoLite 웹 조회(geolite.info, 무료 하루 1,000회) 인증 정보: 계정 ID + 라이선스 키 (terraform.tfvars)
+variable "maxmind_account_id" {
+  type        = string
+  sensitive   = true
+  default     = ""
+  description = "MaxMind 계정 ID (비우면 이동 속도 신호를 계산하지 않음)"
+}
+
+variable "maxmind_license_key" {
+  type        = string
+  sensitive   = true
+  default     = ""
+  description = "MaxMind 라이선스 키 (terraform.tfvars)"
+}
+
+# 불가능한 이동(geo_velocity)을 점수에 반영할지: enforce / report(로그에만, 기본값) / off(조회도 안 함)
+variable "geo_velocity_mode" {
+  type        = string
+  default     = "report"
+  description = "이동 속도 신호 모드: enforce / report / off"
+  validation {
+    condition     = contains(["enforce", "report", "off"], var.geo_velocity_mode)
+    error_message = "geo_velocity_mode는 enforce, report, off 중 하나여야 합니다."
+  }
+}

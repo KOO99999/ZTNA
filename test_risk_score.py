@@ -21,6 +21,10 @@ mock_decision = MagicMock()    # [마지막 판단] access_decision
 mock_device_state = MagicMock()   # [기기 순찰] device_state, 기본은 기록 없음
 mock_ip_rep = MagicMock()          # [위협 IP] ip_reputation, 기본은 캐시 없음
 mock_ip_rep.get_item.return_value = {}
+mock_ip_geo = MagicMock()          # [이동 속도] ip_geolocation, 기본은 캐시 없음
+mock_ip_geo.get_item.return_value = {}
+mock_user_loc = MagicMock()        # [이동 속도] user_location, 기본은 기록 없음
+mock_user_loc.get_item.return_value = {}
 mock_device_state.query.return_value = {"Items": []}
 
 def _table_side_effect(name):
@@ -32,6 +36,10 @@ def _table_side_effect(name):
         return mock_device_state
     if name == 'ip_reputation':
         return mock_ip_rep
+    if name == 'ip_geolocation':
+        return mock_ip_geo
+    if name == 'user_location':
+        return mock_user_loc
     return mock_mfa_table if name == 'mfa_verified' else mock_table
 
 boto3.resource.return_value.Table.side_effect = _table_side_effect
@@ -65,7 +73,7 @@ def run_case(name, body, expect_allow=None, expect_action=None, mfa_record=None)
 now = int(time.time())
 
 # RISK_MATRIX(v10): night_access=20, unknown_location=40, brute_force=58(resettable),
-# threat_intel_match=86, waf_sqli=94, device_fingerprint_mismatch=76
+# threat_intel_match=86, waf_sqli=94, waf_attack=94 (device_fingerprint_mismatch는 삭제됨: WARP 기기 신호로 대체)
 # RISK_THRESHOLD=40 (이하 허용), STEP_UP_MARGIN=20 (40~60 구간이 경계)
 
 run_case(
@@ -93,9 +101,9 @@ run_case(
 )
 
 run_case(
-    "단말 지문 불일치 단독 (security, +76)",
+    "삭제된 신호 이름(device_fingerprint_mismatch)을 보내도 점수에 반영되지 않음",
     {"session_id": "s4", "identity": "hana@test.com", "device_fingerprint_mismatch": True},
-    expect_allow=False, expect_action="block_until_mfa"
+    expect_allow=True, expect_action="allow"
 )
 
 run_case(
@@ -170,10 +178,10 @@ run_case(
     expect_allow=False, expect_action="step_up_mfa_required"
 )
 
-# device_fingerprint_mismatch(76)가 MFA 통과해도 경계+마진(60)을 안전하게 초과하는지 확인
+# 해제 불가 신호 중 가장 낮은 threat_intel_match(86)도 MFA 통과 후 경계+마진(기본 60)을 넘어 확실히 차단되는지 확인
 run_case(
-    "[v10] device_fingerprint_mismatch + MFA 통과 -> 76 > 60, 여전히 확실히 차단",
-    {"session_id": "s15", "identity": "attacker@test.com", "device_fingerprint_mismatch": True,
+    "[v10] threat_intel_match + MFA 통과 -> 86 > 60, 여전히 확실히 차단",
+    {"session_id": "s15", "identity": "attacker@test.com", "threat_intel_match": True,
      "security_mfa_passed": True},
     expect_allow=False, expect_action="block"
 )
@@ -454,8 +462,8 @@ t("[보안] 틀린 비밀키로 거부된 호출의 로그에도 입력값이 �
 def _flag(identity, signal, status="active"):
     return {"identity": identity, "signal": signal, "status": status, "set_at": now}
 
-t("[UserRisk] STICKY_SIGNALS는 resettable=False인 security 신호 4개",
-  sorted(engine.STICKY_SIGNALS) == ["device_fingerprint_mismatch", "threat_intel_match", "waf_attack", "waf_sqli"], engine.STICKY_SIGNALS)
+t("[UserRisk] STICKY_SIGNALS는 resettable=False인 security 신호 3개",
+  sorted(engine.STICKY_SIGNALS) == ["threat_intel_match", "waf_attack", "waf_sqli"], engine.STICKY_SIGNALS)
 
 # 1) persist_risk=true + 감지 -> 저장
 r = _call({"session_id": "u1", "identity": "kim@test.com", "waf_sqli": True, "persist_risk": True, "source": "B"})
@@ -1068,3 +1076,148 @@ t("[세션 배포] SESSION_BINDING_MODE 환경변수 + 변수(기본 report, 세
   "SESSION_BINDING_MODE = var.session_binding_mode" in _mt and 'variable "session_binding_mode"' in _vt
   and 'contains(["enforce", "report", "off"], var.session_binding_mode)' in _vt)
 engine.CF_ACCOUNT_ID, engine.CF_DEVICE_API_TOKEN = "", ""
+
+# ==========================================================================
+# [정리] 안 쓰는 신호 삭제
+# ==========================================================================
+print()
+t("[정리] RISK_MATRIX에 device_fingerprint_mismatch 없음", "device_fingerprint_mismatch" not in engine.RISK_MATRIX)
+t("[정리] 해제 불가 신호 최소 점수(86) > 가장 큰 경계 상한(내부 60+20=80)",
+  min(r["risk"] for r in engine.RISK_MATRIX.values() if r.get("resettable") is False)
+  > max(engine.TIER_THRESHOLDS.values()) + engine.STEP_UP_MARGIN)
+
+# ==========================================================================
+# [이동 속도] MaxMind GeoLite 웹 조회 -> 마지막 통과 위치와 비교 -> geo_velocity(40, behavioral)
+# ==========================================================================
+print()
+import base64 as _b64
+SEOUL = {"latitude": 37.5665, "longitude": 126.9780, "accuracy_radius": 20}
+BUSAN = {"latitude": 35.1796, "longitude": 129.0756, "accuracy_radius": 20}
+NEWYORK = {"latitude": 40.7128, "longitude": -74.0060, "accuracy_radius": 20}
+TOKYO = {"latitude": 35.6762, "longitude": 139.6503, "accuracy_radius": 20}
+mm_calls = []
+def maxmind(loc=None, country="US", code=None):
+    def fake(req, timeout=None):
+        mm_calls.append((req.full_url, req.headers.get("Authorization"), timeout))
+        if code:
+            raise _ue.HTTPError(req.full_url, code, "x", {}, _io.BytesIO(b""))
+        body = {"country": {"iso_code": country}}
+        if loc is not None:
+            body["location"] = loc
+        return _AJ(body)
+    return fake
+
+def last_at(loc, minutes_ago, country="KR"):
+    return {"Item": {"identity": "kim@xmcda.store", "lat": str(loc["latitude"]), "lon": str(loc["longitude"]),
+                     "radius": loc["accuracy_radius"], "country": country, "seen_at": int(time.time()) - minutes_ago * 60}}
+
+engine.ABUSEIPDB_API_KEY = ""
+engine.MAXMIND_ACCOUNT_ID, engine.MAXMIND_LICENSE_KEY = "123456", "mm-key"
+def geo_case(name, fake, last, expect_allow, expect_action, resource="admin.xmcda.store/", mode="enforce", ip="45.155.205.30",
+             cached=None, extra=None):
+    engine.GEO_VELOCITY_MODE = mode
+    mm_calls.clear(); mock_ip_geo.reset_mock(); mock_user_loc.reset_mock(); mock_mfa_table.get_item.return_value = {}
+    mock_ip_geo.get_item.return_value = {"Item": cached} if cached else {}
+    mock_user_loc.get_item.return_value = last or {}
+    body = {"session_id": "geo", "identity": "kim@xmcda.store", "resource_path": resource, "client_ip": ip, "source": "B", **(extra or {})}
+    with patch.object(engine.urllib.request, "urlopen", fake):
+        r = handler(body)
+    t(name, r["allow"] is expect_allow and r["action"] == expect_action, r)
+    return r
+
+r = geo_case("[이동] 서울(10분 전) -> 뉴욕 = 불가능한 이동 -> 최고기밀(admin 20) 재인증", maxmind(NEWYORK), last_at(SEOUL, 10),
+             False, "step_up_mfa_required")
+t("[이동] 사유에 geo_velocity (+40)", "geo_velocity (+40)" in r["reasons"], r["reasons"])
+t("[이동] MaxMind 호출: geolite.info City, Basic 인증(계정ID:키), 짧은 timeout",
+  mm_calls and mm_calls[0][0] == "https://geolite.info/geoip/v2.1/city/45.155.205.30"
+  and mm_calls[0][1] == "Basic " + _b64.b64encode(b"123456:mm-key").decode() and mm_calls[0][2] == 2, mm_calls)
+_g = mock_ip_geo.put_item.call_args.kwargs["Item"] if mock_ip_geo.put_item.called else {}
+t("[이동] 위치를 IP별 24시간 캐시(무료 하루 1,000회 대비), 좌표는 문자열로 저장(DynamoDB float 불가)",
+  _g.get("status") == "ok" and _g.get("lat") == "40.7128" and _g.get("expires_at") - _g.get("checked_at") == 86400, _g)
+t("[이동] 막힌 판단의 위치는 '마지막 위치'로 저장하지 않음", not mock_user_loc.put_item.called)
+geo_case("[이동] 같은 상황, 포털(내부 60) -> 40점이라 통과", maxmind(NEWYORK), last_at(SEOUL, 10), True, "allow", resource="xmcda.store/")
+_l = mock_user_loc.put_item.call_args.kwargs["Item"] if mock_user_loc.put_item.called else {}
+t("[이동] 통과된 판단은 지금 위치를 새 기준으로 저장(30일 뒤 TTL로 삭제)",
+  _l.get("lat") == "40.7128" and _l.get("ip") == "45.155.205.30" and _l.get("expires_at") - _l.get("seen_at") == 30 * 86400, _l)
+geo_case("[이동] 서울 -> 뉴욕이라도 20시간 지났으면(약 550km/h) 정상 이동", maxmind(NEWYORK), last_at(SEOUL, 20 * 60), True, "allow")
+geo_case("[이동] 서울 -> 부산 5분(약 330km, 500km 미만) -> 비교 안 함(GeoIP 흔들림/국내 이동)", maxmind(BUSAN, "KR"), last_at(SEOUL, 5), True, "allow")
+geo_case("[이동] 서울 -> 도쿄 1시간(약 1,160km - 오차 40km -> 약 1,120km/h) -> 불가능한 이동", maxmind(TOKYO, "JP"), last_at(SEOUL, 60),
+         False, "step_up_mfa_required")
+geo_case("[이동] 서울 -> 도쿄 2시간(약 560km/h) -> 정상", maxmind(TOKYO, "JP"), last_at(SEOUL, 120), True, "allow")
+geo_case("[이동] 오차 반경이 큰 위치(나라 수준 1,000km)는 비교 안 함", maxmind({**NEWYORK, "accuracy_radius": 1000}), last_at(SEOUL, 10), True, "allow")
+geo_case("[이동] 오차 반경 합을 빼고 계산(반경 300km씩이면 서울->도쿄 1시간 약 560km/h -> 정상)",
+         maxmind({**TOKYO, "accuracy_radius": 300}, "JP"), last_at({**SEOUL, "accuracy_radius": 300}, 60), True, "allow")
+geo_case("[이동] 마지막 위치 기록이 없으면(첫 접속) 신호 없음", maxmind(NEWYORK), None, True, "allow")
+geo_case("[이동] 해외 + 불가능한 이동 겹침: unknown_location 40 + 40 = 80 -> 기밀(dev 40) 차단", maxmind(NEWYORK), last_at(SEOUL, 10),
+         False, "block", resource="dev.xmcda.store/", extra={"geo_country": "US"})
+geo_case("[이동] 해외 + 불가능한 이동 겹침 -> 포털(60~80 경계) 재인증", maxmind(NEWYORK), last_at(SEOUL, 10),
+         False, "step_up_mfa_required", resource="xmcda.store/", extra={"geo_country": "US"})
+_mfa = {"identity": "kim@xmcda.store", "expires_at": int(time.time()) + 600}
+engine.GEO_VELOCITY_MODE = "enforce"
+mm_calls.clear(); mock_user_loc.reset_mock(); mock_ip_geo.get_item.return_value = {}
+mock_user_loc.get_item.return_value = last_at(SEOUL, 10)
+mock_mfa_table.get_item.return_value = {"Item": _mfa}
+with patch.object(engine.urllib.request, "urlopen", maxmind(NEWYORK)):
+    r = handler({"session_id": "geo", "identity": "kim@xmcda.store", "resource_path": "admin.xmcda.store/", "client_ip": "45.155.205.30", "source": "B"})
+mock_mfa_table.get_item.return_value = {}
+t("[이동] 재인증(TOTP) 성공 기록이 있으면 통과", r["allow"] is True and r["action"] == "step_up_mfa_verified", r)
+t("[이동] 재인증 후 통과 -> 지금 위치가 새 기준(다음 요청부터 신호 없음)", mock_user_loc.put_item.called)
+for code in (401, 429, 500):
+    geo_case(f"[이동] MaxMind 오류({code}) -> 신호 없이 판단(fail-open)", maxmind(code=code), last_at(SEOUL, 10), True, "allow")
+    _g = mock_ip_geo.put_item.call_args.kwargs["Item"] if mock_ip_geo.put_item.called else {}
+    t(f"[이동] 오류({code})도 5분 기록(장애 중 요청마다 다시 부르지 않음)", _g.get("status") == "unknown" and _g.get("expires_at") - _g.get("checked_at") == 300, _g)
+geo_case("[이동] 응답에 위치가 없으면 모름(신호 없음)", maxmind(None), last_at(SEOUL, 10), True, "allow")
+geo_case("[이동] 좌표가 범위 밖이면 모름", maxmind({"latitude": 200, "longitude": 0, "accuracy_radius": 5}), last_at(SEOUL, 10), True, "allow")
+geo_case("[이동] 캐시에 있으면 MaxMind를 부르지 않음", maxmind(SEOUL), last_at(SEOUL, 10), False, "step_up_mfa_required",
+         cached={"ip": "45.155.205.30", "status": "ok", "lat": "40.7128", "lon": "-74.0060", "radius": 20, "country": "US",
+                 "expires_at": int(time.time()) + 100})
+t("[이동] 캐시 사용 시 외부 호출 0회", not mm_calls, mm_calls)
+geo_case("[이동] 사설 IP는 조회 안 함", maxmind(NEWYORK), last_at(SEOUL, 10), True, "allow", ip="10.0.1.5")
+t("[이동] 사설 IP -> 외부 호출 0회", not mm_calls, mm_calls)
+r = geo_case("[이동] report 모드: 통과 + report-only 기록", maxmind(NEWYORK), last_at(SEOUL, 10), True, "allow", mode="report")
+t("[이동] report 모드 사유", "geo_velocity (report-only, +0)" in r["reasons"], r["reasons"])
+geo_case("[이동] off 모드: 조회도 안 함", maxmind(NEWYORK), last_at(SEOUL, 10), True, "allow", mode="off")
+t("[이동] off 모드 -> 외부 호출 0회", not mm_calls, mm_calls)
+engine.MAXMIND_ACCOUNT_ID = ""
+geo_case("[이동] MaxMind 키가 없으면 조회 안 함", maxmind(NEWYORK), last_at(SEOUL, 10), True, "allow")
+t("[이동] 키 없음 -> 외부 호출 0회", not mm_calls, mm_calls)
+engine.MAXMIND_ACCOUNT_ID = "123456"
+mock_user_loc.get_item.side_effect = Exception("ddb down")
+geo_case("[이동] 마지막 위치 조회 실패 -> 신호 없이 판단", maxmind(NEWYORK), None, True, "allow")
+mock_user_loc.get_item.side_effect = None
+mock_user_loc.get_item.return_value = {}
+
+# 평판(AbuseIPDB)과 위치(MaxMind)를 동시에 조회하는지: 각각 1초씩 걸리게 하고 전체가 2초보다 짧은지 확인
+engine.ABUSEIPDB_API_KEY = "abuse-key"
+mock_ip_rep.get_item.return_value = {}; mock_ip_geo.get_item.return_value = {}
+def slow(req, timeout=None):
+    time.sleep(1)
+    if "geolite.info" in req.full_url:
+        return _AJ({"country": {"iso_code": "US"}, "location": NEWYORK})
+    return _AJ({"data": {"abuseConfidenceScore": 0, "isTor": False}})
+_t0 = time.time()
+with patch.object(engine.urllib.request, "urlopen", slow):
+    _rep, _geo = engine.lookup_ip_context({"client_ip": "45.155.205.31"})
+_el = time.time() - _t0
+t("[이동] 평판+위치 조회를 동시에(1초+1초 -> 약 1초, 호출자 timeout 3초 안)", _el < 1.8 and _rep == {"score": 0, "is_tor": False}
+  and _geo and _geo["country"] == "US", f"{_el:.2f}s {_rep} {_geo}")
+engine.ABUSEIPDB_API_KEY = ""
+engine.MAXMIND_ACCOUNT_ID, engine.MAXMIND_LICENSE_KEY = "", ""
+engine.GEO_VELOCITY_MODE = "enforce"
+t("[이동] 거리 계산(서울-뉴욕 약 11,000km)", 10900 < engine.distance_km({"lat": 37.5665, "lon": 126.978}, {"lat": 40.7128, "lon": -74.006}) < 11150)
+
+for raw, expect in (("REPORT", "report"), ("bogus", "enforce"), (None, "enforce")):
+    _env = {k: v for k, v in _os2.environ.items() if k != "GEO_VELOCITY_MODE"}
+    if raw is not None:
+        _env["GEO_VELOCITY_MODE"] = raw
+    _probe3 = _probe2.replace("SESSION_BINDING_MODE", "GEO_VELOCITY_MODE")
+    _out = _sp2.run([sys.executable, "-c", _probe3, _os2.path.dirname(_os2.path.abspath(__file__))], env=_env, capture_output=True, text=True).stdout.strip()
+    t(f"[이동] 환경변수 {raw!r} -> {expect}", _out == expect, _out)
+_mt = open(_os2.path.join(_os2.path.dirname(_os2.path.abspath(__file__)), "main.tf"), encoding="utf-8").read()
+_vt = open(_os2.path.join(_os2.path.dirname(_os2.path.abspath(__file__)), "variables.tf"), encoding="utf-8").read()
+t("[이동 배포] 테이블 2개(TTL) + 엔진 권한(GetItem/PutItem만) + 환경변수 + 변수(키는 sensitive, 모드 기본 report)",
+  'resource "aws_dynamodb_table" "ip_geolocation"' in _mt and 'resource "aws_dynamodb_table" "user_location"' in _mt
+  and "Resource = [aws_dynamodb_table.ip_geolocation.arn, aws_dynamodb_table.user_location.arn]" in _mt
+  and "MAXMIND_ACCOUNT_ID  = var.maxmind_account_id" in _mt and "MAXMIND_LICENSE_KEY = var.maxmind_license_key" in _mt
+  and "GEO_VELOCITY_MODE   = var.geo_velocity_mode" in _mt
+  and 'contains(["enforce", "report", "off"], var.geo_velocity_mode)' in _vt and _vt.count("sensitive") >= 2)

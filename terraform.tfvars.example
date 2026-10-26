@@ -24,3 +24,7 @@ abuseipdb_api_key      = "REPLACE_ME"
 threat_intel_min_score = 50
 # [세션 바인딩] 세션 도중 나라가 바뀌면: enforce(다시 로그인 요구) / report(기록만, 기본값) / off
 session_binding_mode = "report"
+# [이동 속도] MaxMind 계정 ID와 라이선스 키(무료 GeoLite), 모드: enforce / report(기본값) / off
+maxmind_account_id  = "REPLACE_ME"
+maxmind_license_key = "REPLACE_ME"
+geo_velocity_mode   = "report"

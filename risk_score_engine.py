@@ -1,5 +1,7 @@
+import base64
 import ipaddress
 import json
+import math
 import os
 import re
 import time
@@ -8,6 +10,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import boto3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
@@ -17,6 +20,8 @@ decision_table = dynamodb.Table('access_decision')   # 사용자+앱별 마지�
 ip_reputation_table = dynamodb.Table('ip_reputation')   # AbuseIPDB 조회 결과 캐시(IP별 24시간)
 device_state_table = dynamodb.Table('device_state')   # 기기 순찰(device_sweep)이 본 기기별 최신 상태
 user_risk_table = dynamodb.Table('user_risk')   # 관리자가 풀어줄 때까지 유지되는 누적 위험 상태(mfa_verified와 별개)
+ip_geolocation_table = dynamodb.Table('ip_geolocation')   # MaxMind 위치 조회 결과 캐시(IP별 24시간)
+user_location_table = dynamodb.Table('user_location')     # 사용자별 마지막으로 '통과된' 접속 위치(이동 속도 비교용)
 
 # [step-up 재인증] MFA 재인증 기록의 유효 시간. 팀이 정한 값이며 표준에 정해진 수치는
 # 아님(RFC 9470/NIST 800-63B 모두 "얼마나 최근이어야 하는가"의 구체적 숫자는 구현자에게
@@ -37,9 +42,8 @@ HOME_COUNTRY = "KR"
 #     주의: 이 2배 확대는 "신호들 사이의 상대적 비율·판정 로직을 그대로 유지한 채
 #     눈금만 두 배로 늘린 것"으로, 각 상황이 통과/재인증/차단 중 어디로 분류되는지는
 #     v9과 완전히 동일함(수학적으로 동치) — 표기상의 재설정이며 새로운 근거를 추가한 것은
-#     아님을 보고서에 명시할 것. resettable=False 신호(threat_intel_match/waf_sqli/
-#     device_fingerprint_mismatch, 최소값 76)는 여전히 임계값+마진(60)을 안전하게 초과해
-#     "MFA 통과 후에도 확실히 차단" 원칙이 유지됨
+#     아님을 보고서에 명시할 것. resettable=False 신호(threat_intel_match/waf_sqli/waf_attack,
+#     최소값 86)는 여전히 임계값+마진(최대 80)을 초과해 "MFA 통과 후에도 확실히 차단" 원칙이 유지됨
 RISK_MATRIX = {
     # --- behavioral: 시간 경과로 자동 회복 가능. 데이터셋(rba-dataset) 검증 완료(v9) ---
     "night_access": {"risk": 20, "group": "behavioral"},
@@ -53,7 +57,9 @@ RISK_MATRIX = {
     # WAF(ModSecurity+CRS)가 막은 SQL 삽입 외 공격(XSS/RCE/LFI/RFI 등). 로그인한 사람이 앱 안에서 공격한 증거라
     # SQL 삽입과 같은 무게로 둔다. MFA로 풀리지 않고 관리자가 해제해야 한다(waf_sqli와 같은 이유).
     "waf_attack": {"risk": 94, "group": "security", "resettable": False},
-    "device_fingerprint_mismatch": {"risk": 76, "group": "security", "resettable": False},
+    # [삭제] device_fingerprint_mismatch(76, 해제 불가): 처음 계획은 "서명된 기기 쿠키/브라우저 지문"을 직접 만드는 것이었으나
+    #   WARP 기기 검사(device_unmanaged/device_owner_mismatch/device_posture_failed)로 대체했다. 이 신호를 보내는 곳이
+    #   한 군데도 없어 판단에 쓰인 적이 없었고, 이름만 남아 있으면 "기기 지문을 구현했다"로 오해되므로 지웠다.
 
     # --- device: 기기 신뢰(WARP 기기 검사, Cloudflare가 검사하고 결과를 Access 신원 정보로 넘겨줌) ---
     #     MFA로 기기 상태가 바뀌지는 않지만, 경계구간에서는 최근 재인증(step-up)으로 통과할 수 있게 behavioral로 둔다
@@ -78,8 +84,20 @@ RISK_MATRIX = {
     #   점수와 상관없이 "다시 로그인"을 요구한다(아래 session_reauth_required). 정상 사용자는 비밀번호+TOTP로 다시 들어오면
     #   새 토큰에 지금 나라가 찍혀 풀리고, 쿠키만 훔친 사람은 다시 로그인할 수 없다(Okta Session protection과 같은 대응).
     "session_country_change": {"risk": 60, "group": "behavioral"},
+
+    # --- 이동 속도(MaxMind GeoLite 위치) ---
+    # geo_velocity: 마지막으로 통과된 접속 위치 -> 지금 위치를 비행기보다 빠르게 이동(불가능한 이동) = 같은 계정을 다른 사람이 쓰는 흔적.
+    #   Microsoft Entra ID Protection의 "Atypical travel"(로그인 위험, 실시간)과 같은 개념(두 로그인 사이 시간 vs 이동에 걸리는 시간).
+    #   GeoIP 오차·VPN 때문에 정상 사용자도 걸릴 수 있어 증거가 아니라 의심으로 보고 behavioral, unknown_location과 같은 40점
+    #   (내부·기밀 통과 / 최고기밀 재인증, 해외 신호와 겹치면 80점 -> 기밀 이상 차단·포털 재인증). 재인증에 성공하면 그 위치가 새 기준이 된다.
+    "geo_velocity": {"risk": 40, "group": "behavioral"},
 }
 
+# [조합 규칙] 신호 두 개가 함께 걸리면 따로 볼 때보다 위험하다고 보고 가산한다.
+#   지금 배점에서는 40~45점짜리 behavioral 신호 두 개만 겹쳐도 80점 이상이라 대부분 이미 차단 구간이고,
+#   security 신호(86~94점)가 들어간 조합은 단독으로도 차단이다. 그래서 아래 규칙들은 판정(통과/재인증/차단)을 바꾸기보다
+#   점수(관제 우선순위)를 올리는 역할이다. 판정을 바꾸는 조합이 필요해지면 그때 추가한다(보고서에 명시).
+#   검토 후 넣지 않은 조합: geo_velocity + 기기 신호(이미 85점 이상 차단), anonymous_network + 기기 신호(같은 이유).
 COMBINATION_RULES = [
     (("unknown_location", "waf_sqli"), 30, "interaction_location_waf"),
     # 해외에서 남의 기기로 접속 = 계정 탈취 후 다른 장비 사용 가능성이 높은 조합
@@ -549,12 +567,17 @@ def ip_reputation(ip, now=None):
     return result
 
 
-def derive_ip_signals(body):
-    """body["client_ip"] -> threat_intel_match / anonymous_network. 감지한 신호 이름 목록."""
+_NOT_LOOKED_UP = object()
+
+
+def derive_ip_signals(body, rep=_NOT_LOOKED_UP):
+    """body["client_ip"] -> threat_intel_match / anonymous_network. 감지한 신호 이름 목록.
+    rep: 이미 조회한 평판 결과(lookup_ip_context가 위치 조회와 동시에 조회한 것). 없으면 여기서 조회한다."""
     ip = normalize_public_ip(body.get("client_ip"))
     if not ip:
         return []
-    rep = ip_reputation(ip)
+    if rep is _NOT_LOOKED_UP:
+        rep = ip_reputation(ip)
     if not rep:
         return []
     detected = []
@@ -567,6 +590,157 @@ def derive_ip_signals(body):
     if detected:
         print(f"[THREAT_INTEL] ip={ip} score={rep['score']} tor={rep['is_tor']} signals={','.join(detected)}")
     return detected
+
+
+# ==========================================================================
+# [이동 속도(geo_velocity)] MaxMind GeoLite 웹 조회(geolite.info)로 IP -> 위도/경도/오차 반경(km)을 얻고,
+#   이 사람이 마지막으로 "통과된" 위치와 비교해 비행기보다 빠르게 움직였으면 신호를 만든다.
+#   - 웹 조회 방식(B): 무료 계정 하루 1,000회. 같은 IP는 24시간 캐시(ip_geolocation)해서 조회 수를 줄인다.
+#     규모가 커지면 GeoLite2 데이터 파일(다운로드, 새 버전 나오면 30일 안에 갱신 의무) 방식으로 전환한다(보고서에 명시).
+#   - 거리 = 두 지점의 대권 거리 - 두 위치의 오차 반경 합(GeoIP 오차로 생기는 오탐을 줄임).
+#     500km 미만이면 비교하지 않는다(국내 이동/IPv4<->IPv6 전환 등 GeoIP 흔들림). 오차 반경이 500km 넘는 위치(나라 수준)도 비교하지 않는다.
+#   - 속도 1,000km/h 초과 = 여객기 순항 속도(약 900km/h)보다 빠름 -> 불가능한 이동.
+#   - 위치 기록은 통과(allow)된 판단에서만 갱신한다. 막힌 시도의 위치까지 기록하면 공격자가 해외에서 한 번 시도한 것만으로
+#     진짜 주인의 다음 접속이 "불가능한 이동"이 된다. 재인증에 성공하면 통과이므로 그 위치가 새 기준이 된다.
+#   - ASN(통신사) 비교는 향후 과제: 무료 웹 조회 응답에 들어 있는지 미확인 + 와이파이<->휴대폰 데이터 전환마다 오탐.
+#   스위치(GEO_VELOCITY_MODE): enforce(점수 반영) / report(로그에만 report-only) / off(조회도 안 함). 알 수 없는 값은 enforce.
+# ==========================================================================
+MAXMIND_ACCOUNT_ID = os.environ.get("MAXMIND_ACCOUNT_ID", "")
+MAXMIND_LICENSE_KEY = os.environ.get("MAXMIND_LICENSE_KEY", "")
+GEO_VELOCITY_MODE = os.environ.get("GEO_VELOCITY_MODE", "enforce").strip().lower()
+if GEO_VELOCITY_MODE not in ("enforce", "report", "off"):
+    GEO_VELOCITY_MODE = "enforce"
+GEO_SIGNALS = ("geo_velocity",)
+GEO_LOOKUP_TTL_SECONDS = 86400
+GEO_LOOKUP_FAILURE_TTL_SECONDS = 300
+GEO_VELOCITY_MAX_KMH = 1000
+GEO_VELOCITY_MIN_DISTANCE_KM = 500
+GEO_MAX_ACCURACY_RADIUS_KM = 500
+GEO_MIN_ELAPSED_SECONDS = 60          # 1분보다 짧은 간격은 1분으로 계산(0으로 나누기 방지, 같은 순간 두 요청)
+EARTH_RADIUS_KM = 6371.0
+USER_LOCATION_RETENTION_SECONDS = 30 * 86400
+
+
+def _query_maxmind(ip):
+    """GeoLite City 웹 조회. 성공하면 {"lat","lon","radius","country"}, 위치가 없거나 실패하면 None."""
+    url = "https://geolite.info/geoip/v2.1/city/" + urllib.parse.quote(ip, safe="")
+    cred = base64.b64encode(f"{MAXMIND_ACCOUNT_ID}:{MAXMIND_LICENSE_KEY}".encode()).decode()
+    req = urllib.request.Request(url, headers={"Authorization": "Basic " + cred, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read().decode())
+        loc = data.get("location") or {}
+        lat, lon, radius = loc.get("latitude"), loc.get("longitude"), loc.get("accuracy_radius")
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (lat, lon, radius)):
+            return None
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180 and radius >= 0):
+            return None
+        country = str((data.get("country") or {}).get("iso_code") or "")
+        return {"lat": float(lat), "lon": float(lon), "radius": int(radius), "country": country}
+    except Exception as e:
+        print("[GEO_LOOKUP_FAILED]", type(e).__name__)
+        return None
+
+
+def ip_geolocation(ip, now=None):
+    """캐시 -> 없으면 MaxMind 조회 후 저장. {"lat","lon","radius","country"} 또는 None(모름)."""
+    now = int(now or time.time())
+    if GEO_VELOCITY_MODE == "off" or not (MAXMIND_ACCOUNT_ID and MAXMIND_LICENSE_KEY):
+        return None
+    try:
+        item = ip_geolocation_table.get_item(Key={"ip": ip}).get("Item")
+    except Exception as e:
+        print("ip_geolocation 조회 실패:", str(e))
+        item = None
+    if item and int(item.get("expires_at", 0)) > now:
+        if item.get("status") != "ok":
+            return None
+        # DynamoDB는 숫자를 Decimal로 돌려주고 float 저장을 못 하므로 좌표는 문자열로 저장한다
+        return {"lat": float(item["lat"]), "lon": float(item["lon"]), "radius": int(item["radius"]),
+                "country": item.get("country", "")}
+    result = _query_maxmind(ip)
+    record = {"ip": ip, "checked_at": now}
+    if result:
+        record.update(status="ok", lat=f"{result['lat']:.4f}", lon=f"{result['lon']:.4f}", radius=result["radius"],
+                      country=result["country"], expires_at=now + GEO_LOOKUP_TTL_SECONDS)
+    else:
+        record.update(status="unknown", expires_at=now + GEO_LOOKUP_FAILURE_TTL_SECONDS)
+    try:
+        ip_geolocation_table.put_item(Item=record)
+    except Exception as e:
+        print("ip_geolocation 저장 실패:", str(e))
+    return result
+
+
+def lookup_ip_context(body):
+    """client_ip의 평판(AbuseIPDB)과 위치(MaxMind)를 동시에 조회한다(둘 다 캐시가 없으면 외부 호출 2개를 병렬로:
+    호출자 timeout이 3초라 차례로 부르면 최악 4초가 된다). 공개 IP가 아니면 (None, None)."""
+    ip = normalize_public_ip(body.get("client_ip"))
+    if not ip:
+        return None, None
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        rep_future = pool.submit(ip_reputation, ip)
+        geo_future = pool.submit(ip_geolocation, ip)
+        return rep_future.result(), geo_future.result()
+
+
+def distance_km(a, b):
+    """두 지점의 대권 거리(haversine, km)."""
+    lat1, lon1, lat2, lon2 = map(math.radians, (a["lat"], a["lon"], b["lat"], b["lon"]))
+    h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
+    return 2 * EARTH_RADIUS_KM * math.asin(min(1.0, math.sqrt(h)))
+
+
+def load_last_location(identity):
+    try:
+        item = user_location_table.get_item(Key={"identity": identity}).get("Item")
+    except Exception as e:
+        print("user_location 조회 실패:", str(e))
+        return None
+    if not item:
+        return None
+    try:
+        return {"lat": float(item["lat"]), "lon": float(item["lon"]), "radius": int(item["radius"]),
+                "seen_at": int(item["seen_at"]), "country": item.get("country", "")}
+    except Exception:
+        return None
+
+
+def save_last_location(identity, geo, ip, now):
+    try:
+        user_location_table.put_item(Item={
+            "identity": identity, "lat": f"{geo['lat']:.4f}", "lon": f"{geo['lon']:.4f}", "radius": geo["radius"],
+            "country": geo.get("country", ""), "ip": ip, "seen_at": int(now),
+            # 위치는 개인정보라 필요한 만큼만 둔다: 30일 지난 기록은 TTL로 지운다(비교 기준이 없으면 신호를 만들지 않음)
+            "expires_at": int(now) + USER_LOCATION_RETENTION_SECONDS,
+        })
+    except Exception as e:
+        print("user_location 저장 실패:", str(e))
+
+
+def derive_geo_signals(body, geo, now=None):
+    """마지막 통과 위치와 지금 위치(geo)로 불가능한 이동을 판단. 감지한 신호 목록. enforce일 때만 body에 넣는다."""
+    identity = body.get("identity")
+    if GEO_VELOCITY_MODE == "off" or not geo or not identity or identity == "unknown":
+        return []
+    if geo["radius"] > GEO_MAX_ACCURACY_RADIUS_KM:
+        return []
+    last = load_last_location(identity)
+    if not last or last["radius"] > GEO_MAX_ACCURACY_RADIUS_KM:
+        return []
+    now = int(now or time.time())
+    km = distance_km(last, geo) - last["radius"] - geo["radius"]
+    if km < GEO_VELOCITY_MIN_DISTANCE_KM:
+        return []
+    hours = max(now - last["seen_at"], GEO_MIN_ELAPSED_SECONDS) / 3600
+    kmh = km / hours
+    if kmh <= GEO_VELOCITY_MAX_KMH:
+        return []
+    if GEO_VELOCITY_MODE == "enforce":
+        body["geo_velocity"] = True
+    print(f"[GEO_VELOCITY] identity={identity} from={last['country'] or '-'} to={geo['country'] or '-'} "
+          f"distance_km={int(km)} elapsed_min={int((now - last['seen_at']) / 60)} speed_kmh={int(kmh)} mode={GEO_VELOCITY_MODE}")
+    return ["geo_velocity"]
 
 
 def get_resource_tier(resource_path):
@@ -781,8 +955,10 @@ def lambda_handler(event, context):
     # 기기 신뢰: WARP 기기 검사 결과/기기 주인 -> 신호 (Worker가 기기 정보를 넘긴 경우에만)
     device_detected = derive_device_signals(body)
 
-    # 접속 IP 평판(AbuseIPDB): 로그인 서버/웹 서버 앞단이 넘긴 client_ip가 있을 때만
-    derive_ip_signals(body)
+    # 접속 IP 평판(AbuseIPDB)과 위치(MaxMind): 로그인 서버/웹 서버 앞단이 넘긴 client_ip가 있을 때만(둘을 동시에 조회)
+    ip_rep, ip_geo = lookup_ip_context(body)
+    derive_ip_signals(body, ip_rep)
+    geo_detected = derive_geo_signals(body, ip_geo)
 
     # 세션 바인딩: 로그인한 나라와 지금 나라 비교(웹 서버 앞단이 Access 토큰의 country를 넘긴 경우만)
     session_detected = derive_session_signals(body)
@@ -816,6 +992,8 @@ def lambda_handler(event, context):
         reasons.extend(f"{signal} (report-only, +0)" for signal in device_detected)
     if SESSION_BINDING_MODE == "report":
         reasons.extend(f"{signal} (report-only, +0)" for signal in session_detected)
+    if GEO_VELOCITY_MODE == "report":
+        reasons.extend(f"{signal} (report-only, +0)" for signal in geo_detected)
 
     # 1. 위협 인덱스 가산 (behavioral/security 구분 + resettable 처리)
     for factor, rule in RISK_MATRIX.items():
@@ -918,6 +1096,10 @@ def lambda_handler(event, context):
     # (예전에는 무조건 재인증 화면이라, 재인증으로 풀리지 않는 차단이면 재인증 -> 다시 차단이 반복됐다)
     if has_identity and body.get("source") != "login":
         save_decision(risk_identity, resource_path, action, device_reasons, current_time)
+
+    # 이동 속도 기준점: 통과된 판단의 위치만 "마지막 위치"로 남긴다(막힌 시도의 위치는 남기지 않음 - 위 geo_velocity 설명)
+    if allow_access and has_identity and ip_geo:
+        save_last_location(risk_identity, ip_geo, normalize_public_ip(body.get("client_ip")), current_time)
 
     # 새로 감지된 해제 불가 신호는 (인증된 신원이고 호출자가 허용한 경우에만) User Risk에 남긴다.
     if has_identity and detected_sticky and body.get("persist_risk") is True:

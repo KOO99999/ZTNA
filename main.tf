@@ -157,6 +157,49 @@ resource "aws_dynamodb_table" "ip_reputation" {
   }
 }
 
+# [이동 속도] MaxMind 위치 조회 결과 캐시(IP별). 무료 웹 조회는 하루 1,000회라 같은 IP는 24시간 재사용, 실패는 5분 기록. TTL로 정리.
+resource "aws_dynamodb_table" "ip_geolocation" {
+  name         = "ip_geolocation"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "ip"
+
+  attribute {
+    name = "ip"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  tags = {
+    Environment = "ZeroTrust-Project"
+  }
+}
+
+# [이동 속도] 사용자별 마지막으로 "통과된" 접속 위치(위도/경도/오차 반경/시각). 다음 접속과 비교해 불가능한 이동을 판단.
+# 위치는 개인정보라 30일 지나면 TTL로 지운다.
+resource "aws_dynamodb_table" "user_location" {
+  name         = "user_location"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "identity"
+
+  attribute {
+    name = "identity"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  tags = {
+    Environment = "ZeroTrust-Project"
+  }
+}
+
 # [마지막 판단] 사용자+앱(호스트)별 가장 최근 판단(재인증 필요 / 차단 / 기기 때문에 차단)과 기기 사유.
 # Access가 막으면 사용자는 로그인 서버의 /stepup으로 오는데, 그 페이지가 엔진에 이 기록을 물어서
 # 재인증 화면과 차단 화면 중 하나를 고른다(판단은 엔진, 화면은 로그인 서버). 화면 선택용이라 10분이면 충분하고 TTL로 정리한다.
@@ -259,6 +302,7 @@ resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
 #   user_risk      : 사용자별 위험 상태 조회(Query)와 기록/갱신(UpdateItem). 해제(관리자)는 risk_admin Lambda만 한다.
 #   access_decision: 사용자+앱별 마지막 판단 저장(PutItem)과 조회(GetItem) - /stepup 화면 선택용
 #   ip_reputation  : AbuseIPDB 조회 결과 캐시 저장(PutItem)과 조회(GetItem)
+#   ip_geolocation / user_location : MaxMind 위치 캐시, 사용자별 마지막 통과 위치 저장(PutItem)과 조회(GetItem)
 resource "aws_iam_role_policy" "lambda_dynamodb" {
   name = "zt-lambda-dynamodb-minimal"
   role = aws_iam_role.lambda_role.id
@@ -283,6 +327,12 @@ resource "aws_iam_role_policy" "lambda_dynamodb" {
         Effect   = "Allow"
         Action   = ["dynamodb:GetItem", "dynamodb:PutItem"]
         Resource = [aws_dynamodb_table.ip_reputation.arn]
+      },
+      {
+        Sid      = "GeoVelocityReadWrite"
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:PutItem"]
+        Resource = [aws_dynamodb_table.ip_geolocation.arn, aws_dynamodb_table.user_location.arn]
       },
       {
         Sid      = "AccessDecisionReadWrite"
@@ -334,6 +384,10 @@ resource "aws_lambda_function" "pdp_engine" {
       THREAT_INTEL_MIN_SCORE = tostring(var.threat_intel_min_score)
       # [세션 바인딩] 세션 도중 위치(나라) 변경을 탈취로 볼지: enforce(다시 로그인 요구) / report(기록만) / off
       SESSION_BINDING_MODE = var.session_binding_mode
+      # [이동 속도] MaxMind GeoLite 웹 조회 인증 정보와 모드(enforce / report / off)
+      MAXMIND_ACCOUNT_ID  = var.maxmind_account_id
+      MAXMIND_LICENSE_KEY = var.maxmind_license_key
+      GEO_VELOCITY_MODE   = var.geo_velocity_mode
     }
   }
 }

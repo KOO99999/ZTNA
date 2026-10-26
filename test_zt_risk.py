@@ -187,6 +187,18 @@ r = zr.check_risk("hana@test.com", "KR", "/dev")
 check("Lambda 주소/비밀키 설정이 없으면 차단(fail-closed), 호출 시도 없음", r["allow"] is False and r["error"] is True and len(calls) == 0)
 zr.PDP_EVALUATE_URL, zr.EVALUATE_SHARED_SECRET = saved
 
+# ---------- [위협 IP] 접속 IP 전달과 캐시 ----------
+with patch.object(zr.time, "time", return_value=at(14)):
+    reset()
+    zr.check_risk("hana@test.com", "KR", "dev.xmcda.store/", "45.155.205.9")
+    check("[위협IP] 엔진에 client_ip를 보냄", calls[0]["json"].get("client_ip") == "45.155.205.9", calls[0]["json"])
+    zr.check_risk("hana@test.com", "KR", "dev.xmcda.store/", "45.155.205.9")
+    check("[위협IP] 같은 IP면 캐시 사용", len(calls) == 1, len(calls))
+    zr.check_risk("hana@test.com", "KR", "dev.xmcda.store/", "185.220.101.7")
+    check("[위협IP] 접속 IP가 바뀌면 캐시를 버리고 다시 물음(새 IP 평판 확인)", len(calls) == 2, len(calls))
+    zr.invalidate_identity("HANA@test.com")
+    check("[WAF] invalidate_identity: 대소문자 무관하게 그 사람 캐시 삭제", not zr._cache, zr._cache)
+
 print()
 print("실패 수:", fails)
 sys.exit(1 if fails else 0)

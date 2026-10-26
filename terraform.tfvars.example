@@ -19,3 +19,6 @@ device_signal_mode = "report"
 cloudflare_access_revoke_token = "REPLACE_ME"
 # WAF(ModSecurity) 동작 모드: On(막음) / DetectionOnly(기록만, 오탐 확인용)
 waf_engine_mode = "On"
+# [위협 IP] AbuseIPDB API 키(무료)와 기준 점수
+abuseipdb_api_key      = "REPLACE_ME"
+threat_intel_min_score = 50

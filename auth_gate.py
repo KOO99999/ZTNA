@@ -55,7 +55,8 @@ def auth():
     identity = claims["email"]
 
     # 2) 위험도: 같은 Lambda(PDP)에 묻는다. 호출 실패/비정상 응답은 zt_risk가 차단으로 돌려준다.
-    result = check_risk(identity, request.headers.get("CF-IPCountry"), resource_path_for(host, path))
+    result = check_risk(identity, request.headers.get("CF-IPCountry"), resource_path_for(host, path),
+                        request.headers.get("CF-Connecting-IP"))
     if result["allow"]:
         # 앱은 위험도를 다시 묻지 않는다. 화면에 보여줄 "이 요청에 적용된 임계값"만 여기서 받아 간다
         # (nginx가 auth_request_set으로 꺼내 앱에 넘기며, 항상 이 값으로 덮어써서 클라이언트가 보낸

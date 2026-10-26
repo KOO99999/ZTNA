@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import os
 import re
@@ -13,6 +14,7 @@ dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
 table = dynamodb.Table('risk_score_log')
 mfa_table = dynamodb.Table('mfa_verified')
 decision_table = dynamodb.Table('access_decision')   # 사용자+앱별 마지막 판단(재인증/차단 화면을 고르는 데 씀)
+ip_reputation_table = dynamodb.Table('ip_reputation')   # AbuseIPDB 조회 결과 캐시(IP별 24시간)
 device_state_table = dynamodb.Table('device_state')   # 기기 순찰(device_sweep)이 본 기기별 최신 상태
 user_risk_table = dynamodb.Table('user_risk')   # 관리자가 풀어줄 때까지 유지되는 누적 위험 상태(mfa_verified와 별개)
 
@@ -62,6 +64,14 @@ RISK_MATRIX = {
     #   25점: 내부(60)/기밀(40) 통과, 최고기밀(20)만 걸림(기기 신호라 재인증 없이 차단 + "방화벽을 켜세요")
     "device_posture_failed": {"risk": 25, "group": "behavioral"},  # 등록 기기지만 필수 기기 검사(방화벽) 실패/결과 없음
     "device_owner_mismatch": {"risk": 45, "group": "behavioral"},  # 기기 등록 사용자 != 로그인한 사람
+
+    # --- network: 접속 IP 평판(AbuseIPDB) ---
+    # anonymous_network: Tor 출구 IP. 접속 위치를 숨기는 익명 네트워크라 정상 직원이 쓸 이유가 드묾.
+    #   Microsoft Entra ID도 "Anonymous IP address"(Tor/익명 VPN)를 로그인 위험으로 보고 기본 정책은 MFA 요구다.
+    #   40점 = 내부(60) 통과 / 기밀(40)·최고기밀(20)은 경계구간 -> 재인증(TOTP). 팀 판단 수치.
+    #   데이터센터/호스팅 IP는 신호로 쓰지 않는다: WARP를 켜면 접속 IP가 Cloudflare 것으로 바뀌어(실측: IPv4 -> IPv6)
+    #   정상 관리 기기가 모두 걸린다.
+    "anonymous_network": {"risk": 40, "group": "behavioral"},
 }
 
 COMBINATION_RULES = [
@@ -431,6 +441,100 @@ def device_sweep_handler(event, context):
     return summary
 
 
+# ==========================================================================
+# [위협 IP] AbuseIPDB(전 세계 공격 신고로 만든 공개 IP 평판 DB) 조회 -> threat_intel_match / anonymous_network
+#   - 신고가 많아 위험 점수(abuseConfidenceScore, 0~100)가 기준 이상이면 threat_intel_match(86점, security).
+#     그 요청(세션)만 막고 사람에게 영구 표시는 하지 않는다(persist_risk를 보내지 않음). IP는 카페 와이파이처럼
+#     남이 오염시킨 것일 수 있어서, 관리자 해제 전까지 계속 막으면 정상 직원이 억울하게 막힌다.
+#     Microsoft Entra ID도 "Malicious IP address"를 사용자 위험이 아니라 로그인(세션) 위험으로 분류한다.
+#   - Tor 출구 IP면 anonymous_network(40점).
+#   - 무료 계정은 하루 1,000회 조회 제한 -> IP별 결과를 DynamoDB(ip_reputation)에 24시간 저장해 재사용.
+#   - 조회 실패(장애/한도 초과)는 신호 없이 판단(fail-open): 보조 신호라 외부 서비스 장애로 전원을 막지 않는다.
+#     실패도 5분간 기억해 장애 중에 요청마다 다시 부르지 않는다.
+#   - 사설/루프백/예약 주소는 조회하지 않는다(공개 평판이 없음).
+# ==========================================================================
+ABUSEIPDB_API_KEY = os.environ.get("ABUSEIPDB_API_KEY", "")
+THREAT_INTEL_MIN_SCORE = int(os.environ.get("THREAT_INTEL_MIN_SCORE", "50"))
+IP_REPUTATION_TTL_SECONDS = 86400
+IP_REPUTATION_FAILURE_TTL_SECONDS = 300
+ABUSEIPDB_MAX_AGE_DAYS = 90
+
+
+def normalize_public_ip(value):
+    """조회할 만한 공개 IP면 표준 표기 문자열, 아니면 None."""
+    try:
+        ip = ipaddress.ip_address(str(value or "").strip())
+    except ValueError:
+        return None
+    if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+        return None
+    return ip.compressed
+
+
+def _query_abuseipdb(ip):
+    """AbuseIPDB CHECK. 성공하면 {"score": int, "is_tor": bool}, 실패하면 None."""
+    url = ("https://api.abuseipdb.com/api/v2/check?" +
+           urllib.parse.urlencode({"ipAddress": ip, "maxAgeInDays": ABUSEIPDB_MAX_AGE_DAYS}))
+    req = urllib.request.Request(url, headers={"Key": ABUSEIPDB_API_KEY, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read().decode()).get("data") or {}
+        score = data.get("abuseConfidenceScore")
+        if isinstance(score, bool) or not isinstance(score, int):
+            return None
+        return {"score": max(0, min(100, score)), "is_tor": data.get("isTor") is True}
+    except Exception as e:
+        print("[THREAT_INTEL_LOOKUP_FAILED]", type(e).__name__)
+        return None
+
+
+def ip_reputation(ip, now=None):
+    """캐시 -> 없으면 AbuseIPDB 조회 후 저장. {"score","is_tor"} 또는 None(모름)."""
+    now = int(now or time.time())
+    try:
+        item = ip_reputation_table.get_item(Key={"ip": ip}).get("Item")
+    except Exception as e:
+        print("ip_reputation 조회 실패:", str(e))
+        item = None
+    if item and int(item.get("expires_at", 0)) > now:
+        if item.get("status") != "ok":
+            return None
+        return {"score": int(item.get("score", 0)), "is_tor": bool(item.get("is_tor"))}
+    if not ABUSEIPDB_API_KEY:
+        return None
+    result = _query_abuseipdb(ip)
+    record = {"ip": ip, "checked_at": now}
+    if result:
+        record.update(status="ok", score=result["score"], is_tor=result["is_tor"], expires_at=now + IP_REPUTATION_TTL_SECONDS)
+    else:
+        record.update(status="unknown", expires_at=now + IP_REPUTATION_FAILURE_TTL_SECONDS)
+    try:
+        ip_reputation_table.put_item(Item=record)
+    except Exception as e:
+        print("ip_reputation 저장 실패:", str(e))
+    return result
+
+
+def derive_ip_signals(body):
+    """body["client_ip"] -> threat_intel_match / anonymous_network. 감지한 신호 이름 목록."""
+    ip = normalize_public_ip(body.get("client_ip"))
+    if not ip:
+        return []
+    rep = ip_reputation(ip)
+    if not rep:
+        return []
+    detected = []
+    if rep["score"] >= THREAT_INTEL_MIN_SCORE:
+        detected.append("threat_intel_match")
+    if rep["is_tor"]:
+        detected.append("anonymous_network")
+    for signal in detected:
+        body[signal] = True
+    if detected:
+        print(f"[THREAT_INTEL] ip={ip} score={rep['score']} tor={rep['is_tor']} signals={','.join(detected)}")
+    return detected
+
+
 def get_resource_tier(resource_path):
     """resource_path(호스트+경로, 예: 'admin.xmcda.store/', 'hr.xmcda.store/a?x=1')에 맞는 등급 이름.
     - 가장 긴 키부터 보고, 키와 정확히 같거나 키 뒤가 '/'로 이어질 때만 일치(경로 경계).
@@ -642,6 +746,9 @@ def lambda_handler(event, context):
 
     # 기기 신뢰: WARP 기기 검사 결과/기기 주인 -> 신호 (Worker가 기기 정보를 넘긴 경우에만)
     device_detected = derive_device_signals(body)
+
+    # 접속 IP 평판(AbuseIPDB): 로그인 서버/웹 서버 앞단이 넘긴 client_ip가 있을 때만
+    derive_ip_signals(body)
 
     # --- User Risk: 이 사람에게 이미 걸려 있는 해제 불가 신호를 읽어 같은 신호로 반영 ---
     # 조회에 실패하면 걸려 있는지 알 수 없으므로 통과시키지 않는다(fail-closed, 500 -> 호출자는 차단 처리).

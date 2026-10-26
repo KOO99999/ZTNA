@@ -135,6 +135,28 @@ resource "aws_dynamodb_table" "mfa_verified" {
   }
 }
 
+# [위협 IP] AbuseIPDB 조회 결과 캐시(IP별). 무료 계정은 하루 1,000회 조회 제한이라 같은 IP는 24시간 재사용한다.
+# 조회 실패(장애/한도 초과)도 5분간 기록해 장애 중 요청마다 다시 부르지 않는다. TTL로 자동 정리.
+resource "aws_dynamodb_table" "ip_reputation" {
+  name         = "ip_reputation"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "ip"
+
+  attribute {
+    name = "ip"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  tags = {
+    Environment = "ZeroTrust-Project"
+  }
+}
+
 # [마지막 판단] 사용자+앱(호스트)별 가장 최근 판단(재인증 필요 / 차단 / 기기 때문에 차단)과 기기 사유.
 # Access가 막으면 사용자는 로그인 서버의 /stepup으로 오는데, 그 페이지가 엔진에 이 기록을 물어서
 # 재인증 화면과 차단 화면 중 하나를 고른다(판단은 엔진, 화면은 로그인 서버). 화면 선택용이라 10분이면 충분하고 TTL로 정리한다.
@@ -236,6 +258,7 @@ resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
 #   mfa_verified   : step-up 재인증 기록 저장(PutItem)과 조회(GetItem)
 #   user_risk      : 사용자별 위험 상태 조회(Query)와 기록/갱신(UpdateItem). 해제(관리자)는 risk_admin Lambda만 한다.
 #   access_decision: 사용자+앱별 마지막 판단 저장(PutItem)과 조회(GetItem) - /stepup 화면 선택용
+#   ip_reputation  : AbuseIPDB 조회 결과 캐시 저장(PutItem)과 조회(GetItem)
 resource "aws_iam_role_policy" "lambda_dynamodb" {
   name = "zt-lambda-dynamodb-minimal"
   role = aws_iam_role.lambda_role.id
@@ -254,6 +277,12 @@ resource "aws_iam_role_policy" "lambda_dynamodb" {
         Effect   = "Allow"
         Action   = ["dynamodb:PutItem", "dynamodb:GetItem"]
         Resource = [aws_dynamodb_table.mfa_verified.arn]
+      },
+      {
+        Sid      = "IpReputationCache"
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:PutItem"]
+        Resource = [aws_dynamodb_table.ip_reputation.arn]
       },
       {
         Sid      = "AccessDecisionReadWrite"
@@ -300,6 +329,9 @@ resource "aws_lambda_function" "pdp_engine" {
       CF_DEVICE_API_TOKEN      = var.cloudflare_device_read_token
       # 기기 신호 스위치: enforce(점수 반영) / report(로그에만 남김) / off(계산 안 함)
       DEVICE_SIGNAL_MODE = var.device_signal_mode
+      # [위협 IP] AbuseIPDB 키(무료 계정)와 위협 판정 기준 점수(abuseConfidenceScore 이상이면 threat_intel_match)
+      ABUSEIPDB_API_KEY      = var.abuseipdb_api_key
+      THREAT_INTEL_MIN_SCORE = tostring(var.threat_intel_min_score)
     }
   }
 }

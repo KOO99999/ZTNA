@@ -83,6 +83,9 @@ check("통과 응답에 검증된 신원(X-ZT-Identity)", r.headers.get("X-ZT-Id
 check("Lambda에 보내는 identity는 JWT의 email, 국가는 CF-IPCountry 헤더",
       calls[0]["identity"] == "hana@test.com" and calls[0]["geo_country"] == "KR" and calls[0]["source"] == "B", calls[0])
 
+reset(); ask(extra={"CF-Connecting-IP": "45.155.205.9"})
+check("[위협IP] Lambda에 접속 IP(CF-Connecting-IP)를 같이 보냄", calls[0].get("client_ip") == "45.155.205.9", calls[0])
+
 # [서브도메인 분리] 자원 식별자 = 호스트+경로(쿼리 제외). 등급 판단은 엔진이 호스트 기준으로 한다.
 reset(); ask(uri="/api/x?type=admin_logs", host="admin.xmcda.store")
 check("admin 서브도메인 + 임의 경로 -> admin.xmcda.store/api/x (쿼리 제거)", calls[0]["resource_path"] == "admin.xmcda.store/api/x", calls[0]["resource_path"])

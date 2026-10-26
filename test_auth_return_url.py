@@ -282,6 +282,15 @@ if HAVE_FULL:
         ok("판단 조회 실패 -> found=False(기존처럼 재인증 화면)", aa.lookup_access_decision("a@b", "https://dev.xmcda.store/") == {"found": False})
     with patch.object(aa.requests, "post", lambda url, **kw: _R(["not", "dict"])):
         ok("판단 조회 응답이 이상하면 found=False", aa.lookup_access_decision("a@b", "https://dev.xmcda.store/") == {"found": False})
+    sent.clear()
+    with patch.object(aa.requests, "post", fake_post), aa.app.test_request_context("/authorize", headers={"CF-Connecting-IP": "45.155.205.9"}):
+        aa.evaluate_login_risk("dev1@xmcda.store", {})
+    ok("[위협IP] 로그인 평가에 접속 IP(CF-Connecting-IP)를 같이 보냄",
+       sent and sent[0][1]["json"].get("client_ip") == "45.155.205.9" and sent[0][1]["json"].get("source") == "login", sent)
+    sent.clear()
+    with patch.object(aa.requests, "post", fake_post):
+        aa.evaluate_login_risk("dev1@xmcda.store", {"mfa_reauth": True})
+    ok("[위협IP] 요청 밖에서 불려도 오류 없이 client_ip=None", sent and sent[0][1]["json"].get("client_ip") is None, sent)
     t = aa.render_blocked('x"<b>@xmcda.store', "https://dev.xmcda.store/", ["device_unmanaged"])
     ok("차단 화면은 계정 이름을 이스케이프", "<b>@" not in t and "&lt;b&gt;" in t)
 

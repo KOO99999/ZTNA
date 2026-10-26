@@ -131,3 +131,23 @@ variable "waf_engine_mode" {
     error_message = "waf_engine_mode는 On 또는 DetectionOnly여야 합니다."
   }
 }
+
+# [위협 IP] AbuseIPDB API 키(무료 계정, 하루 1,000회 조회). 비워 두면 위협 IP 신호를 계산하지 않는다.
+variable "abuseipdb_api_key" {
+  type        = string
+  sensitive   = true
+  default     = ""
+  description = "AbuseIPDB API 키 (terraform.tfvars)"
+}
+
+# AbuseIPDB 위험 점수(abuseConfidenceScore, 0~100)가 이 값 이상이면 threat_intel_match.
+# AbuseIPDB 문서는 기준값을 정해 주지 않는다(점수를 판단 근거로 쓰라고만 권장) - 50은 팀 판단 값.
+variable "threat_intel_min_score" {
+  type        = number
+  default     = 50
+  description = "threat_intel_match 기준 점수 (1~100)"
+  validation {
+    condition     = var.threat_intel_min_score >= 1 && var.threat_intel_min_score <= 100
+    error_message = "threat_intel_min_score는 1~100 사이여야 합니다."
+  }
+}

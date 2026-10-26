@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, redirect, make_response
+from flask import Flask, request, jsonify, redirect, make_response, has_request_context
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 import json
@@ -273,6 +273,8 @@ def evaluate_login_risk(identity, signals):
                 "source": "login",
                 "resource_path": f"{login_host}/authorize",
                 "request_timestamp": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                # 접속 IP(Cloudflare가 넣는 CF-Connecting-IP): 엔진이 IP 평판(AbuseIPDB)을 본다
+                "client_ip": request.headers.get('CF-Connecting-IP') if has_request_context() else None,
                 **signals,
             },
             timeout=3,

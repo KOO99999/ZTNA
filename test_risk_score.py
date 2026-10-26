@@ -19,6 +19,8 @@ mock_user_risk = MagicMock()    # [User Risk] 기본은 걸려 있는 신호 없
 mock_mfa_table = MagicMock()   # [step-up] mfa_verified - 별도 mock, 기본은 기록 없음(get_item 결과 없음)으로 둠
 mock_decision = MagicMock()    # [마지막 판단] access_decision
 mock_device_state = MagicMock()   # [기기 순찰] device_state, 기본은 기록 없음
+mock_ip_rep = MagicMock()          # [위협 IP] ip_reputation, 기본은 캐시 없음
+mock_ip_rep.get_item.return_value = {}
 mock_device_state.query.return_value = {"Items": []}
 
 def _table_side_effect(name):
@@ -28,6 +30,8 @@ def _table_side_effect(name):
         return mock_decision
     if name == 'device_state':
         return mock_device_state
+    if name == 'ip_reputation':
+        return mock_ip_rep
     return mock_mfa_table if name == 'mfa_verified' else mock_table
 
 boto3.resource.return_value.Table.side_effect = _table_side_effect
@@ -937,4 +941,83 @@ t("[순찰 배포] 판단 함수는 device_state UpdateItem(사용 기록)/Query
 t("[순찰 배포] device_state 키 = 기기 ID + 사용자", 'hash_key     = "device_id"\n  range_key    = "identity"' in _sw)
 t("[순찰 배포] EventBridge만 순찰 함수를 부를 수 있음(source_arn 제한)",
   'principal     = "events.amazonaws.com"' in _sw and "source_arn    = aws_cloudwatch_event_rule.device_sweep.arn" in _sw)
+
+# ==========================================================================
+# [위협 IP] AbuseIPDB -> threat_intel_match(86, 요청만 차단) / anonymous_network(Tor, 40)
+# ==========================================================================
+print()
+import urllib.error as _ue, io as _io
+t("[위협IP] 사설/루프백/예약 주소는 조회하지 않음",
+  all(engine.normalize_public_ip(x) is None for x in ("10.0.2.5", "127.0.0.1", "192.168.0.1", "::1", "fe80::1", "0.0.0.0", "abc", None)))
+t("[위협IP] 공개 IPv4/IPv6는 표준 표기로", engine.normalize_public_ip(" 8.8.8.8 ") == "8.8.8.8"
+  and engine.normalize_public_ip("2606:4700:0000::1") == "2606:4700::1")
+
+class _AJ:
+    def __init__(self, obj): self.obj = obj
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def read(self): return json.dumps(self.obj).encode()
+
+ab_calls = []
+def abuse(score=None, tor=False, code=None):
+    def fake(req, timeout=None):
+        ab_calls.append((req.full_url, req.headers.get("Key"), req.headers.get("Accept"), timeout))
+        if code:
+            raise _ue.HTTPError(req.full_url, code, "x", {}, _io.BytesIO(b""))
+        return _AJ({"data": {"ipAddress": "x", "abuseConfidenceScore": score, "isTor": tor, "usageType": "Data Center/Web Hosting/Transit"}})
+    return fake
+
+engine.ABUSEIPDB_API_KEY = "abuse-key"
+def ip_case(name, client_ip, fake, expect_allow, expect_action, resource="dev.xmcda.store/", cached=None):
+    ab_calls.clear(); mock_ip_rep.reset_mock()
+    mock_ip_rep.get_item.return_value = {"Item": cached} if cached else {}
+    with patch.object(engine.urllib.request, "urlopen", fake):
+        run_case(name, {"session_id": "ip", "identity": "kim@xmcda.store", "resource_path": resource, "client_ip": client_ip, "source": "B"},
+                 expect_allow=expect_allow, expect_action=expect_action)
+
+ip_case("[위협IP] 위험 점수 100 -> threat_intel_match(86) 차단", "45.155.205.9", abuse(100), False, "block_until_mfa")
+t("[위협IP] AbuseIPDB CHECK: Key 헤더, JSON, 90일, 짧은 timeout, IP는 URL 인코딩",
+  ab_calls and ab_calls[0][0] == "https://api.abuseipdb.com/api/v2/check?ipAddress=45.155.205.9&maxAgeInDays=90"
+  and ab_calls[0][1] == "abuse-key" and ab_calls[0][2] == "application/json" and ab_calls[0][3] == 2, ab_calls)
+_put = mock_ip_rep.put_item.call_args.kwargs["Item"] if mock_ip_rep.put_item.called else {}
+t("[위협IP] 결과를 IP별로 24시간 저장(하루 1,000회 제한 대비)",
+  _put.get("ip") == "45.155.205.9" and _put.get("status") == "ok" and _put.get("score") == 100
+  and _put.get("expires_at") - _put.get("checked_at") == 86400, _put)
+t("[위협IP] 요청만 차단하고 사람에게 영구 표시(user_risk)는 하지 않음", mock_user_risk.update_item.call_count == 0)
+ip_case("[위협IP] 위험 점수 49(기준 50 미만) -> 신호 없음, 통과", "45.155.205.10", abuse(49), True, "allow")
+ip_case("[위협IP] 위험 점수 50 -> 차단(기준 이상)", "45.155.205.11", abuse(50), False, "block_until_mfa")
+ip_case("[위협IP] Tor(점수 0) -> anonymous_network 40: 포털(60) 통과", "185.220.101.7", abuse(0, tor=True), True, "allow", resource="xmcda.store/")
+ip_case("[위협IP] Tor -> 기밀(dev 40)은 40 = 임계값 이하 통과", "185.220.101.7", abuse(0, tor=True), True, "allow")
+ip_case("[위협IP] Tor -> 최고기밀(admin 20)은 경계구간 -> 재인증(Entra ID 기본 정책과 같은 MFA 요구)", "185.220.101.7",
+        abuse(0, tor=True), False, "step_up_mfa_required", resource="admin.xmcda.store/")
+ip_case("[위협IP] 데이터센터/호스팅 IP라도(usageType) 점수 낮고 Tor 아니면 신호 없음(WARP 사용자 보호)", "2a09:bac5::1", abuse(0), True, "allow")
+ip_case("[위협IP] 캐시에 있으면 AbuseIPDB를 부르지 않음", "45.155.205.12", abuse(0), False, "block_until_mfa",
+        cached={"ip": "45.155.205.12", "status": "ok", "score": 90, "is_tor": False, "expires_at": int(time.time()) + 100})
+t("[위협IP] 캐시 사용 시 외부 호출 0회", not ab_calls, ab_calls)
+ip_case("[위협IP] 만료된 캐시는 다시 조회", "45.155.205.13", abuse(0), True, "allow",
+        cached={"ip": "45.155.205.13", "status": "ok", "score": 90, "is_tor": False, "expires_at": int(time.time()) - 1})
+t("[위협IP] 만료 캐시 -> 1회 조회", len(ab_calls) == 1, ab_calls)
+for code in (429, 500):
+    ip_case(f"[위협IP] AbuseIPDB 오류({code}) -> 신호 없이 판단(fail-open)", "45.155.205.14", abuse(code=code), True, "allow")
+    _put = mock_ip_rep.put_item.call_args.kwargs["Item"] if mock_ip_rep.put_item.called else {}
+    t(f"[위협IP] 오류({code})도 5분 기록(장애 중 요청마다 다시 부르지 않음)",
+      _put.get("status") == "unknown" and _put.get("expires_at") - _put.get("checked_at") == 300, _put)
+ip_case("[위협IP] 최근 실패 기록이 있으면 다시 부르지 않고 신호 없음", "45.155.205.15", abuse(100), True, "allow",
+        cached={"ip": "45.155.205.15", "status": "unknown", "expires_at": int(time.time()) + 100})
+t("[위협IP] 실패 기록 기간엔 외부 호출 0회", not ab_calls, ab_calls)
+ip_case("[위협IP] 사설 IP는 조회 안 함", "10.0.1.5", abuse(100), True, "allow")
+t("[위협IP] 사설 IP -> 외부 호출 0회", not ab_calls, ab_calls)
+engine.ABUSEIPDB_API_KEY = ""
+ip_case("[위협IP] API 키가 없으면 조회 안 함(신호 없음)", "45.155.205.16", abuse(100), True, "allow")
+t("[위협IP] 키 없음 -> 외부 호출 0회", not ab_calls, ab_calls)
+engine.ABUSEIPDB_API_KEY = "abuse-key"
+ip_case("[위협IP] 응답 점수가 숫자가 아니면 모름(신호 없음)", "45.155.205.17", abuse("high"), True, "allow")
+mock_ip_rep.get_item.side_effect = Exception("ddb down")
+ip_case("[위협IP] 캐시 조회 실패해도 AbuseIPDB로 판단", "45.155.205.18", abuse(100), False, "block_until_mfa")
+mock_ip_rep.get_item.side_effect = None
+engine.ABUSEIPDB_API_KEY = ""
+_sw = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.tf"), encoding="utf-8").read()
+t("[위협IP 배포] ip_reputation 테이블(TTL) + 엔진은 GetItem/PutItem만 + 키/기준점수 환경변수",
+  'resource "aws_dynamodb_table" "ip_reputation"' in _sw and "Resource = [aws_dynamodb_table.ip_reputation.arn]" in _sw
+  and "ABUSEIPDB_API_KEY      = var.abuseipdb_api_key" in _sw and "THREAT_INTEL_MIN_SCORE = tostring(var.threat_intel_min_score)" in _sw)
 engine.CF_ACCOUNT_ID, engine.CF_DEVICE_API_TOKEN = "", ""

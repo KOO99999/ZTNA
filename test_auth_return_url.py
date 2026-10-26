@@ -221,7 +221,7 @@ else:
         ok("차단 화면의 '다시 시도'는 원래 앱 주소", 'href="https://dev.xmcda.store/"' in t, t[-600:])
         DECISION["value"] = {"found": True, "action": "block_device", "device_reasons": ["device_posture_failed"]}
         t = stepup_get("admin1@xmcda.store", original="admin.xmcda.store/").get_data(as_text=True)
-        ok("방화벽 검사 실패 -> '방화벽을 켜고 5분 뒤' 안내", "Windows 방화벽을 켜고 5분 뒤" in t)
+        ok("방화벽 검사 실패 -> '방화벽을 켜고 몇 분 뒤' 안내", "Windows 방화벽을 켜고 몇 분 뒤" in t)
         DECISION["value"] = {"found": True, "action": "block", "device_reasons": []}
         r = stepup_get("dev1@xmcda.store"); t = r.get_data(as_text=True)
         ok("기기 외 이유로 차단(block) -> 일반 차단 화면(사유/점수 비공개), TOTP 없음",

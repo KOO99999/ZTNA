@@ -2,6 +2,8 @@ import json
 import os
 import re
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import boto3
@@ -11,6 +13,7 @@ dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
 table = dynamodb.Table('risk_score_log')
 mfa_table = dynamodb.Table('mfa_verified')
 decision_table = dynamodb.Table('access_decision')   # 사용자+앱별 마지막 판단(재인증/차단 화면을 고르는 데 씀)
+device_state_table = dynamodb.Table('device_state')   # 기기 순찰(device_sweep)이 본 기기별 최신 상태
 user_risk_table = dynamodb.Table('user_risk')   # 관리자가 풀어줄 때까지 유지되는 누적 위험 상태(mfa_verified와 별개)
 
 # [step-up 재인증] MFA 재인증 기록의 유효 시간. 팀이 정한 값이며 표준에 정해진 수치는
@@ -176,6 +179,11 @@ def derive_device_signals(body):
         required = [p for p in posture if isinstance(p, dict) and p.get("rule") == DEVICE_POSTURE_RULE_NAME]
         if not required or not all(p.get("success") is True for p in required):
             detected.append("device_posture_failed")
+        # 기기 순찰(device_sweep)이 본 최신 상태도 같이 본다. Access가 넘기는 검사 결과는 5분 주기라,
+        # 순찰이 세션을 끊은 직후 다시 들어오면 아직 "통과"로 남아 있을 수 있다. 둘 중 하나라도 나쁘면 나쁜 것.
+        swept = sweep_signal_for(str(device_id))
+        if swept and swept not in detected:
+            detected.append(swept)
         owner = lookup_device_owner(str(device_id))
         identity = str(body.get("identity") or "").strip().lower()
         if owner and identity and owner != identity:
@@ -228,6 +236,171 @@ def lookup_decision(identity, host):
         return {"found": False}
     reasons = [r for r in (item.get("device_reasons") or []) if r in DEVICE_SIGNALS]
     return {"found": True, "action": str(item.get("action", "")), "device_reasons": reasons}
+
+
+# ==========================================================================
+# [기기 순찰] 세션 도중의 기기 상태 변화를 잡는다.
+#   왜: Access는 세션을 새로 줄 때만 기기 정보를 넘기고(get-identity도 로그인 시점 값, 실측 확인),
+#       세션 중 상태를 실시간으로 받는 Logpush는 Enterprise 기능이다. 그래서 엔진이 1분마다 Cloudflare의
+#       기기 상태 API(DEX Fleet Status: status, firewallEnabled, 실측 약 2분 단위 갱신)를 조회한다.
+#   어떻게: 정상 -> 나쁨(방화벽 꺼짐 / WARP 연결 끊김 / 상태 정보 없음)으로 "바뀐" 기기를 찾으면 그 사용자의
+#       Access 세션을 끊는다(revoke_user). 사용자가 다시 들어오면 Access -> External Evaluation -> 이 엔진이
+#       최신 상태(sweep_signal_for)까지 보고 다시 판단한다. 판단은 엔진, Cloudflare는 끊기만 한다.
+#       (실무의 "상태가 바뀌면 세션을 끊고 재평가" 방식 - Microsoft CAE, OpenID CAEP와 같은 구조, 수신만 polling)
+#   끊기는 바뀐 순간 한 번만: 나쁜 상태가 계속될 때마다 끊으면 포털(통과 대상)도 못 쓰게 된다.
+#   API 오류(429/5xx/네트워크)는 "모름"으로 보고 상태를 바꾸지 않는다(장애로 전원 세션이 끊기지 않게).
+#   별도 Lambda(device-sweep)로 실행하며, 세션 끊기 토큰은 그 함수에만 있다(인터넷에 열린 판단 함수에는 없음).
+# ==========================================================================
+SWEEP_LOOKBACK_MINUTES = 60          # 최근 이 시간 안에 보인 기기만 순찰(오래 꺼진 기기는 쓰는 중이 아님)
+SWEEP_STATE_FRESH_SECONDS = 600      # 판단 때 순찰 결과를 믿는 시간(순찰이 멈췄으면 옛 결과로 막지 않음)
+SWEEP_STATE_TTL_SECONDS = 86400
+SWEEP_MAX_PAGES = 10
+CF_ACCESS_REVOKE_TOKEN = os.environ.get("CF_ACCESS_REVOKE_TOKEN", "")
+SWEEP_REASON_SIGNAL = {"firewall_off": "device_posture_failed",
+                       "disconnected": "device_unmanaged", "no_data": "device_unmanaged"}
+
+
+class CloudflareApiUnavailable(Exception):
+    """429/5xx/네트워크 오류: 결과를 모르는 상태(나쁨으로 보지 않는다)."""
+
+
+def _cf_get(path, token):
+    req = urllib.request.Request(f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}{path}",
+                                 headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None              # 이 기기의 최근 상태 정보 없음
+        raise CloudflareApiUnavailable(f"HTTP {e.code}")
+    except Exception as e:
+        raise CloudflareApiUnavailable(type(e).__name__)
+
+
+def list_recent_devices(now):
+    """최근 SWEEP_LOOKBACK_MINUTES 안에 보인 활성 기기: [(device_id, email)]"""
+    since = datetime.fromtimestamp(now - SWEEP_LOOKBACK_MINUTES * 60, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    devices, cursor = [], ""
+    for _ in range(SWEEP_MAX_PAGES):
+        query = f"?per_page=50&seen_after={since}" + (f"&cursor={urllib.parse.quote(cursor)}" if cursor else "")
+        data = _cf_get(f"/devices/physical-devices{query}", CF_DEVICE_API_TOKEN) or {}
+        for d in data.get("result") or []:
+            device_id = str(d.get("id") or "")
+            email = ((d.get("last_seen_user") or {}).get("email") or "").strip().lower()
+            if _DEVICE_ID_RE.match(device_id) and email and not d.get("deleted_at"):
+                devices.append((device_id, email))
+        cursor = ((data.get("result_info") or {}).get("cursor") or "")
+        if not cursor:
+            break
+    return devices
+
+
+def classify_fleet_status(result):
+    """Fleet Status 응답 -> (나쁨 사유 또는 None). firewallEnabled는 꺼지면 응답에서 빠진다(실측) -> True일 때만 정상."""
+    if not isinstance(result, dict) or not result:
+        return "no_data"
+    if str(result.get("status", "")).lower() != "connected":
+        return "disconnected"
+    if str(result.get("platform", "")).lower() == "windows" and result.get("firewallEnabled") is not True:
+        return "firewall_off"
+    return None
+
+
+def revoke_access_sessions(email):
+    """Cloudflare Access: 이 사용자의 모든 앱 세션을 끊는다. 성공하면 True."""
+    if not (CF_ACCOUNT_ID and CF_ACCESS_REVOKE_TOKEN):
+        return False
+    req = urllib.request.Request(
+        f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/access/organizations/revoke_user",
+        data=json.dumps({"email": email}).encode(), method="POST",
+        headers={"Authorization": f"Bearer {CF_ACCESS_REVOKE_TOKEN}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read().decode()).get("success") is True
+    except Exception as e:
+        print("[DEVICE_SWEEP_REVOKE_FAILED]", type(e).__name__)
+        return False
+
+
+def sweep_signal_for(device_id):
+    """판단 때 쓰는 순찰 결과: 최근(SWEEP_STATE_FRESH_SECONDS) 나쁨으로 본 기기면 해당 신호 이름, 아니면 None."""
+    if not _DEVICE_ID_RE.match(device_id or ""):
+        return None
+    try:
+        item = device_state_table.get_item(Key={"device_id": device_id}).get("Item")
+    except Exception as e:
+        print("device_state 조회 실패:", str(e))
+        return None
+    if not item or item.get("state") != "bad":
+        return None
+    if int(time.time()) - int(item.get("checked_at", 0)) > SWEEP_STATE_FRESH_SECONDS:
+        return None
+    return SWEEP_REASON_SIGNAL.get(item.get("reason"))
+
+
+def device_sweep(now=None):
+    """기기 순찰 1회. 바뀐 기기 수/끊은 사용자 등을 돌려준다(로그·테스트용)."""
+    now = int(now or time.time())
+    summary = {"checked": 0, "bad": 0, "revoked": [], "unknown": 0, "mode": DEVICE_SIGNAL_MODE}
+    if DEVICE_SIGNAL_MODE == "off" or not (CF_ACCOUNT_ID and CF_DEVICE_API_TOKEN):
+        return summary
+    try:
+        devices = list_recent_devices(now)
+    except CloudflareApiUnavailable as e:
+        print("[DEVICE_SWEEP_LIST_FAILED]", str(e))
+        summary["unknown"] = -1
+        return summary
+    for device_id, email in devices:
+        try:
+            data = _cf_get(f"/dex/devices/{device_id}/fleet-status/live?since_minutes=10", CF_DEVICE_API_TOKEN)
+        except CloudflareApiUnavailable as e:
+            print("[DEVICE_SWEEP_STATUS_UNKNOWN]", device_id, str(e))
+            summary["unknown"] += 1
+            continue
+        summary["checked"] += 1
+        reason = classify_fleet_status((data or {}).get("result"))
+        try:
+            prev = device_state_table.get_item(Key={"device_id": device_id}).get("Item") or {}
+        except Exception as e:
+            print("device_state 조회 실패:", str(e))
+            continue
+        item = {"device_id": device_id, "email": email, "state": "bad" if reason else "ok", "reason": reason or "",
+                "checked_at": now, "expires_at": now + SWEEP_STATE_TTL_SECONDS,
+                # 이미 끊은 기록은 "나쁨이 이어지는 동안"만 유지한다. 정상으로 돌아오면 지워서, 다시 나빠지면 또 끊는다.
+                "revoked": bool(prev.get("revoked")) if (reason and prev.get("state") == "bad") else False}
+        if reason:
+            summary["bad"] += 1
+            # 정상 -> 나쁨으로 바뀌었거나, 지난번 끊기에 실패했으면 이번에 끊는다(나쁜 동안 반복해서 끊지 않음)
+            if not item["revoked"]:
+                if DEVICE_SIGNAL_MODE == "enforce":
+                    item["revoked"] = revoke_access_sessions(email)
+                    action = "device_session_revoked" if item["revoked"] else "device_session_revoke_failed"
+                else:
+                    item["revoked"] = True          # report: 끊지는 않고 "끊었을 것"만 기록
+                    action = "device_session_revoke_report_only"
+                if item["revoked"] and DEVICE_SIGNAL_MODE == "enforce":
+                    summary["revoked"].append(email)
+                try:
+                    table.put_item(Item={"session_id": str(uuid.uuid4()), "timestamp": now, "risk_score": 0,
+                                         "reasons": [f"device_sweep:{reason}"], "allow": False, "action": action,
+                                         "identity": email, "resource_path": "all-apps", "resource_threshold": 0,
+                                         "source": "sweep"})
+                except Exception as e:
+                    print("DynamoDB logging failed:", str(e))
+                print(f"[DEVICE_SWEEP] identity={email} device={device_id} reason={reason} action={action}")
+        try:
+            device_state_table.put_item(Item=item)
+        except Exception as e:
+            print("device_state 기록 실패:", str(e))
+    return summary
+
+
+def device_sweep_handler(event, context):
+    """EventBridge(1분 일정)가 부르는 진입점. 인터넷(API Gateway)에서는 부를 수 없다(별도 Lambda)."""
+    summary = device_sweep()
+    print("[DEVICE_SWEEP_SUMMARY]", json.dumps(summary))
+    return summary
 
 
 def get_resource_tier(resource_path):

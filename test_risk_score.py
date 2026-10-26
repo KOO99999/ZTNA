@@ -18,12 +18,16 @@ mock_table = MagicMock()       # risk_score_log
 mock_user_risk = MagicMock()    # [User Risk] 기본은 걸려 있는 신호 없음
 mock_mfa_table = MagicMock()   # [step-up] mfa_verified - 별도 mock, 기본은 기록 없음(get_item 결과 없음)으로 둠
 mock_decision = MagicMock()    # [마지막 판단] access_decision
+mock_device_state = MagicMock()   # [기기 순찰] device_state, 기본은 기록 없음
+mock_device_state.get_item.return_value = {}
 
 def _table_side_effect(name):
     if name == 'user_risk':
         return mock_user_risk
     if name == 'access_decision':
         return mock_decision
+    if name == 'device_state':
+        return mock_device_state
     return mock_mfa_table if name == 'mfa_verified' else mock_table
 
 boto3.resource.return_value.Table.side_effect = _table_side_effect
@@ -724,4 +728,155 @@ t("[판단 조회] 조회 실패 -> found=False", handler({"decision_lookup": Tr
 mock_decision.get_item.side_effect = None
 _r = engine.lambda_handler({"headers": {"x-evaluate-secret": "wrong"}, "body": json.dumps({"decision_lookup": True, "identity": "k@x", "resource_host": "d"})}, None)
 t("[판단 조회] 공유 비밀키가 틀리면 401(조회도 같은 인증)", _r["statusCode"] == 401, _r)
+
+# ==========================================================================
+# [기기 순찰] 1분마다 Fleet Status 조회 -> 정상에서 나쁨으로 바뀐 기기 사용자의 Access 세션 끊기
+# ==========================================================================
+print()
+import urllib.error, io
+t("[순찰] 상태 정보 없음 -> no_data", engine.classify_fleet_status({}) == "no_data" and engine.classify_fleet_status(None) == "no_data")
+t("[순찰] WARP 연결 끊김 -> disconnected", engine.classify_fleet_status({"status": "disconnected", "platform": "windows", "firewallEnabled": True}) == "disconnected")
+t("[순찰] Windows인데 firewallEnabled 없음(꺼지면 빠짐, 실측) -> firewall_off",
+  engine.classify_fleet_status({"status": "connected", "platform": "windows"}) == "firewall_off")
+t("[순찰] Windows + 연결 + 방화벽 True -> 정상", engine.classify_fleet_status({"status": "connected", "platform": "windows", "firewallEnabled": True}) is None)
+t("[순찰] Windows가 아니면 방화벽 항목은 보지 않음(방화벽 검사 규칙이 Windows 전용)",
+  engine.classify_fleet_status({"status": "connected", "platform": "mac"}) is None)
+
+class _J:
+    def __init__(self, obj): self.obj = obj
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def read(self): return json.dumps(self.obj).encode()
+
+def router(devices, fleet, revoke_ok=True, list_error=None):
+    calls = []
+    def fake(req, timeout=None):
+        url = req.full_url
+        calls.append((req.get_method(), url, req.headers.get("Authorization"), req.data))
+        if "/physical-devices" in url:
+            if list_error:
+                raise urllib.error.HTTPError(url, list_error, "x", {}, io.BytesIO(b""))
+            return _J({"success": True, "result": devices, "result_info": {"cursor": ""}})
+        if "/fleet-status/live" in url:
+            dev = url.split("/dex/devices/")[1].split("/")[0]
+            v = fleet.get(dev)
+            if isinstance(v, int):
+                raise urllib.error.HTTPError(url, v, "x", {}, io.BytesIO(b""))
+            return _J({"success": True, "result": v})
+        if url.endswith("/access/organizations/revoke_user"):
+            return _J({"success": revoke_ok, "result": revoke_ok})
+        raise AssertionError(url)
+    return fake, calls
+
+D1 = "11111111-2222-3333-4444-555555555555"
+D2 = "66666666-7777-8888-9999-000000000000"
+OK = {"status": "connected", "platform": "windows", "firewallEnabled": True}
+FW_OFF = {"status": "connected", "platform": "windows"}
+engine.CF_ACCESS_REVOKE_TOKEN = "revoke-tok"
+
+def sweep(devices, fleet, prev=None, **kw):
+    mock_device_state.reset_mock(); mock_table.reset_mock()
+    mock_device_state.get_item.return_value = {"Item": prev} if prev else {}
+    fake, calls = router(devices, fleet, **kw)
+    with patch.object(engine.urllib.request, "urlopen", fake):
+        summary = engine.device_sweep(now=1_800_000_000)
+    puts = [c.kwargs["Item"] for c in mock_device_state.put_item.call_args_list]
+    logs = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
+    return summary, calls, puts, logs
+
+devs = [{"id": D1, "last_seen_user": {"email": "Kim@Xmcda.Store"}},
+        {"id": D2, "last_seen_user": {"email": "lee@xmcda.store"}, "deleted_at": "2026-10-01T00:00:00Z"},
+        {"id": "../evil", "last_seen_user": {"email": "x@y"}}, {"id": D1.replace("1", "a"), "last_seen_user": {}}]
+summary, calls, puts, logs = sweep(devs, {D1: FW_OFF})
+revokes = [c for c in calls if c[1].endswith("revoke_user")]
+t("[순찰] 기기 목록: 최근 60분 안에 보인 기기만(seen_after), 읽기 토큰",
+  calls[0][1].split("?")[0].endswith("/accounts/acct/devices/physical-devices") and "seen_after=2027-01-15T07:00:00Z" in calls[0][1]
+  and calls[0][2] == "Bearer tok", calls[0])
+t("[순찰] 삭제된 기기, 이상한 ID, 사용자 없는 기기는 조회하지 않음",
+  [c[1] for c in calls if "fleet-status" in c[1]] == [f"https://api.cloudflare.com/client/v4/accounts/acct/dex/devices/{D1}/fleet-status/live?since_minutes=10"], calls)
+t("[순찰] 정상(기록 없음) -> 방화벽 꺼짐: 그 사용자 세션 끊기 1회(POST, 끊기 전용 토큰, 이메일 소문자)",
+  len(revokes) == 1 and revokes[0][0] == "POST" and revokes[0][2] == "Bearer revoke-tok"
+  and json.loads(revokes[0][3]) == {"email": "kim@xmcda.store"} and summary["revoked"] == ["kim@xmcda.store"], (revokes, summary))
+t("[순찰] 기기 상태 기록: 나쁨/firewall_off/끊음/시각/TTL",
+  puts and puts[0]["state"] == "bad" and puts[0]["reason"] == "firewall_off" and puts[0]["revoked"] is True
+  and puts[0]["checked_at"] == 1_800_000_000 and puts[0]["expires_at"] == 1_800_000_000 + 86400, puts)
+t("[순찰] 판정 로그에 남김(source=sweep, action=device_session_revoked)",
+  logs and logs[0]["action"] == "device_session_revoked" and logs[0]["source"] == "sweep"
+  and logs[0]["reasons"] == ["device_sweep:firewall_off"] and logs[0]["identity"] == "kim@xmcda.store", logs)
+
+one = [{"id": D1, "last_seen_user": {"email": "kim@xmcda.store"}}]
+summary, calls, puts, logs = sweep(one, {D1: FW_OFF}, prev={"device_id": D1, "state": "bad", "reason": "firewall_off", "revoked": True})
+t("[순찰] 이미 끊은 나쁜 상태가 계속되면 다시 끊지 않음(포털은 계속 쓸 수 있게)",
+  not [c for c in calls if c[1].endswith("revoke_user")] and puts[0]["revoked"] is True and not logs, (calls, puts))
+summary, calls, puts, logs = sweep(one, {D1: FW_OFF}, prev={"device_id": D1, "state": "bad", "reason": "firewall_off", "revoked": False})
+t("[순찰] 지난번 끊기에 실패했으면 이번에 다시 끊음", len([c for c in calls if c[1].endswith("revoke_user")]) == 1, calls)
+summary, calls, puts, logs = sweep(one, {D1: OK}, prev={"device_id": D1, "state": "bad", "reason": "firewall_off", "revoked": True})
+t("[순찰] 나쁨 -> 정상으로 돌아오면 끊지 않고 상태만 정상으로(다음에 나빠지면 다시 끊을 수 있게)",
+  not [c for c in calls if c[1].endswith("revoke_user")] and puts[0]["state"] == "ok" and puts[0]["revoked"] is False, puts)
+summary, calls, puts, logs = sweep(one, {D1: OK})
+t("[순찰] 정상 -> 정상: 끊지 않음, 정상으로 기록", not [c for c in calls if c[1].endswith("revoke_user")] and puts[0]["state"] == "ok", puts)
+summary, calls, puts, logs = sweep(one, {D1: 404})
+t("[순찰] 상태 정보 없음(404, 기기 꺼짐/오프라인/WARP 숨김) -> 나쁨으로 보고 끊음",
+  puts[0]["reason"] == "no_data" and len([c for c in calls if c[1].endswith("revoke_user")]) == 1, puts)
+for code in (429, 500):
+    summary, calls, puts, logs = sweep(one, {D1: code})
+    t(f"[순찰] 상태 API 오류({code}) -> '모름': 끊지 않고 상태도 바꾸지 않음",
+      not [c for c in calls if c[1].endswith("revoke_user")] and not puts and summary["unknown"] == 1, (calls, puts))
+summary, calls, puts, logs = sweep(one, {D1: FW_OFF}, list_error=503)
+t("[순찰] 기기 목록 조회 실패 -> 아무것도 하지 않음", len(calls) == 1 and not puts and summary["unknown"] == -1, calls)
+summary, calls, puts, logs = sweep(one, {D1: FW_OFF}, revoke_ok=False)
+t("[순찰] 끊기 실패 -> revoked=False로 기록(다음 순찰에서 재시도), 로그 action=device_session_revoke_failed",
+  puts[0]["revoked"] is False and logs[0]["action"] == "device_session_revoke_failed", (puts, logs))
+engine.CF_ACCESS_REVOKE_TOKEN = ""
+summary, calls, puts, logs = sweep(one, {D1: FW_OFF})
+t("[순찰] 끊기 토큰이 없으면 끊기 요청 자체를 안 보냄(상태만 기록)",
+  not [c for c in calls if c[1].endswith("revoke_user")] and puts[0]["revoked"] is False, calls)
+engine.CF_ACCESS_REVOKE_TOKEN = "revoke-tok"
+engine.DEVICE_SIGNAL_MODE = "report"
+summary, calls, puts, logs = sweep(one, {D1: FW_OFF})
+t("[순찰] report 모드: 끊지 않고 '끊었을 것'만 한 번 기록",
+  not [c for c in calls if c[1].endswith("revoke_user")] and logs[0]["action"] == "device_session_revoke_report_only"
+  and puts[0]["revoked"] is True and summary["revoked"] == [], (calls, logs))
+engine.DEVICE_SIGNAL_MODE = "off"
+summary, calls, puts, logs = sweep(one, {D1: FW_OFF})
+t("[순찰] off 모드: API 호출도 안 함", not calls and not puts, calls)
+engine.DEVICE_SIGNAL_MODE = "enforce"
+
+# 판단 때 순찰 결과 반영
+now_ = int(time.time())
+mock_device_state.get_item.return_value = {"Item": {"device_id": DEV_ID, "state": "bad", "reason": "firewall_off", "checked_at": now_ - 60}}
+t("[순찰 반영] 최근 나쁨(firewall_off) -> device_posture_failed", engine.sweep_signal_for(DEV_ID) == "device_posture_failed")
+mock_device_state.get_item.return_value = {"Item": {"device_id": DEV_ID, "state": "bad", "reason": "disconnected", "checked_at": now_ - 60}}
+t("[순찰 반영] 최근 나쁨(disconnected) -> device_unmanaged", engine.sweep_signal_for(DEV_ID) == "device_unmanaged")
+mock_device_state.get_item.return_value = {"Item": {"device_id": DEV_ID, "state": "bad", "reason": "firewall_off", "checked_at": now_ - 601}}
+t("[순찰 반영] 10분 넘은 순찰 결과는 믿지 않음(순찰이 멈췄을 때 옛 결과로 막지 않게)", engine.sweep_signal_for(DEV_ID) is None)
+mock_device_state.get_item.return_value = {"Item": {"device_id": DEV_ID, "state": "ok", "checked_at": now_}}
+t("[순찰 반영] 정상이면 신호 없음", engine.sweep_signal_for(DEV_ID) is None)
+mock_device_state.get_item.side_effect = Exception("ddb down")
+t("[순찰 반영] 조회 실패 -> 신호 없음(Access 검사 결과로만 판단)", engine.sweep_signal_for(DEV_ID) is None)
+mock_device_state.get_item.side_effect = None
+t("[순찰 반영] 이상한 기기 ID는 조회하지 않음", engine.sweep_signal_for("../x") is None)
+
+# Access 검사는 통과인데 순찰은 방화벽 꺼짐 -> 관리자 콘솔 차단
+mock_device_state.get_item.return_value = {"Item": {"device_id": DEV_ID, "state": "bad", "reason": "firewall_off", "checked_at": int(time.time())}}
+dev_case("[순찰 반영] Access 검사 결과는 통과(5분 주기라 아직 옛 값)지만 순찰은 꺼짐 -> 관리자 콘솔 차단",
+         {"device_context": True, "device_id": DEV_ID, "device_posture": FW_OK}, "kim@xmcda.store", False, "block_device",
+         resource="admin.xmcda.store/")
+mock_device_state.get_item.return_value = {}
+
+# 순찰 배포 설정(Terraform)
+_here = os.path.dirname(os.path.abspath(__file__))
+_sw = open(os.path.join(_here, "device_sweep.tf"), encoding="utf-8").read()
+_main = open(os.path.join(_here, "main.tf"), encoding="utf-8").read()
+_pdp = _main.split('resource "aws_lambda_function" "pdp_engine"')[1].split("\n}\n")[0]
+t("[순찰 배포] 세션 끊기 토큰은 순찰 함수에만(인터넷에 열린 판단 함수에는 없음)",
+  "CF_ACCESS_REVOKE_TOKEN = var.cloudflare_access_revoke_token" in _sw and "revoke" not in _pdp.lower())
+t("[순찰 배포] 1분 일정, 진입점 device_sweep_handler, 실행 제한 50초(1분보다 짧게)",
+  'schedule_expression = "rate(1 minute)"' in _sw and 'handler          = "risk_score_engine.device_sweep_handler"' in _sw
+  and "timeout = 50" in _sw)
+t("[순찰 배포] 순찰 역할: device_state 읽기/쓰기 + 판정 로그 쓰기만",
+  '["dynamodb:GetItem", "dynamodb:PutItem"]' in _sw and "aws_dynamodb_table.device_state.arn" in _sw and "dynamodb:*" not in _sw)
+t("[순찰 배포] 판단 함수는 device_state 읽기(GetItem)만", 'Action   = ["dynamodb:GetItem"]\n      Resource = [aws_dynamodb_table.device_state.arn]' in _sw)
+t("[순찰 배포] EventBridge만 순찰 함수를 부를 수 있음(source_arn 제한)",
+  'principal     = "events.amazonaws.com"' in _sw and "source_arn    = aws_cloudwatch_event_rule.device_sweep.arn" in _sw)
 engine.CF_ACCOUNT_ID, engine.CF_DEVICE_API_TOKEN = "", ""

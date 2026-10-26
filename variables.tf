@@ -108,3 +108,14 @@ variable "device_signal_mode" {
     error_message = "device_signal_mode는 enforce, report, off 중 하나여야 합니다."
   }
 }
+
+# 기기 순찰이 상태가 나빠진 사용자의 Access 세션을 끊을 때 쓰는 토큰(device_sweep.tf).
+# 권한은 Account > Access: Organizations, Identity Providers, and Groups > Edit 하나만 준다.
+# 읽기 토큰(cloudflare_device_read_token)과 일부러 분리한다(쓰기 권한은 순찰 함수에만, 최소권한).
+# 비워 두면 순찰은 상태만 기록하고 세션은 끊지 않는다.
+variable "cloudflare_access_revoke_token" {
+  type        = string
+  sensitive   = true
+  default     = ""
+  description = "기기 상태가 나빠진 사용자의 Access 세션을 끊는 Cloudflare 토큰 (Access Organizations Edit 전용, terraform.tfvars)"
+}

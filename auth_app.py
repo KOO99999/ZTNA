@@ -947,7 +947,7 @@ DEVICE_HELP = {
                          "본인 계정으로 Cloudflare One Client(WARP)를 등록하고 연결한 기기에서 다시 접속하세요."),
     "device_owner_mismatch": ("다른 사람 계정으로 등록된 기기입니다.", "본인 계정으로 등록된 기기에서 접속하세요."),
     "device_posture_failed": ("기기 보안 검사(Windows 방화벽)를 통과하지 못했습니다.",
-                              "Windows 방화벽을 켜고 5분 뒤 다시 시도하세요."),
+                              "Windows 방화벽을 켜고 몇 분 뒤 다시 시도하세요(기기 검사가 몇 분마다 돌아서 바로 반영되지 않습니다)."),
 }
 
 

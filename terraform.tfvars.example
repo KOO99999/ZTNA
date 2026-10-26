@@ -15,3 +15,5 @@ oidc_client_secret = "REPLACE_ME_WITH_OPENSSL_RAND_HEX_32_OUTPUT"
 cloudflare_device_read_token = "REPLACE_ME"
 # 기기 신호 스위치: enforce(점수 반영) / report(로그에만, 기본값) / off(계산 안 함)
 device_signal_mode = "report"
+# 기기 상태가 나빠진 사용자의 세션 끊기용 토큰 (Access: Organizations, Identity Providers, and Groups - Edit 전용)
+cloudflare_access_revoke_token = "REPLACE_ME"

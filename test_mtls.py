@@ -157,7 +157,8 @@ for tpl, group in (("templates/user_data_app.sh.tpl", "ztapp"), ("templates/user
     t = read(tpl)
     ok(f"{tpl}: MTLS 환경변수(인증서/키/CA/허용 클라이언트)", all(f"{v}=" in t for v in ("MTLS_CERT", "MTLS_KEY", "MTLS_CLIENT_CA", "MTLS_ALLOWED_CLIENT")))
     ok(f"{tpl}: 개인키는 root와 서비스 계정({group})만 읽기", f"chown root:{group} /etc/zt-mtls/me.key && chmod 640 /etc/zt-mtls/me.key" in t)
-    ok(f"{tpl}: zt_mtls.py 배포", "${zt_mtls_code}" in t)
+    ok(f"{tpl}: zt_mtls.py 배포", "${zt_mtls_code}" in t if group == "ztapp"
+       else "for name in ('auth_app.py', 'zt_mtls.py'):" in t)   # 인증 서버는 S3에서 받음(code_bucket.tf)
 mt = read("mtls.tf")
 ok("Terraform: 웹 인증서는 client_auth, 앱/인증 서버 인증서는 server_auth 용도만",
    'each.key == "web" ? ["digital_signature", "client_auth"] : ["digital_signature", "server_auth"]' in mt)

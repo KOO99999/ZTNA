@@ -166,10 +166,12 @@ else:
 
     c = aa.app.test_client()
     import time as _time
+    DECISION = {"value": {"found": False}}   # 엔진의 마지막 판단(기본: 기록 없음 -> 기존처럼 재인증 화면)
     with aa.app.app_context(), \
          patch.object(aa.Account, "query", FakeQuery(), create=True), \
          patch.object(aa, "check_brute_force", lambda e: False), \
-         patch.object(aa, "evaluate_login_risk", lambda i, s: risk_calls.append((i, s)) or {"recorded": True}):
+         patch.object(aa, "evaluate_login_risk", lambda i, s: risk_calls.append((i, s)) or {"recorded": True}), \
+         patch.object(aa, "lookup_access_decision", lambda e, u: DECISION["value"]):
 
         def stepup_get(email, original="dev.xmcda.store/", extra=None):
             c.set_cookie(aa.SSO_COOKIE_NAME, login_cookie(email), domain="localhost")
@@ -211,6 +213,38 @@ else:
               r.status_code == 200 and "인증되었습니다" in r.get_data(as_text=True) and 'https://dev.xmcda.store/' in r.get_data(as_text=True)
               and risk_calls and risk_calls[0][1] == {"mfa_reauth": True}, (r.status_code, risk_calls))
 
+        # [차단 화면] 엔진의 마지막 판단이 차단이면 TOTP를 묻지 않고 차단 화면(재인증 반복 방지)
+        DECISION["value"] = {"found": True, "action": "block_device", "device_reasons": ["device_unmanaged"]}
+        r = stepup_get("dev1@xmcda.store"); t = r.get_data(as_text=True)
+        ok("기기 때문에 차단(block_device) -> 403 차단 화면, TOTP 입력 없음, 기기 사유와 푸는 방법",
+           r.status_code == 403 and "totp_code" not in t and "회사에 등록된 기기가 아닙니다" in t and "WARP" in t, (r.status_code, t[:300]))
+        ok("차단 화면의 '다시 시도'는 원래 앱 주소", 'href="https://dev.xmcda.store/"' in t, t[-600:])
+        DECISION["value"] = {"found": True, "action": "block_device", "device_reasons": ["device_posture_failed"]}
+        t = stepup_get("admin1@xmcda.store", original="admin.xmcda.store/").get_data(as_text=True)
+        ok("방화벽 검사 실패 -> '방화벽을 켜고 5분 뒤' 안내", "Windows 방화벽을 켜고 5분 뒤" in t)
+        DECISION["value"] = {"found": True, "action": "block", "device_reasons": []}
+        r = stepup_get("dev1@xmcda.store"); t = r.get_data(as_text=True)
+        ok("기기 외 이유로 차단(block) -> 일반 차단 화면(사유/점수 비공개), TOTP 없음",
+           r.status_code == 403 and "totp_code" not in t and "보안 정책에 따라 접근이 차단" in t and "+45" not in t, (r.status_code, t[:200]))
+        DECISION["value"] = {"found": True, "action": "block_until_mfa", "device_reasons": []}
+        r = stepup_get("dev1@xmcda.store")
+        ok("보안 신호로 차단(block_until_mfa, 관리자 해제 대상) -> 차단 화면, TOTP 없음",
+           r.status_code == 403 and "totp_code" not in r.get_data(as_text=True))
+        DECISION["value"] = {"found": True, "action": "block", "device_reasons": ["<script>", "device_owner_mismatch"]}
+        t = stepup_get("dev1@xmcda.store").get_data(as_text=True)
+        ok("모르는 사유 이름은 표시하지 않음, 아는 기기 사유만", "<script>" not in t and "다른 사람 계정으로 등록된 기기" in t)
+        DECISION["value"] = {"found": True, "action": "step_up_mfa_required", "device_reasons": []}
+        ok("재인증 필요(step_up_mfa_required) -> TOTP 화면", "totp_code" in stepup_get("dev1@xmcda.store").get_data(as_text=True))
+        DECISION["value"] = {"found": True, "action": "block_device", "device_reasons": ["device_unmanaged"]}
+        ok("소속이 다르면 차단 판단보다 '권한 없음'이 먼저", "접근 권한이 없습니다" in stepup_get("admin1@xmcda.store").get_data(as_text=True))
+        risk_calls.clear()
+        c.set_cookie(aa.SSO_COOKIE_NAME, login_cookie("dev1@xmcda.store"), domain="localhost")
+        good_code = pyotp.TOTP(ACCOUNTS["dev1@xmcda.store"].totp_secret).now()
+        r = c.post("/stepup", data={"return_url": "https://dev.xmcda.store/", "totp_code": good_code})
+        ok("차단 상태에서 올바른 TOTP를 직접 POST해도 403, MFA 기록 없음",
+           r.status_code == 403 and not risk_calls, (r.status_code, risk_calls))
+        DECISION["value"] = {"found": False}
+
         # 로그인 안 한 상태
         c.delete_cookie(aa.SSO_COOKIE_NAME, domain="localhost")
         r = c.get("/stepup", query_string={"original_url": "dev.xmcda.store/"})
@@ -226,6 +260,30 @@ else:
         aa.ACCESS_TOKENS["tok"] = {"email": "dev1@xmcda.store", "expires_at": _time.time() + 60}
         r = c.get("/userinfo", headers={"Authorization": "Bearer tok"})
         check("/userinfo에도 department 포함", r.get_json().get("department"), "dev")
+
+if HAVE_FULL:
+    # lookup_access_decision 자체: 엔진에 보내는 내용과 실패 처리
+    sent = []
+    class _R:
+        def __init__(self, v): self.v = v
+        def json(self): return self.v
+    def fake_post(url, **kw):
+        sent.append((url, kw))
+        return _R({"found": True, "action": "block", "device_reasons": []})
+    with patch.object(aa.requests, "post", fake_post):
+        res = aa.lookup_access_decision("dev1@xmcda.store", "https://dev.xmcda.store/a?b=1")
+    body = sent[0][1]["json"] if sent else {}
+    ok("판단 조회: 같은 PDP 주소 + 공유 비밀키 + decision_lookup/신원/앱 호스트만 보냄",
+       sent and sent[0][0] == "https://pdp.test/evaluate" and sent[0][1]["headers"]["X-Evaluate-Secret"] == "test-secret-local-only"
+       and body == {"decision_lookup": True, "identity": "dev1@xmcda.store", "resource_host": "dev.xmcda.store"}
+       and res["action"] == "block", (sent, res))
+    def boom(url, **kw): raise OSError("down")
+    with patch.object(aa.requests, "post", boom):
+        ok("판단 조회 실패 -> found=False(기존처럼 재인증 화면)", aa.lookup_access_decision("a@b", "https://dev.xmcda.store/") == {"found": False})
+    with patch.object(aa.requests, "post", lambda url, **kw: _R(["not", "dict"])):
+        ok("판단 조회 응답이 이상하면 found=False", aa.lookup_access_decision("a@b", "https://dev.xmcda.store/") == {"found": False})
+    t = aa.render_blocked('x"<b>@xmcda.store', "https://dev.xmcda.store/", ["device_unmanaged"])
+    ok("차단 화면은 계정 이름을 이스케이프", "<b>@" not in t and "&lt;b&gt;" in t)
 
 print(f"\n{'ALL PASS' if not fails else str(fails)+' FAILED'}")
 sys.exit(1 if fails else 0)

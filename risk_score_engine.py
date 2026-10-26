@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
 table = dynamodb.Table('risk_score_log')
 mfa_table = dynamodb.Table('mfa_verified')
+decision_table = dynamodb.Table('access_decision')   # 사용자+앱별 마지막 판단(재인증/차단 화면을 고르는 데 씀)
 user_risk_table = dynamodb.Table('user_risk')   # 관리자가 풀어줄 때까지 유지되는 누적 위험 상태(mfa_verified와 별개)
 
 # [step-up 재인증] MFA 재인증 기록의 유효 시간. 팀이 정한 값이며 표준에 정해진 수치는
@@ -51,7 +52,9 @@ RISK_MATRIX = {
     #     (관리자 해제가 필요한 sticky 신호로 두면 개인 PC/공용 PC를 쓰는 정상 직원이 계속 막힘).
     #     45점 = 내부(60) 통과 / 기밀(40) 재인증 / 최고기밀(20) 차단. 팀 판단 수치(표준 근거 없음) - 보고서에 명시.
     "device_unmanaged": {"risk": 45, "group": "behavioral"},       # WARP 미등록/미연결 기기(기기 정보 없음)
-    "device_posture_failed": {"risk": 45, "group": "behavioral"},  # 등록 기기지만 필수 기기 검사(방화벽) 실패/결과 없음
+    # 회사 기기인 건 확인됐고 관리 상태(방화벽)가 나쁜 것 -> 공격보다 관리 소홀일 가능성이 커서 낮게 둔다.
+    #   25점: 내부(60)/기밀(40) 통과, 최고기밀(20)만 걸림(기기 신호라 재인증 없이 차단 + "방화벽을 켜세요")
+    "device_posture_failed": {"risk": 25, "group": "behavioral"},  # 등록 기기지만 필수 기기 검사(방화벽) 실패/결과 없음
     "device_owner_mismatch": {"risk": 45, "group": "behavioral"},  # 기기 등록 사용자 != 로그인한 사람
 }
 
@@ -134,6 +137,7 @@ CF_DEVICE_API_TOKEN = os.environ.get("CF_DEVICE_API_TOKEN", "")
 #            (Microsoft 조건부 액세스의 "보고 전용(Report-only)" 모드와 같은 개념: 영향을 먼저 관찰한 뒤 켠다)
 #   off    : 계산하지 않음(Cloudflare 기기 주인 조회 API도 부르지 않음)
 #   알 수 없는 값이면 안전한 쪽(enforce)으로 본다.
+DEVICE_SIGNALS = ("device_unmanaged", "device_owner_mismatch", "device_posture_failed")
 DEVICE_SIGNAL_MODES = ("enforce", "report", "off")
 DEVICE_SIGNAL_MODE = os.environ.get("DEVICE_SIGNAL_MODE", "enforce").strip().lower()
 if DEVICE_SIGNAL_MODE not in DEVICE_SIGNAL_MODES:
@@ -180,6 +184,50 @@ def derive_device_signals(body):
         for signal in detected:
             body[signal] = True
     return detected
+
+
+# [마지막 판단] 사용자+앱(호스트)별로 가장 최근 판단만 짧게 보관한다(TTL). 화면 선택용이며 접근 허용에는 쓰지 않는다.
+DECISION_TTL_SECONDS = 600
+
+
+def resource_host(resource_path):
+    normalized = normalize_resource(resource_path) if isinstance(resource_path, str) else None
+    return normalized.split("/")[0] if normalized else None
+
+
+def save_decision(identity, resource_path, action, device_reasons, now):
+    host = resource_host(resource_path)
+    if not host:
+        return
+    try:
+        decision_table.put_item(Item={
+            "identity": str(identity).strip().lower(),
+            "resource_host": host,
+            "action": action,
+            "device_reasons": list(device_reasons),
+            "decided_at": now,
+            "expires_at": now + DECISION_TTL_SECONDS,
+        })
+    except Exception as e:
+        print("access_decision 기록 실패:", str(e))
+
+
+def lookup_decision(identity, host):
+    """{"found": bool, "action": ..., "device_reasons": [...]}. 없거나 만료됐거나 조회 실패면 found=False."""
+    if not isinstance(identity, str) or not isinstance(host, str) or not identity.strip() or not host.strip():
+        return {"found": False}
+    host = resource_host(host)
+    if not host:
+        return {"found": False}
+    try:
+        item = decision_table.get_item(Key={"identity": identity.strip().lower(), "resource_host": host}).get("Item")
+    except Exception as e:
+        print("access_decision 조회 실패:", str(e))
+        return {"found": False}
+    if not item or int(item.get("expires_at", 0)) <= int(time.time()):
+        return {"found": False}
+    reasons = [r for r in (item.get("device_reasons") or []) if r in DEVICE_SIGNALS]
+    return {"found": True, "action": str(item.get("action", "")), "device_reasons": reasons}
 
 
 def get_resource_tier(resource_path):
@@ -357,6 +405,14 @@ def lambda_handler(event, context):
             "body": json.dumps({"recorded": recorded})
         }
 
+    # [마지막 판단 조회] 로그인 서버 /stepup이 어떤 화면을 보여줄지 정할 때 부르는 전용 호출(점수 계산 없음)
+    if body.get("decision_lookup"):
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps(lookup_decision(body.get("identity"), body.get("resource_host")))
+        }
+
     # --- 0. 원본 신호(request_timestamp, geo_country) 판정 ---
     # Worker(index.js)는 판단 없이 원본 데이터만 전달하고, "야간인지/위치가
     # 이상한지"에 대한 실제 판정은 여기(PDP)에서 전담한다. 판정 결과를
@@ -490,7 +546,23 @@ def lambda_handler(event, context):
         allow_access = (risk_score <= resource_threshold)
         action = "allow" if allow_access else "block"
 
+    # [기기 신호는 재인증으로 풀어 주지 않는다] TOTP는 "본인인가"를 확인할 뿐 "회사 기기인가"를 바꾸지 못한다.
+    # 비밀번호+TOTP를 함께 피싱당하면 공격자 PC에서도 재인증이 통과되므로, 기기 신호 때문에 경계구간에 들어온
+    # 경우는 재인증 대신 차단하고, 차단 화면에서 기기 사유와 푸는 방법(기기를 바꾸거나 방화벽을 켜기)을 보여준다.
+    device_reasons = [s for s in DEVICE_SIGNALS if s in penalized_signals]
+    if device_reasons and action in ("step_up_mfa_required", "step_up_mfa_verified"):
+        allow_access = False
+        action = "block_device"
+        mfa_expires_at = None
+        reasons.append("device_not_remediable_by_mfa")
+
     cache_ttl_seconds = compute_cache_ttl(resource_tier, allow_access, current_time, mfa_expires_at)
+
+    # 마지막 판단 기록: Access가 막으면 사용자는 로그인 서버의 /stepup으로 오는데, 그 페이지는 왜 막혔는지 모른다.
+    # 판단은 여기서 했으니, /stepup은 이 기록을 물어보고(decision_lookup) 재인증 화면과 차단 화면 중 하나를 고른다.
+    # (예전에는 무조건 재인증 화면이라, 재인증으로 풀리지 않는 차단이면 재인증 -> 다시 차단이 반복됐다)
+    if has_identity and body.get("source") != "login":
+        save_decision(risk_identity, resource_path, action, device_reasons, current_time)
 
     # 새로 감지된 해제 불가 신호는 (인증된 신원이고 호출자가 허용한 경우에만) User Risk에 남긴다.
     if has_identity and detected_sticky and body.get("persist_risk") is True:
@@ -524,6 +596,7 @@ def lambda_handler(event, context):
             "score": risk_score,
             "action": action,
             "reasons": reasons,
+            "device_reasons": device_reasons,
             "session_id": session_id,
             "resource_path": resource_path,
             "resource_threshold": resource_threshold,

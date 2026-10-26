@@ -936,6 +936,63 @@ def render_no_permission(email, department, url):
     """
 
 
+# [차단 화면] Access가 막으면 이유와 상관없이 /stepup으로 오기 때문에, 재인증으로 풀리지 않는 차단에도
+# TOTP 화면을 보여주면 "재인증 -> 다시 차단 -> 재인증"이 반복된다. 판단은 엔진이 했으니 엔진에 마지막 판단을
+# 물어(decision_lookup) 차단이면 차단 화면을 보여준다. 사용자가 직접 고칠 수 있는 기기 사유만 보여주고,
+# 점수나 다른 신호(위치 등)는 보여주지 않는다(공격자에게 무엇을 피하면 되는지 알려주지 않기 위해).
+# block_until_mfa: 보안 신호(관리자 해제 대상)가 걸린 상태. 앱 접근 단계에서는 재인증으로 풀리지 않으므로 차단 화면.
+BLOCK_ACTIONS = ("block", "block_device", "block_until_mfa")
+DEVICE_HELP = {
+    "device_unmanaged": ("회사에 등록된 기기가 아닙니다.",
+                         "본인 계정으로 Cloudflare One Client(WARP)를 등록하고 연결한 기기에서 다시 접속하세요."),
+    "device_owner_mismatch": ("다른 사람 계정으로 등록된 기기입니다.", "본인 계정으로 등록된 기기에서 접속하세요."),
+    "device_posture_failed": ("기기 보안 검사(Windows 방화벽)를 통과하지 못했습니다.",
+                              "Windows 방화벽을 켜고 5분 뒤 다시 시도하세요."),
+}
+
+
+def lookup_access_decision(email, return_url):
+    """엔진에 이 사용자+앱의 마지막 판단을 묻는다. 실패하면 found=False(기존처럼 재인증 화면)."""
+    try:
+        resp = requests.post(PDP_EVALUATE_URL, timeout=3,
+                             headers={"Content-Type": "application/json", "X-Evaluate-Secret": EVALUATE_SHARED_SECRET},
+                             json={"decision_lookup": True, "identity": email,
+                                   "resource_host": (urlparse(return_url).hostname or "")})
+        result = resp.json()
+        return result if isinstance(result, dict) else {"found": False}
+    except Exception as e:
+        print("마지막 판단 조회 실패:", str(e), flush=True)
+        return {"found": False}
+
+
+def render_blocked(email, return_url, device_reasons):
+    portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
+    items = "".join(f"<li><strong>{escape(DEVICE_HELP[r][0])}</strong><br>{escape(DEVICE_HELP[r][1])}</li>"
+                    for r in device_reasons if r in DEVICE_HELP)
+    body = (f'<p>이 기기에서는 요청한 페이지를 열 수 없습니다. 추가 인증으로 해결되지 않습니다.</p><ul>{items}</ul>'
+            f'<a class="btn" href="{escape(return_url)}">다시 시도</a>') if items else \
+           '<p>보안 정책에 따라 접근이 차단되었습니다. 계속되면 관리자에게 문의하세요.</p>'
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>접근 차단 - ZT Login Server</title><style>
+body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
+.card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 440px; margin: 60px auto; }}
+a.btn {{ display: inline-block; margin: 6px 8px 0 0; padding: 10px 16px; border-radius: 6px; background: #007bff; color: white; text-decoration: none; font-weight: bold; }}
+a.sub {{ background: #6c757d; }} li {{ margin: 8px 0; }} p {{ font-size: 0.9em; color: #555; }}
+</style></head><body><div class="card"><h2>접근이 차단되었습니다</h2><p>로그인한 계정: {escape(email)}</p>{body}
+<a class="btn" href="https://{escape(portal_domain)}/">포털 홈으로</a><a class="btn sub" href="/logout">다른 계정으로 로그인</a>
+</div></body></html>"""
+
+
+def _blocked_response(email, return_url):
+    """엔진의 마지막 판단이 차단이면 차단 화면(403)을, 아니면 None(재인증 화면으로 진행)."""
+    decision = lookup_access_decision(email, return_url)
+    if decision.get("found") and decision.get("action") in BLOCK_ACTIONS:
+        reasons = [r for r in (decision.get("device_reasons") or []) if r in DEVICE_HELP]
+        print(f"[STEPUP_BLOCKED] identity={email} action={decision.get('action')} device={','.join(reasons) or '-'} "
+              f"resource={_resource_key(return_url)}", flush=True)
+        return render_blocked(email, return_url, reasons), 403
+    return None
+
+
 def _no_permission_response(account, email, return_url):
     """소속이 이 자원의 허용 목록에 없으면 403 안내 화면을, 아니면 None을 돌려준다."""
     department = account.department if account else None
@@ -982,6 +1039,9 @@ def stepup():
     denied = _no_permission_response(Account.query.filter_by(email=email).first(), email, return_url)
     if denied:
         return denied
+    blocked = _blocked_response(email, return_url)
+    if blocked:
+        return blocked
     if check_brute_force(email):
         return render_stepup_form(return_url, error=f"시도 횟수를 초과했습니다. {BRUTE_FORCE_LOCKOUT_MINUTES}분 후 다시 시도해주세요.", locked=True)
     return render_stepup_form(return_url)
@@ -1002,6 +1062,9 @@ def stepup_verify():
     denied = _no_permission_response(account, email, return_url)
     if denied:
         return denied
+    blocked = _blocked_response(email, return_url)
+    if blocked:
+        return blocked
 
     if check_brute_force(email):
         return render_stepup_form(return_url, error=f"시도 횟수를 초과했습니다. {BRUTE_FORCE_LOCKOUT_MINUTES}분 후 다시 시도해주세요.", locked=True)

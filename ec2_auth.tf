@@ -24,8 +24,10 @@ resource "aws_instance" "auth_server" {
   user_data_replace_on_change = true
 
   user_data_base64 = base64gzip(templatefile("${path.module}/templates/user_data_auth.sh.tpl", {
-    # user_data 16KB 제한 대비: 주석 전용 줄은 배포본에서만 제거(원본 auth_app.py는 그대로)
-    app_code    = replace(file("${path.module}/auth_app.py"), "/(?m)^[ \\t]*#[^\\n]*\\r?\\n/", "")
+    # 앱 코드는 user_data에 넣지 않고 S3에서 받는다(code_bucket.tf, user_data 16KB 한도).
+    # 코드 버전(해시)을 넣어 두면 코드가 바뀔 때 user_data가 바뀌어 서버가 새로 만들어진다.
+    code_bucket       = aws_s3_bucket.app_code.id
+    auth_code_version = md5(join(",", [for k in sort(keys(local.auth_code_files)) : aws_s3_object.auth_code[k].etag]))
     db_host     = aws_db_instance.login_db.address
     db_name     = aws_db_instance.login_db.db_name
     # 앱 서비스가 쓰는 DB 계정 = 앱 전용 계정(행 읽기/쓰기만). 마스터 계정은 부팅 단계(bootstrap)에서만 쓴다.
@@ -52,7 +54,6 @@ resource "aws_instance" "auth_server" {
     # 서버 시작 때 이 SSM 파라미터(SecureString, Terraform 밖에서 관리)에서 계정 정보를 읽어 DB에 없는 계정을 만든다(auth_seed.tf).
     seed_param_name = local.seed_param_name
     # [Web->WAS mTLS] 부팅 때 SSM에서 받을 인증서(mtls.tf)와, 받아 줄 클라이언트(웹 서버) 인증서 이름
-    zt_mtls_code        = replace(file("${path.module}/zt_mtls.py"), "/(?m)^[ \\t]*#[^\\n]*\\r?\\n/", "")
     mtls_role           = "auth"
     mtls_param_prefix   = local.mtls_param_prefix
     mtls_allowed_client = local.mtls_names.web
@@ -64,7 +65,9 @@ resource "aws_instance" "auth_server" {
   }
 
   # 부팅 스크립트가 SSM에서 인증서를 읽으므로, 파라미터와 읽기 권한이 먼저 만들어져 있어야 한다.
-  depends_on = [aws_ssm_parameter.mtls_key, aws_ssm_parameter.mtls_cert, aws_ssm_parameter.mtls_ca_cert, aws_iam_role_policy.mtls_read]
+  # 코드는 S3에서 받으므로 코드 파일과 읽기 권한도 먼저 있어야 한다.
+  depends_on = [aws_ssm_parameter.mtls_key, aws_ssm_parameter.mtls_cert, aws_ssm_parameter.mtls_ca_cert, aws_iam_role_policy.mtls_read,
+  aws_s3_object.auth_code, aws_iam_role_policy.auth_code_read]
 
   lifecycle {
     create_before_destroy = true

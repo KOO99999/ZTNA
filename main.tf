@@ -135,6 +135,35 @@ resource "aws_dynamodb_table" "mfa_verified" {
   }
 }
 
+# [마지막 판단] 사용자+앱(호스트)별 가장 최근 판단(재인증 필요 / 차단 / 기기 때문에 차단)과 기기 사유.
+# Access가 막으면 사용자는 로그인 서버의 /stepup으로 오는데, 그 페이지가 엔진에 이 기록을 물어서
+# 재인증 화면과 차단 화면 중 하나를 고른다(판단은 엔진, 화면은 로그인 서버). 화면 선택용이라 10분이면 충분하고 TTL로 정리한다.
+resource "aws_dynamodb_table" "access_decision" {
+  name         = "access_decision"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "identity"
+  range_key    = "resource_host"
+
+  attribute {
+    name = "identity"
+    type = "S"
+  }
+
+  attribute {
+    name = "resource_host"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  tags = {
+    Environment = "ZeroTrust-Project"
+  }
+}
+
 # ==========================================
 # 2. AWS IAM Role (EC2 공용: Session Manager 접속만)
 #    예전에는 AmazonDynamoDBFullAccess(모든 테이블에 모든 작업)를 붙였다. 지금은 DynamoDB 권한이 전혀 없고,
@@ -206,6 +235,7 @@ resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
 #   risk_score_log : 판정 결과 기록(PutItem)
 #   mfa_verified   : step-up 재인증 기록 저장(PutItem)과 조회(GetItem)
 #   user_risk      : 사용자별 위험 상태 조회(Query)와 기록/갱신(UpdateItem). 해제(관리자)는 risk_admin Lambda만 한다.
+#   access_decision: 사용자+앱별 마지막 판단 저장(PutItem)과 조회(GetItem) - /stepup 화면 선택용
 resource "aws_iam_role_policy" "lambda_dynamodb" {
   name = "zt-lambda-dynamodb-minimal"
   role = aws_iam_role.lambda_role.id
@@ -224,6 +254,12 @@ resource "aws_iam_role_policy" "lambda_dynamodb" {
         Effect   = "Allow"
         Action   = ["dynamodb:PutItem", "dynamodb:GetItem"]
         Resource = [aws_dynamodb_table.mfa_verified.arn]
+      },
+      {
+        Sid      = "AccessDecisionReadWrite"
+        Effect   = "Allow"
+        Action   = ["dynamodb:PutItem", "dynamodb:GetItem"]
+        Resource = [aws_dynamodb_table.access_decision.arn]
       },
       {
         Sid      = "UserRiskReadAndFlag"

@@ -91,6 +91,12 @@ svc = tpl.split("[Service]")[1].split("[Install]")[0]
 ok("앱 서비스: 인스턴스 메타데이터 접근 차단(IPAddressDeny)", "IPAddressDeny=169.254.169.254" in svc)
 ok("앱 서비스: 전용 계정(ztauth)으로 실행", "User=ztauth" in svc)
 
+# 앱 코드는 user_data가 아니라 S3에서 받는다(16KB 한도)
+ok("코드를 user_data에 넣지 않음(S3에서 받기)", "${app_code}" not in tpl and "s3.download_file('${code_bucket}', 'auth/' + name" in tpl)
+ok("코드 받기 실패하면 부팅 중단(빈 코드로 서비스 시작 안 함)", "test -s /opt/ztauth/auth_app.py || {" in tpl)
+ok("코드 받기가 부팅 단계/서비스 시작보다 먼저", tpl.index("s3.download_file") < tpl.index("--bootstrap"))
+ok("코드 버전(해시)이 user_data에 들어가 코드가 바뀌면 서버 교체", "${auth_code_version}" in tpl)
+
 def read_tf(name):
     return open(os.path.join(HERE, name), encoding="utf-8").read().replace("\r\n", "\n")
 dbtf = read_tf("database.tf")
@@ -98,6 +104,14 @@ ok("RDS 파라미터 그룹: require_secure_transport = ON(1)",
    re.search(r'name\s*=\s*"require_secure_transport"\s*\n(?:\s*#[^\n]*\n)*\s*value\s*=\s*"(1|ON)"', dbtf) is not None)
 ok("RDS 인스턴스에 파라미터 그룹 연결", "parameter_group_name   = aws_db_parameter_group.login_db_params.name" in dbtf)
 ec2 = read_tf("ec2_auth.tf")
+cb = read_tf("code_bucket.tf")
+ok("S3 버킷: 공개 접근 4종 모두 차단", all(re.search(rf"{k}\s*=\s*true", cb) for k in
+   ("block_public_acls", "block_public_policy", "ignore_public_acls", "restrict_public_buckets")))
+ok("S3 버킷: 기본 암호화 + HTTPS 아닌 요청 거부", 'sse_algorithm = "AES256"' in cb and '"aws:SecureTransport" = "false"' in cb)
+ok("인증 서버 역할: 자기 코드 파일 GetObject만(목록/쓰기 없음)",
+   'Action   = ["s3:GetObject"]' in cb and "s3:PutObject" not in cb and "s3:ListBucket" not in cb)
+ok("인증 서버는 코드 파일과 읽기 권한이 생긴 뒤 생성", "aws_s3_object.auth_code, aws_iam_role_policy.auth_code_read]" in ec2)
+ok("user_data에 코드 원문을 넣지 않음", 'file("${path.module}/auth_app.py")' not in ec2 and 'file("${path.module}/zt_mtls.py")' not in ec2)
 ok("앱 계정 접속 위치 = 앱 서브넷(IP/넷마스크)", "cidrnetmask(aws_subnet.app_subnet.cidr_block)" in ec2)
 
 print(f"\n실패 {fails}건"); sys.exit(1 if fails else 0)

@@ -17,10 +17,13 @@ import boto3
 mock_table = MagicMock()       # risk_score_log
 mock_user_risk = MagicMock()    # [User Risk] 기본은 걸려 있는 신호 없음
 mock_mfa_table = MagicMock()   # [step-up] mfa_verified - 별도 mock, 기본은 기록 없음(get_item 결과 없음)으로 둠
+mock_decision = MagicMock()    # [마지막 판단] access_decision
 
 def _table_side_effect(name):
     if name == 'user_risk':
         return mock_user_risk
+    if name == 'access_decision':
+        return mock_decision
     return mock_mfa_table if name == 'mfa_verified' else mock_table
 
 boto3.resource.return_value.Table.side_effect = _table_side_effect
@@ -533,7 +536,7 @@ t("[UserRisk] Scan이 아니라 identity 키로 Query하고, 예약어는 이름
 
 # ==========================================================================
 # [기기 신뢰] WARP 기기 검사 결과(devicePosture)와 기기 주인(Cloudflare API) -> 신호
-#   45점: 내부(60) 통과 / 기밀(40) 재인증 / 최고기밀(20) 차단
+#   관리 안 됨/남의 기기 45점, 검사 실패 25점. 기기 신호로 경계구간에 들어오면 재인증 대신 차단(block_device)
 # ==========================================================================
 from unittest.mock import patch
 print()
@@ -568,20 +571,26 @@ dev_case("[기기] 등록 기기 + 방화벽 통과 + 본인 기기 -> 기밀(de
 t("[기기] 기기 주인 조회: physical-devices API, Bearer 토큰, 짧은 timeout",
   api_calls and api_calls[0][0].endswith(f"/accounts/acct/devices/physical-devices/{DEV_ID}")
   and api_calls[0][1] == "Bearer tok" and api_calls[0][2] == 2, api_calls)
-dev_case("[기기] WARP 없는 기기(device_id 없음) -> 기밀(dev)은 재인증",
-         {"device_context": True, "device_id": None, "device_posture": []}, None, False, "step_up_mfa_required")
+dev_case("[기기] WARP 없는 기기(device_id 없음) -> 기밀(dev)은 재인증 없이 차단(block_device)",
+         {"device_context": True, "device_id": None, "device_posture": []}, None, False, "block_device")
 t("[기기] 기기 정보가 없으면 주인 조회 API를 부르지 않음", not api_calls, api_calls)
 dev_case("[기기] WARP 없는 기기 -> 내부(포털)는 통과",
          {"device_context": True}, None, True, "allow", resource="xmcda.store/")
 dev_case("[기기] WARP 없는 기기 -> 최고기밀(admin)은 차단",
          {"device_context": True}, None, False, "block", resource="admin.xmcda.store/")
-dev_case("[기기] 방화벽 꺼짐 -> 기밀(dev) 재인증",
-         {"device_context": True, "device_id": DEV_ID, "device_posture": FW_FAIL}, "kim@xmcda.store", False, "step_up_mfa_required")
-dev_case("[기기] 필수 검사 결과 없음(만료 등) -> 검사 실패로 처리",
+dev_case("[기기] 방화벽 꺼짐(25) -> 기밀(dev 40)은 통과",
+         {"device_context": True, "device_id": DEV_ID, "device_posture": FW_FAIL}, "kim@xmcda.store", True, "allow")
+dev_case("[기기] 방화벽 꺼짐(25) -> 최고기밀(admin 20)은 경계구간이지만 기기 신호라 차단(block_device)",
+         {"device_context": True, "device_id": DEV_ID, "device_posture": FW_FAIL}, "kim@xmcda.store", False, "block_device",
+         resource="admin.xmcda.store/")
+dev_case("[기기] 방화벽 꺼짐(25) -> 포털(60) 통과",
+         {"device_context": True, "device_id": DEV_ID, "device_posture": FW_FAIL}, "kim@xmcda.store", True, "allow",
+         resource="xmcda.store/")
+dev_case("[기기] 필수 검사 결과 없음(만료 등) -> 검사 실패로 처리(admin 차단)",
          {"device_context": True, "device_id": DEV_ID, "device_posture": [{"type": "warp", "rule": "WARP", "success": True}]},
-         "kim@xmcda.store", False, "step_up_mfa_required")
-dev_case("[기기] 남의 기기(등록자 admin != 로그인 kim) -> 기밀(dev) 재인증",
-         {"device_context": True, "device_id": DEV_ID, "device_posture": FW_OK}, "admin@xmcda.store", False, "step_up_mfa_required")
+         "kim@xmcda.store", False, "block_device", resource="admin.xmcda.store/")
+dev_case("[기기] 남의 기기(등록자 admin != 로그인 kim) -> 기밀(dev) 재인증 없이 차단(block_device)",
+         {"device_context": True, "device_id": DEV_ID, "device_posture": FW_OK}, "admin@xmcda.store", False, "block_device")
 dev_case("[기기] 기기 주인 비교는 대소문자 무시",
          {"device_context": True, "device_id": DEV_ID, "device_posture": FW_OK}, "KIM@XMCDA.STORE", True, "allow")
 dev_case("[기기] 해외(40) + 남의 기기(45) + 조합 규칙(20) = 105 -> 포털(60)에서도 차단",
@@ -591,7 +600,9 @@ mock_mfa_table.get_item.return_value = {"Item": {"identity": "kim@xmcda.store", 
 api_calls.clear()
 _r = json.loads(engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps(
     {"session_id": "d2", "identity": "kim@xmcda.store", "resource_path": "dev.xmcda.store/", "device_context": True})}, None)["body"])
-t("[기기] 최근 재인증 기록 + WARP 없는 기기 -> 기밀(dev) step_up_mfa_verified 통과", _r["allow"] is True and _r["action"] == "step_up_mfa_verified", _r)
+t("[기기] 최근 재인증 기록이 있어도 WARP 없는 기기 -> 기밀(dev) 차단(재인증으로 풀리지 않음)",
+  _r["allow"] is False and _r["action"] == "block_device" and _r["device_reasons"] == ["device_unmanaged"]
+  and _r["cache_ttl_seconds"] == 0, _r)
 mock_mfa_table.get_item.return_value = {}
 
 def failing_urlopen(req, timeout=None):
@@ -640,4 +651,77 @@ for raw, expect in (("REPORT ", "report"), ("off", "off"), ("bogus", "enforce"),
     _out = _sp.run([sys.executable, "-c", _probe, _HERE], env=_env, capture_output=True, text=True).stdout.strip()
     t(f"[기기 스위치] 환경변수 {raw!r} -> {expect} (엔진을 새로 불러와 확인)", _out == expect, _out)
 engine.DEVICE_SIGNAL_MODE = "enforce"
+
+# ==========================================================================
+# [마지막 판단] access_decision: 판단할 때마다 사용자+앱별로 저장, /stepup이 조회해 화면을 고른다
+# ==========================================================================
+print()
+def handler(body):
+    return json.loads(engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps(body)}, None)["body"])
+
+mock_decision.reset_mock(); mock_mfa_table.get_item.return_value = {}
+with patch.object(engine.urllib.request, "urlopen", owner_is("admin@xmcda.store")):
+    _r = handler({"session_id": "x1", "identity": "Kim@Xmcda.Store", "resource_path": "DEV.xmcda.store/a?x=1",
+                  "device_context": True, "device_id": DEV_ID, "device_posture": FW_OK})
+_item = mock_decision.put_item.call_args.kwargs["Item"] if mock_decision.put_item.called else {}
+t("[판단 기록] 판단마다 저장: 신원 소문자, 앱 호스트만, 결과, 기기 사유, 10분 만료",
+  _item.get("identity") == "kim@xmcda.store" and _item.get("resource_host") == "dev.xmcda.store"
+  and _item.get("action") == "block_device" and _item.get("device_reasons") == ["device_owner_mismatch"]
+  and _item.get("expires_at") - _item.get("decided_at") == 600, _item)
+t("[판단 기록] 응답에도 device_reasons 포함", _r.get("device_reasons") == ["device_owner_mismatch"], _r)
+
+mock_decision.reset_mock()
+handler({"session_id": "x2", "identity": "kim@xmcda.store", "resource_path": "auth.xmcda.store/authorize", "source": "login"})
+t("[판단 기록] 로그인 서버 자체 평가(source=login)는 저장하지 않음", not mock_decision.put_item.called)
+handler({"session_id": "x3", "identity": "kim@xmcda.store", "resource_path": "dev.xmcda.store/", "source": "B"})
+t("[판단 기록] 웹 서버 앞단(B) 평가도 저장(/stepup이 B의 재인증 요청도 구분)",
+  mock_decision.put_item.called and mock_decision.put_item.call_args.kwargs["Item"]["action"] == "allow")
+mock_decision.reset_mock()
+handler({"session_id": "x4", "resource_path": "dev.xmcda.store/"})
+t("[판단 기록] 신원이 없으면 저장하지 않음", not mock_decision.put_item.called)
+mock_decision.put_item.side_effect = Exception("ddb down")
+_r = handler({"session_id": "x5", "identity": "kim@xmcda.store", "resource_path": "dev.xmcda.store/"})
+t("[판단 기록] 저장 실패해도 판단 결과는 그대로", _r["allow"] is True and _r["action"] == "allow", _r)
+mock_decision.put_item.side_effect = None
+
+# 기기 신호가 없는 경계구간은 기존처럼 재인증
+run_case("[기기 규칙] 기기 신호 없이 해외(40)만 -> 포털(60)은 통과, 규칙 영향 없음",
+         {"session_id": "x6", "identity": "kim@xmcda.store", "resource_path": "xmcda.store/", "geo_country": "US"},
+         expect_allow=True, expect_action="allow")
+run_case("[기기 규칙] 기기 신호 없이 해외(40) -> 관리자(20) 경계구간은 기존처럼 재인증(규칙은 기기 신호에만)",
+         {"session_id": "x7", "identity": "kim@xmcda.store", "resource_path": "admin.xmcda.store/",
+          "geo_country": "US"}, expect_allow=False, expect_action="step_up_mfa_required")
+with patch.object(engine.urllib.request, "urlopen", owner_is("admin@xmcda.store")):
+    _r = handler({"session_id": "x8", "identity": "kim@xmcda.store", "resource_path": "xmcda.store/", "geo_country": "US",
+                  "device_context": True, "device_id": DEV_ID, "device_posture": FW_OK})
+t("[기기 규칙] 경계구간을 넘는 차단(105)은 action=block 그대로, 기기 사유는 같이 전달(화면에 기기 안내)",
+  _r["action"] == "block" and _r["device_reasons"] == ["device_owner_mismatch"], _r)
+engine.DEVICE_SIGNAL_MODE = "report"
+_r = handler({"session_id": "x9", "identity": "kim@xmcda.store", "resource_path": "dev.xmcda.store/", "device_context": True})
+t("[기기 규칙] report 모드에서는 기기 차단 규칙도 적용 안 됨(점수 0, 통과)",
+  _r["allow"] is True and _r["device_reasons"] == [], _r)
+engine.DEVICE_SIGNAL_MODE = "enforce"
+
+# 조회(decision_lookup)
+now_ = int(time.time())
+mock_decision.reset_mock()
+mock_decision.get_item.return_value = {"Item": {"identity": "kim@xmcda.store", "resource_host": "dev.xmcda.store",
+                                                "action": "block_device", "device_reasons": ["device_unmanaged", "evil"],
+                                                "expires_at": now_ + 300}}
+_r = handler({"decision_lookup": True, "identity": "KIM@xmcda.store", "resource_host": "Dev.Xmcda.Store"})
+t("[판단 조회] 저장된 판단을 돌려줌(키는 소문자 신원+호스트, 모르는 사유 이름은 버림)",
+  _r == {"found": True, "action": "block_device", "device_reasons": ["device_unmanaged"]}
+  and mock_decision.get_item.call_args.kwargs["Key"] == {"identity": "kim@xmcda.store", "resource_host": "dev.xmcda.store"}, _r)
+t("[판단 조회] 점수 계산/판정 로그 없음", not mock_decision.put_item.called)
+mock_decision.get_item.return_value = {"Item": {"action": "block", "expires_at": now_ - 1}}
+t("[판단 조회] 만료된 기록 -> found=False", handler({"decision_lookup": True, "identity": "k@x", "resource_host": "dev.xmcda.store"}) == {"found": False})
+mock_decision.get_item.return_value = {}
+t("[판단 조회] 기록 없음 -> found=False", handler({"decision_lookup": True, "identity": "k@x", "resource_host": "dev.xmcda.store"}) == {"found": False})
+for bad in ({"identity": "", "resource_host": "dev.xmcda.store"}, {"identity": "k@x"}, {"identity": ["x"], "resource_host": "d"}):
+    t(f"[판단 조회] 잘못된 입력 {bad} -> found=False", handler({"decision_lookup": True, **bad}) == {"found": False})
+mock_decision.get_item.side_effect = Exception("ddb down")
+t("[판단 조회] 조회 실패 -> found=False", handler({"decision_lookup": True, "identity": "k@x", "resource_host": "dev.xmcda.store"}) == {"found": False})
+mock_decision.get_item.side_effect = None
+_r = engine.lambda_handler({"headers": {"x-evaluate-secret": "wrong"}, "body": json.dumps({"decision_lookup": True, "identity": "k@x", "resource_host": "d"})}, None)
+t("[판단 조회] 공유 비밀키가 틀리면 401(조회도 같은 인증)", _r["statusCode"] == 401, _r)
 engine.CF_ACCOUNT_ID, engine.CF_DEVICE_API_TOKEN = "", ""

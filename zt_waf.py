@@ -149,6 +149,7 @@ def _follow(path, sleep=time.sleep, stop=lambda: False):
                 buf += chunk
                 *lines, buf = buf.split(b"\n")
                 for raw in lines:
+                    raw = raw.rstrip(b"\r")      # CRLF 줄 끝(Windows에서 쓴 파일 등)도 같은 줄로 본다
                     if raw.strip():
                         yield raw.decode("utf-8", errors="replace")
                 continue

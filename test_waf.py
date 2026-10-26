@@ -125,10 +125,14 @@ with open(logp, "a") as f:
     time.sleep(0.1)
     f.write("tial\n")
 time.sleep(0.2)
-os.rename(logp, logp + ".1")                     # logrotate: 이름 바꾸고 새 파일
-with open(logp, "w") as f:
-    f.write("after-rotate\n")
-time.sleep(0.3)
+# logrotate(이름 바꾸고 새 파일)는 리눅스 서버 동작이다. Windows는 열려 있는 파일의 이름을 바꿀 수 없어
+# (WinError 32) 이 단계만 리눅스에서 검사한다(실제 서버는 Ubuntu).
+ROTATE_TESTABLE = os.name != "nt"
+if ROTATE_TESTABLE:
+    os.rename(logp, logp + ".1")
+    with open(logp, "w") as f:
+        f.write("after-rotate\n")
+    time.sleep(0.3)
 with open(logp, "w") as f:                       # 잘림(copytruncate 같은 경우)
     f.write("x\n")
 time.sleep(0.3)
@@ -136,7 +140,10 @@ stop.set()
 th.join(1)
 ok("시작 전 기록은 다시 처리하지 않고 새 줄만 읽음", "OLD LINE BEFORE START" not in got and got[:2] == ["line1", "line2-partial"], got)
 ok("덜 써진 줄은 끝까지 써진 뒤 한 줄로 읽음", "line2-par" not in got and "line2-partial" in got, got)
-ok("로그 교체(rotate) 뒤 새 파일을 처음부터 읽음", "after-rotate" in got, got)
+if ROTATE_TESTABLE:
+    ok("로그 교체(rotate) 뒤 새 파일을 처음부터 읽음", "after-rotate" in got, got)
+else:
+    print("[SKIP] 로그 교체(rotate) 검사는 리눅스에서만(Windows는 열린 파일 이름 변경 불가) - 서버(Ubuntu)에서는 동작")
 ok("로그가 잘리면(truncate) 다시 처음부터 읽음", "x" in got, got)
 
 # ---------- 5. 시작 ----------

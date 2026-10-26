@@ -4,6 +4,8 @@
 #  왜: Access는 세션을 새로 줄 때만 기기 정보를 넘긴다(get-identity도 로그인 시점 값 - 실측 확인).
 #      세션 중 상태를 실시간으로 받는 Logpush는 Enterprise 기능이라, 엔진이 1분마다 Cloudflare 기기 상태 API
 #      (DEX Fleet Status, 실측 약 2분 단위 갱신)를 조회하고, 정상 -> 나쁨으로 바뀐 기기 사용자의 Access 세션을 끊는다.
+#  순찰 대상: "지금 우리 앱을 쓰고 있는 기기"만. 정문 판단(판단 함수) 때 기기+사용자를 30분 유효로 기록하고,
+#      순찰은 그 기록만 본다(쓰지 않는 기기는 보지 않음, 끊는 대상도 실제로 그 기기로 들어온 사람).
 #      다시 들어오면 Access -> External Evaluation -> 엔진이 최신 상태로 판단한다(판단은 엔진 한 곳).
 #  왜 별도 함수인가: 세션 끊기 토큰(쓰기 권한)을 인터넷에 열린 판단 함수(API Gateway)에 두지 않기 위해서다.
 #      코드는 같은 risk_score_engine.py(판단 규칙 한 곳)이고 진입점만 다르다(device_sweep_handler).
@@ -11,14 +13,20 @@
 #      토큰을 만들어 terraform.tfvars의 cloudflare_access_revoke_token에 넣는다(비워 두면 끊기만 건너뜀).
 # ==========================================
 
-# 기기별 최신 순찰 결과(정상/나쁨, 사유, 끊었는지). 하루 지나면 TTL로 정리.
+# (기기, 사용자)별: 사용 중 유효시간(active_until) + 최신 순찰 결과(정상/나쁨, 사유, 끊었는지). 사용이 끝나고 하루 뒤 TTL로 정리.
 resource "aws_dynamodb_table" "device_state" {
   name         = "device_state"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "device_id"
+  range_key    = "identity"
 
   attribute {
     name = "device_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "identity"
     type = "S"
   }
 
@@ -32,22 +40,22 @@ resource "aws_dynamodb_table" "device_state" {
   }
 }
 
-# 판단 함수(risk-score-engine)는 순찰 결과를 읽기만 한다.
+# 판단 함수(risk-score-engine): 사용 중 기록(UpdateItem, active_until만) + 기기별 순찰 결과 조회(Query)
 resource "aws_iam_role_policy" "lambda_device_state_read" {
-  name = "zt-lambda-device-state-read"
+  name = "zt-lambda-device-state"
   role = aws_iam_role.lambda_role.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Sid      = "ReadDeviceState"
+      Sid      = "MarkActiveAndReadSweep"
       Effect   = "Allow"
-      Action   = ["dynamodb:GetItem"]
+      Action   = ["dynamodb:UpdateItem", "dynamodb:Query"]
       Resource = [aws_dynamodb_table.device_state.arn]
     }]
   })
 }
 
-# 순찰 함수 전용 역할: 순찰 결과 읽기/쓰기 + 판정 로그 쓰기 + 실행 로그만
+# 순찰 함수 전용 역할: 사용 중 기록 읽기(Scan) + 순찰 결과 쓰기(UpdateItem) + 판정 로그 쓰기 + 실행 로그만
 resource "aws_iam_role" "device_sweep_role" {
   name_prefix = "zt-device-sweep-"
   assume_role_policy = jsonencode({
@@ -72,9 +80,9 @@ resource "aws_iam_role_policy" "device_sweep_dynamodb" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "DeviceStateReadWrite"
+        Sid      = "DeviceStateScanUpdate"
         Effect   = "Allow"
-        Action   = ["dynamodb:GetItem", "dynamodb:PutItem"]
+        Action   = ["dynamodb:Scan", "dynamodb:UpdateItem"]
         Resource = [aws_dynamodb_table.device_state.arn]
       },
       {

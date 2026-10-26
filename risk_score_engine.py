@@ -181,6 +181,8 @@ def derive_device_signals(body):
             detected.append("device_posture_failed")
         # 기기 순찰(device_sweep)이 본 최신 상태도 같이 본다. Access가 넘기는 검사 결과는 5분 주기라,
         # 순찰이 세션을 끊은 직후 다시 들어오면 아직 "통과"로 남아 있을 수 있다. 둘 중 하나라도 나쁘면 나쁜 것.
+        # 순찰 대상 등록: 이 기기로 이 사람이 지금 우리 앱을 쓰고 있다(30분 유효, 정문 판단 때마다 갱신)
+        mark_device_active(str(device_id), body.get("identity"), int(time.time()))
         swept = sweep_signal_for(str(device_id))
         if swept and swept not in detected:
             detected.append(swept)
@@ -243,18 +245,21 @@ def lookup_decision(identity, host):
 #   왜: Access는 세션을 새로 줄 때만 기기 정보를 넘기고(get-identity도 로그인 시점 값, 실측 확인),
 #       세션 중 상태를 실시간으로 받는 Logpush는 Enterprise 기능이다. 그래서 엔진이 1분마다 Cloudflare의
 #       기기 상태 API(DEX Fleet Status: status, firewallEnabled, 실측 약 2분 단위 갱신)를 조회한다.
-#   어떻게: 정상 -> 나쁨(방화벽 꺼짐 / WARP 연결 끊김 / 상태 정보 없음)으로 "바뀐" 기기를 찾으면 그 사용자의
-#       Access 세션을 끊는다(revoke_user). 사용자가 다시 들어오면 Access -> External Evaluation -> 이 엔진이
+#   무엇을: "지금 우리 앱을 쓰고 있는 기기"만 본다. 정문(A) 판단 때 기기 ID와 사용자를 기록하고(mark_device_active)
+#       30분 유효시간을 붙인다. Access 세션은 15분마다 새로 받으므로 계속 쓰는 동안은 갱신되고, 안 쓰면 빠진다.
+#       쓰지 않는 기기를 감시하는 것은 기기 관리 도구(MDM)의 일이지 접근 제어의 일이 아니다.
+#   어떻게: 정상 -> 나쁨(방화벽 꺼짐 / WARP 연결 끊김 / 상태 정보 없음)으로 "바뀐" 기기를 찾으면, 그 기기로
+#       들어온 사용자의 Access 세션을 끊는다(revoke_user). 다시 들어오면 Access -> External Evaluation -> 이 엔진이
 #       최신 상태(sweep_signal_for)까지 보고 다시 판단한다. 판단은 엔진, Cloudflare는 끊기만 한다.
 #       (실무의 "상태가 바뀌면 세션을 끊고 재평가" 방식 - Microsoft CAE, OpenID CAEP와 같은 구조, 수신만 polling)
 #   끊기는 바뀐 순간 한 번만: 나쁜 상태가 계속될 때마다 끊으면 포털(통과 대상)도 못 쓰게 된다.
 #   API 오류(429/5xx/네트워크)는 "모름"으로 보고 상태를 바꾸지 않는다(장애로 전원 세션이 끊기지 않게).
 #   별도 Lambda(device-sweep)로 실행하며, 세션 끊기 토큰은 그 함수에만 있다(인터넷에 열린 판단 함수에는 없음).
+#   한계: 순찰 대상을 테이블 전체 조회(Scan)로 읽는다. 소규모 실증 기준이며, 대규모라면 인덱스(GSI)로 바꾼다.
 # ==========================================================================
-SWEEP_LOOKBACK_MINUTES = 60          # 최근 이 시간 안에 보인 기기만 순찰(오래 꺼진 기기는 쓰는 중이 아님)
+DEVICE_ACTIVE_SECONDS = 1800         # 정문 판단 후 이 시간 동안 "사용 중 기기"로 순찰(Access 세션 15분의 2배)
 SWEEP_STATE_FRESH_SECONDS = 600      # 판단 때 순찰 결과를 믿는 시간(순찰이 멈췄으면 옛 결과로 막지 않음)
-SWEEP_STATE_TTL_SECONDS = 86400
-SWEEP_MAX_PAGES = 10
+SWEEP_RECORD_TTL_SECONDS = 86400     # 사용이 끝난 뒤 기록을 지우기까지(TTL)
 CF_ACCESS_REVOKE_TOKEN = os.environ.get("CF_ACCESS_REVOKE_TOKEN", "")
 SWEEP_REASON_SIGNAL = {"firewall_off": "device_posture_failed",
                        "disconnected": "device_unmanaged", "no_data": "device_unmanaged"}
@@ -278,22 +283,32 @@ def _cf_get(path, token):
         raise CloudflareApiUnavailable(type(e).__name__)
 
 
-def list_recent_devices(now):
-    """최근 SWEEP_LOOKBACK_MINUTES 안에 보인 활성 기기: [(device_id, email)]"""
-    since = datetime.fromtimestamp(now - SWEEP_LOOKBACK_MINUTES * 60, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    devices, cursor = [], ""
-    for _ in range(SWEEP_MAX_PAGES):
-        query = f"?per_page=50&seen_after={since}" + (f"&cursor={urllib.parse.quote(cursor)}" if cursor else "")
-        data = _cf_get(f"/devices/physical-devices{query}", CF_DEVICE_API_TOKEN) or {}
-        for d in data.get("result") or []:
-            device_id = str(d.get("id") or "")
-            email = ((d.get("last_seen_user") or {}).get("email") or "").strip().lower()
-            if _DEVICE_ID_RE.match(device_id) and email and not d.get("deleted_at"):
-                devices.append((device_id, email))
-        cursor = ((data.get("result_info") or {}).get("cursor") or "")
-        if not cursor:
-            break
-    return devices
+def mark_device_active(device_id, identity, now):
+    """정문 판단 때: 이 기기로 이 사람이 들어왔음을 기록(순찰 대상). 순찰 결과 필드는 건드리지 않는다."""
+    identity = str(identity or "").strip().lower()
+    if not _DEVICE_ID_RE.match(device_id or "") or not identity or identity == "unknown":
+        return
+    try:
+        device_state_table.update_item(
+            Key={"device_id": device_id, "identity": identity},
+            UpdateExpression="SET #a = :a, #e = :e",
+            ExpressionAttributeNames={"#a": "active_until", "#e": "expires_at"},
+            ExpressionAttributeValues={":a": now + DEVICE_ACTIVE_SECONDS,
+                                       ":e": now + DEVICE_ACTIVE_SECONDS + SWEEP_RECORD_TTL_SECONDS})
+    except Exception as e:
+        print("device_state 사용 기록 실패:", str(e))
+
+
+def list_active_devices(now):
+    """사용 중인 (기기, 사용자) 기록: [item, ...]"""
+    items, kwargs = [], {"FilterExpression": "#a > :n", "ExpressionAttributeNames": {"#a": "active_until"},
+                         "ExpressionAttributeValues": {":n": now}}
+    while True:
+        resp = device_state_table.scan(**kwargs)
+        items.extend(resp.get("Items") or [])
+        if not resp.get("LastEvaluatedKey"):
+            return items
+        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
 
 def classify_fleet_status(result):
@@ -328,59 +343,64 @@ def sweep_signal_for(device_id):
     if not _DEVICE_ID_RE.match(device_id or ""):
         return None
     try:
-        item = device_state_table.get_item(Key={"device_id": device_id}).get("Item")
+        items = device_state_table.query(KeyConditionExpression="#d = :d",
+                                         ExpressionAttributeNames={"#d": "device_id"},
+                                         ExpressionAttributeValues={":d": device_id}).get("Items") or []
     except Exception as e:
         print("device_state 조회 실패:", str(e))
         return None
-    if not item or item.get("state") != "bad":
+    now = int(time.time())
+    fresh = [i for i in items if i.get("sweep_state") in ("ok", "bad") and now - int(i.get("checked_at", 0)) <= SWEEP_STATE_FRESH_SECONDS]
+    if not fresh:
         return None
-    if int(time.time()) - int(item.get("checked_at", 0)) > SWEEP_STATE_FRESH_SECONDS:
-        return None
-    return SWEEP_REASON_SIGNAL.get(item.get("reason"))
+    latest = max(fresh, key=lambda i: int(i.get("checked_at", 0)))     # 기기 상태는 사용자와 무관 - 가장 최근 결과
+    return SWEEP_REASON_SIGNAL.get(latest.get("reason")) if latest.get("sweep_state") == "bad" else None
 
 
 def device_sweep(now=None):
-    """기기 순찰 1회. 바뀐 기기 수/끊은 사용자 등을 돌려준다(로그·테스트용)."""
+    """기기 순찰 1회. 확인한 기기 수/끊은 사용자 등을 돌려준다(로그·테스트용)."""
     now = int(now or time.time())
-    summary = {"checked": 0, "bad": 0, "revoked": [], "unknown": 0, "mode": DEVICE_SIGNAL_MODE}
+    summary = {"active": 0, "checked": 0, "bad": 0, "revoked": [], "unknown": 0, "mode": DEVICE_SIGNAL_MODE}
     if DEVICE_SIGNAL_MODE == "off" or not (CF_ACCOUNT_ID and CF_DEVICE_API_TOKEN):
         return summary
     try:
-        devices = list_recent_devices(now)
-    except CloudflareApiUnavailable as e:
+        records = list_active_devices(now)
+    except Exception as e:
         print("[DEVICE_SWEEP_LIST_FAILED]", str(e))
         summary["unknown"] = -1
         return summary
-    for device_id, email in devices:
-        try:
-            data = _cf_get(f"/dex/devices/{device_id}/fleet-status/live?since_minutes=10", CF_DEVICE_API_TOKEN)
-        except CloudflareApiUnavailable as e:
-            print("[DEVICE_SWEEP_STATUS_UNKNOWN]", device_id, str(e))
+    summary["active"] = len(records)
+    status_cache = {}
+    for rec in records:
+        device_id, email = str(rec.get("device_id", "")), str(rec.get("identity", ""))
+        if not _DEVICE_ID_RE.match(device_id) or not email:
+            continue
+        if device_id not in status_cache:       # 한 기기를 여러 사람이 쓰면 상태 조회는 한 번만
+            try:
+                data = _cf_get(f"/dex/devices/{device_id}/fleet-status/live?since_minutes=10", CF_DEVICE_API_TOKEN)
+                status_cache[device_id] = classify_fleet_status((data or {}).get("result"))
+            except CloudflareApiUnavailable as e:
+                print("[DEVICE_SWEEP_STATUS_UNKNOWN]", device_id, str(e))
+                status_cache[device_id] = "unknown"
+        reason = status_cache[device_id]
+        if reason == "unknown":
             summary["unknown"] += 1
             continue
         summary["checked"] += 1
-        reason = classify_fleet_status((data or {}).get("result"))
-        try:
-            prev = device_state_table.get_item(Key={"device_id": device_id}).get("Item") or {}
-        except Exception as e:
-            print("device_state 조회 실패:", str(e))
-            continue
-        item = {"device_id": device_id, "email": email, "state": "bad" if reason else "ok", "reason": reason or "",
-                "checked_at": now, "expires_at": now + SWEEP_STATE_TTL_SECONDS,
-                # 이미 끊은 기록은 "나쁨이 이어지는 동안"만 유지한다. 정상으로 돌아오면 지워서, 다시 나빠지면 또 끊는다.
-                "revoked": bool(prev.get("revoked")) if (reason and prev.get("state") == "bad") else False}
+        # 이미 끊은 기록은 "나쁨이 이어지는 동안"만 유지한다. 정상으로 돌아오면 지워서, 다시 나빠지면 또 끊는다.
+        revoked = bool(rec.get("revoked")) if (reason and rec.get("sweep_state") == "bad") else False
         if reason:
             summary["bad"] += 1
             # 정상 -> 나쁨으로 바뀌었거나, 지난번 끊기에 실패했으면 이번에 끊는다(나쁜 동안 반복해서 끊지 않음)
-            if not item["revoked"]:
+            if not revoked:
                 if DEVICE_SIGNAL_MODE == "enforce":
-                    item["revoked"] = revoke_access_sessions(email)
-                    action = "device_session_revoked" if item["revoked"] else "device_session_revoke_failed"
+                    revoked = revoke_access_sessions(email)
+                    action = "device_session_revoked" if revoked else "device_session_revoke_failed"
+                    if revoked:
+                        summary["revoked"].append(email)
                 else:
-                    item["revoked"] = True          # report: 끊지는 않고 "끊었을 것"만 기록
+                    revoked = True          # report: 끊지는 않고 "끊었을 것"만 한 번 기록
                     action = "device_session_revoke_report_only"
-                if item["revoked"] and DEVICE_SIGNAL_MODE == "enforce":
-                    summary["revoked"].append(email)
                 try:
                     table.put_item(Item={"session_id": str(uuid.uuid4()), "timestamp": now, "risk_score": 0,
                                          "reasons": [f"device_sweep:{reason}"], "allow": False, "action": action,
@@ -390,7 +410,12 @@ def device_sweep(now=None):
                     print("DynamoDB logging failed:", str(e))
                 print(f"[DEVICE_SWEEP] identity={email} device={device_id} reason={reason} action={action}")
         try:
-            device_state_table.put_item(Item=item)
+            # 순찰 결과 필드만 갱신(정문 판단이 같은 순간 active_until을 갱신해도 덮어쓰지 않게)
+            device_state_table.update_item(
+                Key={"device_id": device_id, "identity": email},
+                UpdateExpression="SET #s = :s, #r = :r, #c = :c, #v = :v",
+                ExpressionAttributeNames={"#s": "sweep_state", "#r": "reason", "#c": "checked_at", "#v": "revoked"},
+                ExpressionAttributeValues={":s": "bad" if reason else "ok", ":r": reason or "", ":c": now, ":v": revoked})
         except Exception as e:
             print("device_state 기록 실패:", str(e))
     return summary

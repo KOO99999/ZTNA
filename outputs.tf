@@ -60,3 +60,15 @@ output "db_password" {
   sensitive   = true
   description = "AWS RDS 마스터 패스워드 (.env의 DB_PASSWORD에 그대로 사용). terraform output -raw db_password로 조회"
 }
+
+# [관제] Kibana 주소와 로그인 계정(elastic) 비밀번호. 비밀번호는 terraform output -raw kibana_elastic_password 로만 본다.
+output "kibana_url" {
+  value       = var.enable_elk ? "https://${local.kibana_host}" : "enable_elk=false (관제 서버 없음)"
+  description = "관제 콘솔 주소(Cloudflare Access 로그인 후 Kibana 로그인)"
+}
+
+output "kibana_elastic_password" {
+  value       = var.enable_elk ? random_password.elk["elastic"].result : ""
+  sensitive   = true
+  description = "Kibana 로그인 비밀번호(사용자 elastic)"
+}

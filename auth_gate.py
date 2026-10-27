@@ -16,7 +16,7 @@ from urllib.parse import unquote, urlsplit
 from flask import Flask, Response, jsonify, redirect, request
 
 from zt_jwt import JwtVerifyError, log_jwt_failure, verify_access_jwt
-from zt_risk import check_risk, resource_path_for, stepup_url
+from zt_risk import check_risk, log_event, resource_path_for, stepup_url
 
 AUTH_DOMAIN = os.environ.get("AUTH_DOMAIN", "auth.xmcda.store")
 
@@ -71,6 +71,9 @@ def auth():
 
     action = "pdp_unavailable" if result.get("error") else result.get("action", "denied")
     print(f"[ZT_DENY] action={action} identity={identity} host={host} path={path}", flush=True)
+    # 점수/사유는 여기서 남기지 않는다(판단한 엔진이 decision 이벤트로 남김 - 같은 정보를 두 곳에 두지 않음)
+    log_event("gate_deny", action=action, identity=identity, host=host, path=path,
+              client_ip=request.headers.get("CF-Connecting-IP"))
     return _deny_auth(action)
 
 

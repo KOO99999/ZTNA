@@ -190,3 +190,29 @@ variable "geo_velocity_mode" {
     error_message = "geo_velocity_mode는 enforce, report, off 중 하나여야 합니다."
   }
 }
+
+# [관제] ELK 관제 서버를 만들지(기본 false: 큰 서버라 시험/데모 날만 켬). 켜고 끄면 웹/인증/앱 서버도 다시 만들어진다(Filebeat 설치 여부).
+variable "enable_elk" {
+  type        = bool
+  default     = false
+  description = "관제 콘솔(Elasticsearch/Logstash/Kibana/ElastAlert2) 생성 여부"
+}
+
+# Elasticsearch(힙 2GB) + Logstash(1GB) + Kibana(약 1GB)가 함께 돌아 8GB가 필요하다.
+variable "elk_instance_type" {
+  type        = string
+  default     = "t3.large"
+  description = "관제 서버 인스턴스 유형"
+}
+
+# Discord 채널 웹훅 주소(채널 설정 > 연동 > 웹후크). 이 주소만 알면 누구나 채널에 글을 쓸 수 있어 비밀로 다룬다.
+variable "discord_webhook_url" {
+  type        = string
+  sensitive   = true
+  default     = ""
+  description = "ElastAlert2 알림을 보낼 Discord 웹훅 주소 (terraform.tfvars)"
+  validation {
+    condition     = var.discord_webhook_url == "" || can(regex("^https://(discord\\.com|discordapp\\.com)/api/webhooks/", var.discord_webhook_url))
+    error_message = "discord_webhook_url은 https://discord.com/api/webhooks/... 형식이어야 합니다."
+  }
+}

@@ -28,3 +28,6 @@ session_binding_mode = "report"
 maxmind_account_id  = "REPLACE_ME"
 maxmind_license_key = "REPLACE_ME"
 geo_velocity_mode   = "report"
+# [관제] ELK 관제 콘솔: 시험/데모 날만 true(t3.large, 시간당 약 $0.10). Discord 채널 웹훅 주소
+enable_elk          = false
+discord_webhook_url = "https://discord.com/api/webhooks/REPLACE_ME"

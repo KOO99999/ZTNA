@@ -4,6 +4,7 @@
 환경변수: PDP_EVALUATE_URL, EVALUATE_SHARED_SECRET
 """
 from datetime import datetime, timezone
+import json
 import os
 import threading
 import time
@@ -11,6 +12,13 @@ import uuid
 from urllib.parse import quote
 
 import requests
+
+
+def log_event(event, service="gate", **fields):
+    """관제(ELK)용 구조화 로그 한 줄 "ZT_EVENT {json}" (엔진/로그인 서버와 같은 형식). journald -> Filebeat -> Logstash."""
+    record = {"event": event, "service": service, "ts": int(time.time())}
+    record.update({k: v for k, v in fields.items() if v is not None})
+    print("ZT_EVENT " + json.dumps(record, ensure_ascii=False, default=str), flush=True)
 
 # ==========================================================================
 # B 계층: 세션 중 위험도 재확인

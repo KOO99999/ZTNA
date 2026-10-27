@@ -12,20 +12,19 @@ pip3 install flask boto3 requests pyjwt cryptography
 useradd --system --no-create-home --shell /usr/sbin/nologin ztapp || true
 mkdir -p /opt/ztapp /etc/ztapp
 
-cat << 'APP' > /opt/ztapp/portal_app.py
-${app_code}
-APP
-
-# 신원 확인(Access JWT 서명 검증) 모듈. portal_app.py가 같은 폴더에서 가져다 씀
-# (판단 서비스(web 서버의 auth_gate.py)와 같은 코드).
-cat << 'ZTJWT' > /opt/ztapp/zt_jwt.py
-${zt_jwt_code}
-ZTJWT
-
-# mTLS 공통 모듈(zt_mtls.py)
-cat << 'ZTMTLS' > /opt/ztapp/zt_mtls.py
-${zt_mtls_code}
-ZTMTLS
+# [코드 받기] 앱 코드(portal_app.py, zt_jwt.py, zt_mtls.py)는 S3(code_bucket.tf)에 있고, 이 서버 역할은 자기 코드 파일만 읽을 수 있다.
+# user_data에 코드를 넣지 않는 이유: 16KB 한도(압축 후 약 14.5KB까지 차서 화면 수정/관제 설정을 더 넣을 수 없었음).
+# 코드 버전(파일 해시) - 코드가 바뀌면 이 줄이 바뀌어 서버가 새로 만들어진다: ${app_code_version}
+for i in $(seq 1 30); do
+  if python3 -c "
+import boto3
+s3 = boto3.client('s3', region_name='${aws_region}')
+for name in ('portal_app.py', 'zt_jwt.py', 'zt_mtls.py'):
+    s3.download_file('${code_bucket}', 'app/' + name, '/opt/ztapp/' + name)
+"; then echo "app code ok after $i tries"; break; fi
+  sleep 10
+done
+test -s /opt/ztapp/portal_app.py || { echo "app code download failed"; exit 1; }
 
 # [Web->WAS mTLS] 내부 CA 인증서 + 이 서버의 인증서/개인키를 SSM에서 받는다(mtls.tf, 자기 것만 읽기 권한).
 # IAM 권한이 막 붙은 직후일 수 있어 최대 5분 재시도한다.
@@ -95,3 +94,4 @@ SERVICE
 
 systemctl daemon-reload
 systemctl enable --now portal-app
+${filebeat_setup}

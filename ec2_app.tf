@@ -26,8 +26,9 @@ resource "aws_instance" "app_server" {
   user_data_replace_on_change = true
 
   user_data_base64 = base64gzip(templatefile("${path.module}/templates/user_data_app.sh.tpl", {
-    app_code    = file("${path.module}/portal_app.py")
-    zt_jwt_code = file("${path.module}/zt_jwt.py")
+    # 앱 코드는 user_data에 넣지 않고 S3에서 받는다(code_bucket.tf, 16KB 한도). 코드가 바뀌면 해시가 바뀌어 서버가 새로 만들어진다.
+    code_bucket      = local.code_bucket_name
+    app_code_version = md5(join(",", [for k in sort(keys(local.app_code_files)) : filemd5(local.app_code_files[k])]))
 
     auth_domain   = local.auth_domain
     debug_headers = var.debug_headers_route ? "1" : "0"
@@ -38,7 +39,6 @@ resource "aws_instance" "app_server" {
     # 포털 홈 "내 업무 앱" 목록용 계정 소속 표(main.tf locals, 로그인 서버와 같은 값). 링크 표시용이며 권한이 아니다.
     account_departments = local.account_departments_env
     # [Web->WAS mTLS] 부팅 때 SSM에서 받을 인증서(mtls.tf)와, 받아 줄 클라이언트(웹 서버) 인증서 이름
-    zt_mtls_code        = file("${path.module}/zt_mtls.py")
     aws_region          = var.aws_region
     mtls_role           = "app"
     mtls_param_prefix   = local.mtls_param_prefix
@@ -55,6 +55,8 @@ resource "aws_instance" "app_server" {
       cloudflare_zero_trust_access_application.hr.aud,
       cloudflare_zero_trust_access_application.admin_console.aud,
     ])
+    # [관제] Filebeat 설치 스크립트(elk.tf, enable_elk=false면 빈 문자열)
+    filebeat_setup = local.filebeat_setup.app
   }))
 
   tags = {
@@ -62,7 +64,8 @@ resource "aws_instance" "app_server" {
   }
 
   # 부팅 스크립트가 SSM에서 인증서를 읽으므로, 파라미터와 읽기 권한이 먼저 만들어져 있어야 한다.
-  depends_on = [aws_ssm_parameter.mtls_key, aws_ssm_parameter.mtls_cert, aws_ssm_parameter.mtls_ca_cert, aws_iam_role_policy.mtls_read]
+  depends_on = [aws_ssm_parameter.mtls_key, aws_ssm_parameter.mtls_cert, aws_ssm_parameter.mtls_ca_cert, aws_iam_role_policy.mtls_read,
+  aws_s3_object.app_code, aws_iam_role_policy.app_code_read, aws_ssm_parameter.elk_cert, aws_ssm_parameter.elk_key, aws_iam_role_policy.elk_beats_read]
 
   lifecycle {
     create_before_destroy = true

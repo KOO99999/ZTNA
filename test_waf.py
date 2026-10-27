@@ -207,7 +207,7 @@ ok("코드 받기 실패하면 부팅 중단, 코드 버전(해시)이 user_data
 cb = read("code_bucket.tf")
 ok("S3: 웹 서버 역할은 자기 코드(web/) GetObject만", '"web/zt_waf.py"    = "${path.module}/zt_waf.py"' in cb
    and 'resource "aws_iam_role_policy" "web_code_read"' in cb and "role = aws_iam_role.ec2_role.id" in cb)
-ok("웹 서버는 코드 파일과 읽기 권한이 생긴 뒤 생성", "aws_s3_object.web_code, aws_iam_role_policy.web_code_read]" in read("ec2_web.tf"))
+ok("웹 서버는 코드 파일과 읽기 권한이 생긴 뒤 생성", "aws_s3_object.web_code, aws_iam_role_policy.web_code_read," in read("ec2_web.tf"))
 ok("Ubuntu 24.04(PEP 668): 판단 서비스는 전용 가상환경으로 실행",
    "python3 -m venv /opt/ztgate/venv" in tpl and "ExecStart=/opt/ztgate/venv/bin/python -m gunicorn" in tpl
    and "pip3 install" not in tpl and "  if python3 -c" not in tpl)

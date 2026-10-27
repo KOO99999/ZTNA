@@ -123,6 +123,9 @@ def _release(actor, identity, signal):
         audit_ok = False
         print("해제 기록(risk_score_log) 실패:", str(e))
     print(f"[RISK_RELEASE] actor={actor} identity={identity} signal={signal}")
+    # 관제(ELK)용 구조화 로그(엔진과 같은 형식)
+    print("ZT_EVENT " + json.dumps({"event": "risk_release", "service": "risk_admin", "ts": int(time.time()),
+                                    "actor": actor, "identity": identity, "signal": signal}, ensure_ascii=False), flush=True)
     return {"ok": True, "audit": audit_ok}
 
 

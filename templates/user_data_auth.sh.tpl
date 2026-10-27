@@ -132,3 +132,4 @@ SERVICE
 
 systemctl daemon-reload
 systemctl enable --now auth-app
+${filebeat_setup}

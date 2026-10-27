@@ -20,6 +20,16 @@ from urllib.parse import urlparse
 
 from zt_mtls import build_server_context, client_allowed, client_cert_cn, mtls_settings
 
+
+def log_event(event, **fields):
+    """관제(ELK)용 구조화 로그 한 줄 "ZT_EVENT {json}" (엔진/웹 서버와 같은 형식). journald -> Filebeat -> Logstash.
+    접속 IP는 요청 중일 때만 Cloudflare가 넣어 준 실제 접속 IP(CF-Connecting-IP)를 붙인다."""
+    record = {"event": event, "service": "auth", "ts": int(time.time())}
+    if has_request_context() and "client_ip" not in fields:
+        record["client_ip"] = request.headers.get('CF-Connecting-IP')
+    record.update({k: v for k, v in fields.items() if v is not None})
+    print("ZT_EVENT " + json.dumps(record, ensure_ascii=False, default=str), flush=True)
+
 app = Flask(__name__)
 
 # [Web->WAS mTLS] 웹 서버(nginx)의 클라이언트 인증서로 들어온 요청만 받는다(zt_mtls.py). 연결 단계에서 내부 CA
@@ -31,6 +41,7 @@ MTLS = mtls_settings()
 def mtls_client_gate():
     if MTLS and not client_allowed(request.environ, MTLS[3]):
         print(f"[MTLS_CLIENT_REJECTED] cn={client_cert_cn(request.environ)!r} remote={request.remote_addr}", flush=True)
+        log_event("mtls_client_rejected", cn=client_cert_cn(request.environ), remote=request.remote_addr, client_ip=None)
         return "forbidden", 403
     return None
 
@@ -415,12 +426,15 @@ def finalize_login(email, client_id, redirect_uri, state, response_type, scope, 
 
     if not risk_result.get("allow", False):
         print(f"[LOGIN_BLOCKED] identity={email} action={risk_result.get('action')}", flush=True)
+        log_event("login_blocked", identity=email, action=risk_result.get('action'), score=risk_result.get('score'),
+                  reasons=risk_result.get('reasons'))
         return render_credentials_form(
             client_id, redirect_uri, state, response_type, scope,
             error=f"보안 정책에 의해 로그인이 차단되었습니다 ({risk_result.get('action')})."
         )
 
     print(f"[LOGIN_ALLOWED] identity={email} totp_ok={totp_ok} (SSO 재사용이면 totp 재입력 없이도 위험판단은 여기서 매번 실행됨)", flush=True)
+    log_event("login_allowed", identity=email, totp_ok=totp_ok, score=risk_result.get('score'))
 
     auth_code = secrets.token_urlsafe(32)
     AUTH_CODES[auth_code] = {"email": email, "expires_at": time.time() + 60}
@@ -597,6 +611,8 @@ def authorize():
     if not credentials_ok:
         db.session.add(LoginFailure(email=email, ip_address=client_ip))
         db.session.commit()
+        # 계정이 있는지 여부는 남기지 않는다(로그를 보는 사람에게도 계정 존재 여부를 알려 주지 않음)
+        log_event("login_failed", identity=email, stage="password")
         return render_credentials_form(
             client_id, redirect_uri, state, response_type, scope,
             error="이메일 또는 비밀번호가 올바르지 않습니다."
@@ -610,6 +626,7 @@ def authorize():
     # SecureAuth 등). 그래서 비밀번호가 맞았어도 brute_force면 TOTP 화면 자체를
     # 안 보여주고 여기서 바로 막는다.
     if check_brute_force(email):
+        log_event("login_locked", identity=email, stage="login", window_min=BRUTE_FORCE_WINDOW_MINUTES, threshold=BRUTE_FORCE_THRESHOLD)
         return render_credentials_form(
             client_id, redirect_uri, state, response_type, scope,
             error=f"로그인 시도가 너무 많습니다. {BRUTE_FORCE_LOCKOUT_MINUTES}분 후 다시 시도해주세요."
@@ -621,6 +638,7 @@ def authorize():
     pwned = (pwned_count(password) or 0) > 0
     if pwned:
         print(f"[PWNED_DETECTED] identity={email}", flush=True)
+        log_event("pwned_password_detected", identity=email)
 
     if not account.totp_enabled and not pwned:
         return finalize_login(email, client_id, redirect_uri, state, response_type, scope, totp_ok=True)
@@ -718,6 +736,7 @@ def authorize_change_password():
     PENDING_LOGINS.pop(challenge_id, None)
     clear_sso_sessions_for(entry["email"])
     print(f"[PASSWORD_CHANGED] identity={entry['email']} reason=pwned", flush=True)
+    log_event("password_changed", identity=entry['email'], reason="pwned")
     # [재로그인] 변경 직후 자동 로그인하지 않고 새 비밀번호로 다시 로그인하게 한다(OWASP Forgot Password
     # Cheat Sheet: 새 비밀번호 설정 뒤 일반 로그인 절차를 거치게 함). 기존 SSO 세션도 위에서 모두 끊었다.
     return render_credentials_form(
@@ -975,11 +994,14 @@ def _blocked_response(email, return_url):
     if decision.get("found") and decision.get("action") == "session_reauth_required":
         # 출입증이 로그인한 나라와 다른 곳에서 쓰이는 중: TOTP가 아니라 처음부터 다시 로그인해야 풀린다
         print(f"[STEPUP_BLOCKED] identity={email} action=session_reauth_required resource={_resource_key(return_url)}", flush=True)
+        log_event("stepup_blocked", identity=email, action="session_reauth_required", resource=_resource_key(return_url))
         return render_blocked(email, return_url, [], reauth=True), 403
     if decision.get("found") and decision.get("action") in BLOCK_ACTIONS:
         reasons = [r for r in (decision.get("device_reasons") or []) if r in DEVICE_HELP]
         print(f"[STEPUP_BLOCKED] identity={email} action={decision.get('action')} device={','.join(reasons) or '-'} "
               f"resource={_resource_key(return_url)}", flush=True)
+        log_event("stepup_blocked", identity=email, action=decision.get('action'), device_reasons=reasons,
+                  resource=_resource_key(return_url))
         return render_blocked(email, return_url, reasons), 403
     return None
 
@@ -989,6 +1011,7 @@ def _no_permission_response(account, email, return_url):
     department = account.department if account else None
     if check_department_access(department, return_url) is False:
         print(f"[STEPUP_NO_PERMISSION] identity={email} department={department or '-'} resource={_resource_key(return_url)}", flush=True)
+        log_event("stepup_no_permission", identity=email, department=department, resource=_resource_key(return_url))
         return render_no_permission(email, department, return_url), 403
     return None
 
@@ -1034,6 +1057,7 @@ def stepup():
     if blocked:
         return blocked
     if check_brute_force(email):
+        log_event("login_locked", identity=email, stage="stepup", window_min=BRUTE_FORCE_WINDOW_MINUTES, threshold=BRUTE_FORCE_THRESHOLD)
         return render_stepup_form(return_url, error=f"시도 횟수를 초과했습니다. {BRUTE_FORCE_LOCKOUT_MINUTES}분 후 다시 시도해주세요.", locked=True)
     return render_stepup_form(return_url)
 
@@ -1058,6 +1082,7 @@ def stepup_verify():
         return blocked
 
     if check_brute_force(email):
+        log_event("login_locked", identity=email, stage="stepup", window_min=BRUTE_FORCE_WINDOW_MINUTES, threshold=BRUTE_FORCE_THRESHOLD)
         return render_stepup_form(return_url, error=f"시도 횟수를 초과했습니다. {BRUTE_FORCE_LOCKOUT_MINUTES}분 후 다시 시도해주세요.", locked=True)
 
     totp_input = request.form.get('totp_code', '').strip()
@@ -1079,11 +1104,13 @@ def stepup_verify():
         # check_brute_force(5분에 5회) 잠금을 새 코드 없이 그대로 재사용한다.
         db.session.add(LoginFailure(email=email, ip_address=client_ip))
         db.session.commit()
+        log_event("login_failed", identity=email, stage="stepup_totp")
         return render_stepup_form(return_url, error="TOTP 코드(또는 백업코드)가 올바르지 않습니다.")
 
     record_result = evaluate_login_risk(email, {"mfa_reauth": True})
     if not record_result.get("recorded"):
         print(f"[STEPUP_RECORD_FAILED] identity={email} - mfa_verified 기록 실패, Lambda/DynamoDB 확인 필요", flush=True)
+    log_event("stepup_verified", identity=email, resource=_resource_key(return_url), recorded=bool(record_result.get("recorded")))
 
     return render_stepup_success(return_url)
 

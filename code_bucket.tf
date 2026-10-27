@@ -68,6 +68,12 @@ locals {
     "auth/auth_app.py" = "${path.module}/auth_app.py"
     "auth/zt_mtls.py"  = "${path.module}/zt_mtls.py"
   }
+  # 앱 서버(포털/부서/관리자 화면)가 내려받는 코드 파일
+  app_code_files = {
+    "app/portal_app.py" = "${path.module}/portal_app.py"
+    "app/zt_jwt.py"     = "${path.module}/zt_jwt.py"
+    "app/zt_mtls.py"    = "${path.module}/zt_mtls.py"
+  }
   # 웹 서버(판단 서비스)가 내려받는 코드 파일
   web_code_files = {
     "web/auth_gate.py" = "${path.module}/auth_gate.py"
@@ -98,6 +104,31 @@ resource "aws_iam_role_policy" "auth_code_read" {
       Effect   = "Allow"
       Action   = ["s3:GetObject"]
       Resource = [for o in aws_s3_object.auth_code : "${aws_s3_bucket.app_code.arn}/${o.key}"]
+    }]
+  })
+}
+
+resource "aws_s3_object" "app_code" {
+  for_each = local.app_code_files
+  bucket   = aws_s3_bucket.app_code.id
+  key      = each.key
+  source   = each.value
+  etag     = filemd5(each.value)
+
+  depends_on = [aws_s3_bucket_server_side_encryption_configuration.app_code]
+}
+
+# 앱 서버 역할: 자기 코드 파일만 읽기
+resource "aws_iam_role_policy" "app_code_read" {
+  name = "zt-app-code-read"
+  role = aws_iam_role.app_role.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid      = "ReadOwnCode"
+      Effect   = "Allow"
+      Action   = ["s3:GetObject"]
+      Resource = [for o in aws_s3_object.app_code : "${aws_s3_bucket.app_code.arn}/${o.key}"]
     }]
   })
 }

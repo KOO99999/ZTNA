@@ -110,7 +110,7 @@ ok("S3 버킷: 공개 접근 4종 모두 차단", all(re.search(rf"{k}\s*=\s*tru
 ok("S3 버킷: 기본 암호화 + HTTPS 아닌 요청 거부", 'sse_algorithm = "AES256"' in cb and '"aws:SecureTransport" = "false"' in cb)
 ok("인증 서버 역할: 자기 코드 파일 GetObject만(목록/쓰기 없음)",
    'Action   = ["s3:GetObject"]' in cb and "s3:PutObject" not in cb and "s3:ListBucket" not in cb)
-ok("인증 서버는 코드 파일과 읽기 권한이 생긴 뒤 생성", "aws_s3_object.auth_code, aws_iam_role_policy.auth_code_read]" in ec2)
+ok("인증 서버는 코드 파일과 읽기 권한이 생긴 뒤 생성", "aws_s3_object.auth_code, aws_iam_role_policy.auth_code_read," in ec2)
 ok("user_data에 코드 원문을 넣지 않음", 'file("${path.module}/auth_app.py")' not in ec2 and 'file("${path.module}/zt_mtls.py")' not in ec2)
 ok("앱 계정 접속 위치 = 앱 서브넷(IP/넷마스크)", "cidrnetmask(aws_subnet.app_subnet.cidr_block)" in ec2)
 

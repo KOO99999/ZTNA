@@ -363,3 +363,4 @@ chmod 600 /etc/cloudflared/config.yml
 
 cloudflared service install ${tunnel_token}
 systemctl restart cloudflared
+${filebeat_setup}

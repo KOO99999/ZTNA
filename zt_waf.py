@@ -120,6 +120,8 @@ def report(event):
     scores = ",".join(f"{k}={v}" for k, v in sorted(event["scores"].items()))
     print(f"[WAF_REPORTED] identity={event['identity']} signals={','.join(event['signals'])} "
           f"scores={scores} host={event['host']} path={event['path']} ok={ok}", flush=True)
+    zt_risk.log_event("waf_reported", service="waf", identity=event["identity"], signals=event["signals"],
+                      scores=event["scores"], host=event["host"], path=event["path"], reported=ok)
     if not ok:
         with _lock:   # 실패했으면 다음 공격 때 바로 다시 알리도록 기록을 지운다
             _last_reported.pop((event["identity"], tuple(event["signals"])), None)

@@ -59,6 +59,8 @@ resource "aws_instance" "auth_server" {
     mtls_param_prefix   = local.mtls_param_prefix
     mtls_allowed_client = local.mtls_names.web
     aws_region      = var.aws_region
+    # [관제] Filebeat 설치 스크립트(elk.tf, enable_elk=false면 빈 문자열)
+    filebeat_setup = local.filebeat_setup.auth
   }))
 
   tags = {
@@ -68,7 +70,7 @@ resource "aws_instance" "auth_server" {
   # 부팅 스크립트가 SSM에서 인증서를 읽으므로, 파라미터와 읽기 권한이 먼저 만들어져 있어야 한다.
   # 코드는 S3에서 받으므로 코드 파일과 읽기 권한도 먼저 있어야 한다.
   depends_on = [aws_ssm_parameter.mtls_key, aws_ssm_parameter.mtls_cert, aws_ssm_parameter.mtls_ca_cert, aws_iam_role_policy.mtls_read,
-  aws_s3_object.auth_code, aws_iam_role_policy.auth_code_read]
+  aws_s3_object.auth_code, aws_iam_role_policy.auth_code_read, aws_ssm_parameter.elk_cert, aws_ssm_parameter.elk_key, aws_iam_role_policy.elk_beats_read]
 
   lifecycle {
     create_before_destroy = true

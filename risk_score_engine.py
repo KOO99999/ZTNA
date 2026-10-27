@@ -23,6 +23,15 @@ user_risk_table = dynamodb.Table('user_risk')   # 관리자가 풀어줄 때까�
 ip_geolocation_table = dynamodb.Table('ip_geolocation')   # MaxMind 위치 조회 결과 캐시(IP별 24시간)
 user_location_table = dynamodb.Table('user_location')     # 사용자별 마지막으로 '통과된' 접속 위치(이동 속도 비교용)
 
+
+def log_event(event, **fields):
+    """관제(ELK)용 구조화 로그 한 줄: "ZT_EVENT {json}". Lambda의 print는 CloudWatch Logs로 가고,
+    Filebeat(aws-cloudwatch 입력)가 가져가 Logstash가 JSON으로 풀어 Elasticsearch에 넣는다.
+    사람이 읽는 기존 [TAG] 로그는 그대로 두고, 기계가 읽을 줄을 따로 남긴다(키 이름이 서비스마다 같아야 대시보드/알림이 하나로 됨)."""
+    record = {"event": event, "service": "pdp", "ts": int(time.time())}
+    record.update({k: v for k, v in fields.items() if v is not None})
+    print("ZT_EVENT " + json.dumps(record, ensure_ascii=False, default=str), flush=True)
+
 # [step-up 재인증] MFA 재인증 기록의 유효 시간. 팀이 정한 값이며 표준에 정해진 수치는
 # 아님(RFC 9470/NIST 800-63B 모두 "얼마나 최근이어야 하는가"의 구체적 숫자는 구현자에게
 # 맡김). 로그인 시점 평가만 있는 지금 구조 기준으로 정한 값 - 세션 중 재평가(B 계층)가
@@ -96,13 +105,18 @@ RISK_MATRIX = {
 # [조합 규칙] 신호 두 개가 함께 걸리면 따로 볼 때보다 위험하다고 보고 가산한다.
 #   지금 배점에서는 40~45점짜리 behavioral 신호 두 개만 겹쳐도 80점 이상이라 대부분 이미 차단 구간이고,
 #   security 신호(86~94점)가 들어간 조합은 단독으로도 차단이다. 그래서 아래 규칙들은 판정(통과/재인증/차단)을 바꾸기보다
-#   점수(관제 우선순위)를 올리는 역할이다. 판정을 바꾸는 조합이 필요해지면 그때 추가한다(보고서에 명시).
-#   검토 후 넣지 않은 조합: geo_velocity + 기기 신호(이미 85점 이상 차단), anonymous_network + 기기 신호(같은 이유).
+#   점수(관제 우선순위)를 올리는 역할이다. 판정을 실제로 바꾸는 조합은 아래 interaction_night_geo_velocity 하나다.
+#   검토 후 넣지 않은 조합: geo_velocity + 기기 신호(이미 85점 이상 차단), anonymous_network + 기기 신호(같은 이유),
+#   brute_force + waf_sqli(waf_sqli 단독 94점 차단, 두 신호가 로그인 화면/앱 안이라 한 판단에 같이 잡히지 않음).
 COMBINATION_RULES = [
     (("unknown_location", "waf_sqli"), 30, "interaction_location_waf"),
     # 해외에서 남의 기기로 접속 = 계정 탈취 후 다른 장비 사용 가능성이 높은 조합
     (("unknown_location", "device_owner_mismatch"), 20, "interaction_location_device_owner"),
     (("brute_force", "threat_intel_match"), 20, "interaction_bruteforce_threatintel"),
+    # 야간 + 불가능한 이동: 근무 시간 밖에 "다른 곳에 있는 누군가"가 같은 계정을 쓰는 전형적인 계정 탈취 패턴.
+    #   따로 보면 20 + 40 = 60점(기밀 재인증, 포털 통과)이지만, 두 의심이 겹치면 우연일 가능성이 작아진다고 보고 +20 -> 80점
+    #   (기밀 차단, 포털 재인증). Microsoft Entra ID Protection도 여러 탐지가 겹치면 위험 수준을 올린다(팀 판단 수치).
+    (("night_access", "geo_velocity"), 20, "interaction_night_geo_velocity"),
 ]
 
 # [v11] 자원 민감도별 임계값(RESOURCE_THRESHOLDS)
@@ -135,6 +149,7 @@ DOMAIN_NAME = os.environ.get("DOMAIN_NAME", "xmcda.store").strip().lower()
 
 RESOURCE_TIERS = {
     f"admin.{DOMAIN_NAME}": "top_secret",
+    f"kibana.{DOMAIN_NAME}": "top_secret",   # 관제 콘솔(전 직원 로그인 기록이 모이는 곳이라 관리자 콘솔과 같은 등급)
     f"hr.{DOMAIN_NAME}": "confidential",
     f"dev.{DOMAIN_NAME}": "confidential",
     f"marketing.{DOMAIN_NAME}": "internal",
@@ -474,6 +489,7 @@ def device_sweep(now=None):
                 except Exception as e:
                     print("DynamoDB logging failed:", str(e))
                 print(f"[DEVICE_SWEEP] identity={email} device={device_id} reason={reason} action={action}")
+                log_event("device_sweep", identity=email, device_id=device_id, reason=reason, action=action)
         try:
             # 순찰 결과 필드만 갱신(정문 판단이 같은 순간 active_until을 갱신해도 덮어쓰지 않게)
             device_state_table.update_item(
@@ -952,6 +968,11 @@ def lambda_handler(event, context):
     if geo_country is not None and geo_country != HOME_COUNTRY:
         body["unknown_location"] = True
 
+    # 엔진이 직접 계산하고 모드 스위치(enforce/report/off)가 있는 신호는 호출자가 body에 넣어 보내도 버린다.
+    # (그대로 두면 report/off 모드에서도 호출자가 보낸 값이 점수에 들어가 스위치가 무력해진다)
+    for signal in DEVICE_SIGNALS + SESSION_SIGNALS + GEO_SIGNALS:
+        body.pop(signal, None)
+
     # 기기 신뢰: WARP 기기 검사 결과/기기 주인 -> 신호 (Worker가 기기 정보를 넘긴 경우에만)
     device_detected = derive_device_signals(body)
 
@@ -1123,6 +1144,11 @@ def lambda_handler(event, context):
         )
     except Exception as e:
         print("DynamoDB logging failed:", str(e))
+
+    log_event("decision", identity=body.get("identity", "unknown"), action=action, allow=allow_access, score=risk_score,
+              signals=penalized_signals, reasons=reasons, resource=resource_path or "unknown", tier=resource_tier,
+              threshold=resource_threshold, source=body.get("source", "A"),
+              client_ip=normalize_public_ip(body.get("client_ip")), country=body.get("geo_country"), session_id=session_id)
 
     return {
         "statusCode": 200,

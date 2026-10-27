@@ -1221,3 +1221,52 @@ t("[이동 배포] 테이블 2개(TTL) + 엔진 권한(GetItem/PutItem만) + 환
   and "MAXMIND_ACCOUNT_ID  = var.maxmind_account_id" in _mt and "MAXMIND_LICENSE_KEY = var.maxmind_license_key" in _mt
   and "GEO_VELOCITY_MODE   = var.geo_velocity_mode" in _mt
   and 'contains(["enforce", "report", "off"], var.geo_velocity_mode)' in _vt and _vt.count("sensitive") >= 2)
+
+# ==========================================================================
+# [조합] 야간 + 불가능한 이동 -> +20 (판정을 실제로 바꾸는 조합)  /  [관제] 판단마다 ZT_EVENT 한 줄
+# ==========================================================================
+print()
+engine.MAXMIND_ACCOUNT_ID, engine.MAXMIND_LICENSE_KEY = "123456", "mm-key"
+def combo_case(name, resource, expect_allow, expect_action, night=True, mode="enforce", last=True):
+    engine.GEO_VELOCITY_MODE = mode
+    mock_mfa_table.get_item.return_value = {}; mock_ip_geo.get_item.return_value = {}
+    mock_user_loc.get_item.return_value = last_at(SEOUL, 10) if last else {}
+    body = {"session_id": "c", "identity": "kim@xmcda.store", "source": "B", "resource_path": resource, "client_ip": "45.155.205.40"}
+    if night:
+        body["night_access"] = True
+    with patch.object(engine.urllib.request, "urlopen", maxmind(NEWYORK)):
+        r = handler(body)
+    t(name, r["allow"] is expect_allow and r["action"] == expect_action, r)
+    return r
+r = combo_case("[조합] 야간+불가능한 이동, 기밀(dev 40): 20+40+20=80 -> 차단(조합 없으면 60 재인증)", "dev.xmcda.store/", False, "block")
+t("[조합] 사유에 interaction_night_geo_velocity (+20), 점수 80", "interaction_night_geo_velocity (+20)" in r["reasons"] and r["score"] == 80, r)
+combo_case("[조합] 같은 조합, 포털(내부 60): 80 -> 재인증(조합 없으면 60 통과)", "xmcda.store/", False, "step_up_mfa_required")
+r = combo_case("[조합] 불가능한 이동만(40) -> 조합 없음, 기밀 통과", "dev.xmcda.store/", True, "allow", night=False)
+t("[조합] 한 신호만이면 가산 없음", not any("interaction_" in x for x in r["reasons"]), r["reasons"])
+combo_case("[조합] report 모드: geo_velocity가 점수에 안 들어가 조합도 없음(야간 20만, 기밀 통과)", "dev.xmcda.store/", True, "allow", mode="report")
+engine.GEO_VELOCITY_MODE = "report"
+mock_user_loc.get_item.return_value = {}
+r = handler({"session_id": "c", "identity": "kim@xmcda.store", "resource_path": "dev.xmcda.store/", "night_access": True,
+             "geo_velocity": True, "session_country_change": True, "device_unmanaged": True})
+t("[스위치] 호출자가 엔진 계산 신호(geo/세션/기기)를 직접 보내도 무시(모드 스위치가 항상 이김)",
+  r["allow"] is True and r["score"] == 20, r)
+engine.GEO_VELOCITY_MODE = "enforce"
+t("[관제] Kibana(관제 콘솔)는 최고기밀 등급", engine.get_resource_tier("kibana.xmcda.store/app/discover") == "top_secret")
+
+import io as _io3, contextlib as _cl3
+_buf = _io3.StringIO()
+mock_user_loc.get_item.return_value = last_at(SEOUL, 10); mock_ip_geo.get_item.return_value = {}
+with _cl3.redirect_stdout(_buf), patch.object(engine.urllib.request, "urlopen", maxmind(NEWYORK)):
+    handler({"session_id": "ev1", "identity": "kim@xmcda.store", "resource_path": "dev.xmcda.store/", "source": "B",
+             "night_access": True, "client_ip": "45.155.205.40", "geo_country": "KR"})
+_ev = [json.loads(l[len("ZT_EVENT "):]) for l in _buf.getvalue().splitlines() if l.startswith("ZT_EVENT ")]
+_d = _ev[-1] if _ev else {}
+t("[관제] 판단마다 ZT_EVENT decision 한 줄(JSON): 사람/행동/점수/기여 신호/자원/등급/출처/IP",
+  _d.get("event") == "decision" and _d.get("service") == "pdp" and _d.get("identity") == "kim@xmcda.store"
+  and _d.get("action") == "block" and _d.get("score") == 80 and _d.get("allow") is False
+  and _d.get("signals") == ["night_access", "geo_velocity"] and _d.get("resource") == "dev.xmcda.store/"
+  and _d.get("tier") == "confidential" and _d.get("source") == "B" and _d.get("client_ip") == "45.155.205.40"
+  and isinstance(_d.get("ts"), int), _d)
+t("[관제] 비밀키(공유 비밀) 같은 값은 이벤트에 없음", "test-secret" not in _buf.getvalue())
+engine.MAXMIND_ACCOUNT_ID, engine.MAXMIND_LICENSE_KEY = "", ""
+mock_user_loc.get_item.return_value = {}

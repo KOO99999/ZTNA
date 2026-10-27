@@ -104,7 +104,7 @@
 │   ├── main.tf
 │   ├── ec2_web.tf
 │   ├── ec2_app.tf
-│   └── terraform.tfvars.example
+│   └── terraform.tfvars
 ├── access_worker/           # Cloudflare Worker (External Evaluation, JWT 서명)
 │   ├── src/index.js
 │   ├── wrangler.toml

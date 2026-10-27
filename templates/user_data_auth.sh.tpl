@@ -16,7 +16,7 @@ for i in $(seq 1 30); do
   if python3 -c "
 import boto3
 s3 = boto3.client('s3', region_name='${aws_region}')
-for name in ('auth_app.py', 'zt_mtls.py'):
+for name in ('auth_app.py', 'zt_mtls.py', 'zt_ui.py'):
     s3.download_file('${code_bucket}', 'auth/' + name, '/opt/ztauth/' + name)
 "; then echo "app code ok after $i tries"; break; fi
   sleep 10

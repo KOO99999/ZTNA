@@ -17,6 +17,7 @@ from flask import Flask, Response, jsonify, redirect, request
 
 from zt_jwt import JwtVerifyError, log_jwt_failure, verify_access_jwt
 from zt_risk import check_risk, log_event, resource_path_for, stepup_url
+from zt_ui import status_page
 
 AUTH_DOMAIN = os.environ.get("AUTH_DOMAIN", "auth.xmcda.store")
 
@@ -77,13 +78,12 @@ def auth():
     return _deny_auth(action)
 
 
-def _status_page(title, message, code):
-    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title></head>
-    <body style="font-family:'Segoe UI',Tahoma,sans-serif;margin:40px;background:#f4f6f9;">
-    <div style="background:white;padding:30px;border-radius:12px;max-width:520px;margin:60px auto;box-shadow:0 4px 6px rgba(0,0,0,0.1);">
-    <h2>{title}</h2><p>{message}</p>
-    <p><a href="https://{AUTH_DOMAIN}/logout">로그아웃</a></p></div></body></html>"""
-    return Response(html, code, {"Content-Type": "text/html; charset=utf-8"})
+def _status_page(title, message, code, tone="danger", badge="block"):
+    """차단 안내 화면(로그인 서버/업무 앱과 같은 디자인, zt_ui). 차단 사유(점수, 신호)는 넣지 않는다."""
+    html = status_page(title, message, f"https://{AUTH_DOMAIN}/logout", tone=tone, badge=badge,
+                       home_href=None if badge == "globe" else f"https://{AUTH_DOMAIN.replace('auth.', '', 1)}/")
+    return Response(html, code, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
+                                 "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff"})
 
 
 @app.route("/deny")
@@ -105,13 +105,14 @@ def deny():
             return jsonify({"status": "ReauthRequired", "message": "로그인한 위치와 지금 위치가 달라 다시 로그인이 필요합니다."}), 403
         return _status_page("다시 로그인이 필요합니다",
                             "로그인한 위치와 지금 접속 위치가 달라 보안을 위해 세션을 사용할 수 없습니다. "
-                            "아래 로그아웃을 누른 뒤 다시 로그인해 주세요.", 403)
+                            "로그아웃한 뒤 다시 로그인해 주세요.", 403, tone="warn", badge="globe")
 
     if action == "pdp_unavailable":
         if is_api:
             return jsonify({"status": "Error", "message": "위험 판단 서버에 연결할 수 없어 접근을 차단했습니다."}), 503
         return _status_page("일시적으로 확인할 수 없습니다",
-                            "위험 판단 서버에 연결할 수 없어 접근을 차단했습니다. 잠시 후 다시 시도해 주세요.", 503)
+                            "보안 확인 서비스에 연결할 수 없어 안전을 위해 접속을 막았습니다. 잠시 후 다시 시도해 주세요.", 503,
+                            tone="warn", badge="clock")
 
     if action == "jwt_invalid":
         if is_api:

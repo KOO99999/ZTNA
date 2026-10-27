@@ -199,7 +199,7 @@ ok("CRS: 고정 버전을 받고 커밋 해시가 다르면 부팅 중단",
    and tpl.index("exit 1", tpl.index("CRS commit mismatch")) < tpl.index("cat << 'NGINX'"))
 ok("WAF 로그 교체(logrotate) 후 nginx가 파일을 다시 열게 함", "/var/log/modsec/*.log {" in tpl and "invoke-rc.d nginx rotate" in tpl)
 ok("판단 서비스: 코드(zt_waf.py 포함)는 S3에서 받고 ZT_WAF_ENABLED/로그 경로 환경변수 설정",
-   "for name in ('auth_gate.py', 'zt_jwt.py', 'zt_risk.py', 'zt_waf.py'):" in tpl and "s3.download_file('${code_bucket}', 'web/' + name" in tpl
+   "for name in ('auth_gate.py', 'zt_jwt.py', 'zt_risk.py', 'zt_waf.py', 'zt_ui.py'):" in tpl and "s3.download_file('${code_bucket}', 'web/' + name" in tpl
    and "ZT_WAF_ENABLED=1" in tpl and "ZT_WAF_LOG=/var/log/modsec/zt_waf_app.log" in tpl)
 ok("코드 받기 실패하면 부팅 중단, 코드 버전(해시)이 user_data에 들어가 코드가 바뀌면 서버 교체",
    "test -s /opt/ztgate/auth_gate.py || {" in tpl and "${web_code_version}" in tpl

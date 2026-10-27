@@ -67,12 +67,14 @@ locals {
   auth_code_files = {
     "auth/auth_app.py" = "${path.module}/auth_app.py"
     "auth/zt_mtls.py"  = "${path.module}/zt_mtls.py"
+    "auth/zt_ui.py"    = "${path.module}/zt_ui.py"
   }
   # 앱 서버(포털/부서/관리자 화면)가 내려받는 코드 파일
   app_code_files = {
     "app/portal_app.py" = "${path.module}/portal_app.py"
     "app/zt_jwt.py"     = "${path.module}/zt_jwt.py"
     "app/zt_mtls.py"    = "${path.module}/zt_mtls.py"
+    "app/zt_ui.py"      = "${path.module}/zt_ui.py"
   }
   # 웹 서버(판단 서비스)가 내려받는 코드 파일
   web_code_files = {
@@ -80,6 +82,7 @@ locals {
     "web/zt_jwt.py"    = "${path.module}/zt_jwt.py"
     "web/zt_risk.py"   = "${path.module}/zt_risk.py"
     "web/zt_waf.py"    = "${path.module}/zt_waf.py"
+    "web/zt_ui.py"     = "${path.module}/zt_ui.py"
   }
 }
 

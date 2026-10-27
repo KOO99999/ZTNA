@@ -21,7 +21,9 @@ assert sorted(funcs) == sorted(want), f"함수를 찾지 못함: {set(want) - se
 os.environ["DOMAIN_NAME"] = "auth.xmcda.store"
 req = SimpleNamespace(args={}, referrer=None)
 import re
-ns = {"os": os, "urlparse": urlparse, "request": req, "escape": escape, "re": re}
+import zt_ui
+ns = {"os": os, "urlparse": urlparse, "request": req, "escape": escape, "re": re,
+      "esc": zt_ui.esc, "alert": zt_ui.alert, "auth_page": zt_ui.auth_page, "icon": zt_ui.icon, "link_button": zt_ui.link_button}
 exec("\n\n".join(funcs[n] for n in want), ns)
 ns["PATH_PERMISSIONS"] = ns["_parse_path_permissions"]("dev.xmcda.store=dev;marketing.xmcda.store=marketing;hr.xmcda.store=hr;admin.xmcda.store=admin")
 resolve = ns["_resolve_return_url"]
@@ -232,7 +234,7 @@ else:
            r.status_code == 403 and "totp_code" not in r.get_data(as_text=True))
         DECISION["value"] = {"found": True, "action": "block", "device_reasons": ["<script>", "device_owner_mismatch"]}
         t = stepup_get("dev1@xmcda.store").get_data(as_text=True)
-        ok("모르는 사유 이름은 표시하지 않음, 아는 기기 사유만", "<script>" not in t and "다른 사람 계정으로 등록된 기기" in t)
+        ok("모르는 사유 이름은 표시하지 않음, 아는 기기 사유만", "&lt;script&gt;" not in t and "<script>alert" not in t and "다른 사람 계정으로 등록된 기기" in t)
         DECISION["value"] = {"found": True, "action": "session_reauth_required", "device_reasons": []}
         r = stepup_get("dev1@xmcda.store"); t = r.get_data(as_text=True)
         ok("[세션] 세션 바인딩 위반 -> TOTP 없이 '다시 로그인' 안내(403)",
@@ -324,6 +326,14 @@ if HAVE_FULL:
         locked["v"] = True
         r = lc.post("/authorize/verify-totp", data={"challenge_id": cid, "totp_code": "000000"})
         ok("[잠금] 잠기면 TOTP 단계도 잠금 화면 + 진행 중 로그인 폐기", "로그인 시도가 너무 많습니다" in r.get_data(as_text=True) and cid not in aa.PENDING_LOGINS)
+
+    # [화면] 로그인 화면에 되돌려 넣는 요청 값(state 등)은 이스케이프(예전엔 그대로 넣어 반사형 XSS 가능)
+    with aa.app.app_context():
+        r = lc.get("/authorize", query_string={"state": '"><script>alert(1)</script>', "client_id": "<b>x</b>"})
+        t = r.get_data(as_text=True)
+        ok("[화면] 로그인 화면 숨은 값 이스케이프(반사형 XSS 방지)", "<script>alert(1)" not in t and "&lt;script&gt;alert(1)" in t and "<b>x</b>" not in t)
+        ok("[화면] 로그인 서버 보안 헤더(클릭재킹 방지, 저장 안 함)", r.headers.get("X-Frame-Options") == "DENY"
+           and "frame-ancestors 'none'" in r.headers.get("Content-Security-Policy", "") and r.headers.get("Cache-Control") == "no-store")
 
 print(f"\n{'ALL PASS' if not fails else str(fails)+' FAILED'}")
 sys.exit(1 if fails else 0)

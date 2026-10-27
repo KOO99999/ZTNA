@@ -175,7 +175,7 @@ pa.table.scan.return_value = {"Items": [{"session_id": f"s{i}", "timestamp": i, 
 pa.table.scan.reset_mock()
 r0 = admin_get()
 t0 = r0.get_data(as_text=True)
-check("처음 접속: 로그는 안 보이고 빨간 버튼만 있음, DynamoDB 조회 안 함", r0.status_code == 200 and "DynamoDB 감사 로그 조회" in t0 and 'href="/?logs=1"' in t0
+check("처음 접속: 로그는 안 보이고 빨간 버튼만 있음, DynamoDB 조회 안 함", r0.status_code == 200 and "판정 로그 불러오기" in t0 and 'href="/?logs=1"' in t0
       and "<th>시각(KST)</th>" not in t0 and pa.table.scan.call_count == 0, pa.table.scan.call_count)
 r = admin_get("/?logs=1")
 t = r.get_data(as_text=True)

@@ -25,7 +25,7 @@ for i in $(seq 1 30); do
   if /opt/ztgate/venv/bin/python -c "
 import boto3
 s3 = boto3.client('s3', region_name='${aws_region}')
-for name in ('auth_gate.py', 'zt_jwt.py', 'zt_risk.py', 'zt_waf.py'):
+for name in ('auth_gate.py', 'zt_jwt.py', 'zt_risk.py', 'zt_waf.py', 'zt_ui.py'):
     s3.download_file('${code_bucket}', 'web/' + name, '/opt/ztgate/' + name)
 "; then echo "gate code ok after $i tries"; break; fi
   sleep 10

@@ -19,6 +19,7 @@ from html import escape
 from urllib.parse import urlparse
 
 from zt_mtls import build_server_context, client_allowed, client_cert_cn, mtls_settings
+from zt_ui import alert, auth_page, esc, icon, link_button
 
 
 def log_event(event, **fields):
@@ -430,7 +431,8 @@ def finalize_login(email, client_id, redirect_uri, state, response_type, scope, 
                   reasons=risk_result.get('reasons'))
         return render_credentials_form(
             client_id, redirect_uri, state, response_type, scope,
-            error=f"보안 정책에 의해 로그인이 차단되었습니다 ({risk_result.get('action')})."
+            # 내부 판단 이름(block_until_mfa 등)은 화면에 쓰지 않는다(공격자에게 판단 기준을 알려 주지 않음, 사용자에게는 의미 없음)
+            error="보안 정책에 따라 지금은 로그인할 수 없습니다. 계속되면 보안 관리자에게 문의하세요."
         )
 
     print(f"[LOGIN_ALLOWED] identity={email} totp_ok={totp_ok} (SSO 재사용이면 totp 재입력 없이도 위험판단은 여기서 매번 실행됨)", flush=True)
@@ -452,116 +454,68 @@ def finalize_login(email, client_id, redirect_uri, state, response_type, scope, 
 
 
 def render_credentials_form(client_id, redirect_uri, state, response_type, scope, error=None, notice=None):
-    error_html = f'<p style="color:#dc3545;"><strong>{error}</strong></p>' if error else ""
-    if notice:
-        error_html += f'<p style="color:#198754;"><strong>{notice}</strong></p>'
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>ZT Login Server</title>
-        <style>
-            body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
-            .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 400px; margin: 60px auto; }}
-            input {{ width: 100%; padding: 10px; margin: 6px 0 14px 0; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }}
-            button {{ width: 100%; background: #007bff; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-weight: bold; }}
-            label {{ font-size: 0.9em; color: #555; }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h2>ZT Login</h2>
-            {error_html}
-            <form method="POST" action="/authorize">
-                <input type="hidden" name="client_id" value="{client_id}">
-                <input type="hidden" name="redirect_uri" value="{redirect_uri}">
-                <input type="hidden" name="state" value="{state}">
-                <input type="hidden" name="response_type" value="{response_type}">
-                <input type="hidden" name="scope" value="{scope}">
-
-                <label>이메일</label>
-                <input type="email" name="email" required autofocus>
-
-                <label>비밀번호</label>
-                <input type="password" name="password" required>
-
-                <button type="submit">다음</button>
-            </form>
-        </div>
-    </body>
-    </html>
-    """
+    """1단계: 이메일 + 비밀번호. 요청에서 온 값(client_id 등)은 모두 이스케이프한다(예전엔 그대로 넣어 반사형 XSS 가능)."""
+    msg = (alert("error", error) if error else "") + (alert("ok", notice) if notice else "")
+    hidden = "".join(f'<input type="hidden" name="{n}" value="{esc(v)}">' for n, v in (
+        ("client_id", client_id), ("redirect_uri", redirect_uri), ("state", state),
+        ("response_type", response_type), ("scope", scope)))
+    body = f"""{msg}
+    <form method="POST" action="/authorize" autocomplete="on">{hidden}
+      <label class="field"><span class="field-label">회사 이메일</span>
+        <input class="input" type="email" name="email" placeholder="name@xmcda.store" autocomplete="username" required autofocus></label>
+      <label class="field"><span class="field-label">비밀번호</span>
+        <input class="input" type="password" name="password" autocomplete="current-password" required></label>
+      <button class="btn btn-primary btn-block" type="submit">다음</button>
+    </form>"""
+    foot = '<span class="muted">비밀번호를 잊으셨나요? 보안 관리자에게 문의하세요.</span>'
+    return auth_page("로그인", "로그인", body, subtitle="회사 계정으로 업무 시스템에 로그인합니다.",
+                     badge="lock", step=(1, 2, "계정 확인"), foot_html=foot)
 
 
 def render_change_form(challenge_id, error=None):
-    error_html = f'<p style="color:#dc3545;"><strong>{error}</strong></p>' if error else ""
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>ZT Login Server</title>
-        <style>
-            body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
-            .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 400px; margin: 60px auto; }}
-            input {{ width: 100%; padding: 10px; margin: 6px 0 14px 0; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }}
-            button {{ width: 100%; background: #007bff; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-weight: bold; }}
-            label {{ font-size: 0.9em; color: #555; }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h2>비밀번호 변경 필요</h2>
-            <p style="font-size:0.9em; color:#555;">이 비밀번호는 외부에서 유출된 목록에서 발견되었습니다. 새 비밀번호({PWNED_MIN_LEN}자 이상, 구성 규칙 없음)를 설정해주세요.</p>
-            {error_html}
-            <form method="POST" action="/authorize/change-password">
-                <input type="hidden" name="challenge_id" value="{challenge_id}">
-                <label>새 비밀번호</label>
-                <input type="password" name="new_password" required autofocus>
-                <label>새 비밀번호 확인</label>
-                <input type="password" name="confirm_password" required>
-                <button type="submit">변경</button>
-            </form>
-        </div>
-    </body>
-    </html>
-    """
+    """유출 목록에 있는 비밀번호: 2단계 인증 뒤 새 비밀번호 설정(NIST SP 800-63B: 길이 기준, 구성 규칙 강요 없음)."""
+    msg = alert("error", error) if error else ""
+    body = f"""{alert("warn", "지금 비밀번호가 외부 유출 목록에서 발견되었습니다. 계속하려면 새 비밀번호를 설정해야 합니다.")}{msg}
+    <form method="POST" action="/authorize/change-password">
+      <input type="hidden" name="challenge_id" value="{esc(challenge_id)}">
+      <label class="field"><span class="field-label">새 비밀번호</span>
+        <input class="input" type="password" name="new_password" autocomplete="new-password" minlength="{PWNED_MIN_LEN}" required autofocus>
+        <span class="hint">{PWNED_MIN_LEN}자 이상. 문장처럼 길게 만들면 기억하기 쉽고 안전합니다(특수문자 조합 규칙 없음).</span></label>
+      <label class="field"><span class="field-label">새 비밀번호 확인</span>
+        <input class="input" type="password" name="confirm_password" autocomplete="new-password" required></label>
+      <button class="btn btn-primary btn-block" type="submit">변경</button>
+    </form>"""
+    return auth_page("비밀번호 변경", "비밀번호를 변경해 주세요", body, badge="key", tone="warn")
 
 
 def render_totp_form(challenge_id, error=None):
-    error_html = f'<p style="color:#dc3545;"><strong>{error}</strong></p>' if error else ""
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>ZT Login Server</title>
-        <style>
-            body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
-            .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 400px; margin: 60px auto; }}
-            input {{ width: 100%; padding: 10px; margin: 6px 0 14px 0; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }}
-            button {{ width: 100%; background: #007bff; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-weight: bold; }}
-            label {{ font-size: 0.9em; color: #555; }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h2>2단계 인증</h2>
-            <p style="font-size:0.9em; color:#555;">인증 앱의 6자리 코드 또는 백업코드를 입력하세요.</p>
-            {error_html}
-            <form method="POST" action="/authorize/verify-totp">
-                <input type="hidden" name="challenge_id" value="{challenge_id}">
+    """2단계: 인증 앱 6자리 코드(또는 백업 코드)."""
+    msg = alert("error", error) if error else ""
+    body = f"""{msg}
+    <form method="POST" action="/authorize/verify-totp">
+      <input type="hidden" name="challenge_id" value="{esc(challenge_id)}">
+      <label class="field"><span class="field-label">인증 코드</span>
+        <input class="input input-code" type="text" name="totp_code" inputmode="numeric" autocomplete="one-time-code"
+               maxlength="32" placeholder="000000" required autofocus>
+        <span class="hint">휴대폰 인증 앱에 표시된 6자리 숫자를 입력하세요. 휴대폰을 쓸 수 없으면 백업 코드를 입력합니다.</span></label>
+      <button class="btn btn-primary btn-block" type="submit">로그인</button>
+    </form>"""
+    portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
+    foot = f'<a href="https://{esc(portal_domain)}/">처음부터 다시 로그인</a><span class="muted">코드는 30초마다 바뀝니다</span>'
+    return auth_page("2단계 인증", "2단계 인증", body, subtitle="본인 확인을 위해 인증 코드를 입력해 주세요.",
+                     badge="shield-check", step=(2, 2, "2단계 인증"), foot_html=foot)
 
-                <label>TOTP 코드 (또는 백업코드)</label>
-                <input type="text" name="totp_code" required autofocus>
 
-                <button type="submit">로그인</button>
-            </form>
-        </div>
-    </body>
-    </html>
-    """
+@app.after_request
+def security_headers(resp):
+    """로그인 화면 공통 보안 헤더: 다른 사이트가 이 화면을 틀(iframe) 안에 넣어 속이는 것(클릭재킹) 방지,
+    파일 형식 추측 방지, 로그인 화면을 브라우저/중간 서버가 저장하지 않게 함."""
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'; base-uri 'none'; object-src 'none'")
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    if resp.mimetype == "text/html":
+        resp.headers.setdefault("Cache-Control", "no-store")
+    return resp
 
 
 @app.route('/authorize', methods=['GET', 'POST'])
@@ -768,64 +722,33 @@ def authorize_change_password():
 # 적용되는지 문서로 확인되지 않아 직접 테스트가 필요함. 안 되더라도 이 주소를 알고
 # 있으면 수동으로 접속해 재인증할 수 있음.
 def render_stepup_form(return_url, error=None, locked=False):
-    error_html = f'<p style="color:#dc3545;"><strong>{error}</strong></p>' if error else ""
+    """접속 위험도가 경계 구간일 때 비밀번호 없이 2단계 인증만 다시 확인한다."""
+    msg = alert("error", error) if error else ""
     disabled = "disabled" if locked else ""
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>추가 인증 - ZT Login Server</title>
-        <style>
-            body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
-            .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 400px; margin: 60px auto; }}
-            input {{ width: 100%; padding: 10px; margin: 6px 0 14px 0; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }}
-            button {{ width: 100%; background: #007bff; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-weight: bold; }}
-            button:disabled {{ background: #aaa; cursor: not-allowed; }}
-            label {{ font-size: 0.9em; color: #555; }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h2>추가 인증이 필요합니다</h2>
-            <p style="font-size:0.9em; color:#555;">보안 정책에 따라 2단계 인증을 한 번 더 확인합니다.</p>
-            {error_html}
-            <form method="POST" action="/stepup">
-                <input type="hidden" name="return_url" value="{return_url}">
-                <label>TOTP 코드 (또는 백업코드)</label>
-                <input type="text" name="totp_code" required autofocus {disabled}>
-                <button type="submit" {disabled}>인증</button>
-            </form>
-        </div>
-    </body>
-    </html>
-    """
+    host = urlparse(return_url).hostname or ""
+    target = (f'<div class="auth-meta">{icon("globe", 16)}<span>접속하려는 서비스 <b>{esc(host)}</b></span></div>'
+              if host else "")
+    body = f"""{target}{msg}
+    <form method="POST" action="/stepup">
+      <input type="hidden" name="return_url" value="{esc(return_url)}">
+      <label class="field"><span class="field-label">인증 코드</span>
+        <input class="input input-code" type="text" name="totp_code" inputmode="numeric" autocomplete="one-time-code"
+               maxlength="32" placeholder="000000" required autofocus {disabled}></label>
+      <button class="btn btn-primary btn-block" type="submit" {disabled}>확인</button>
+    </form>"""
+    foot = '<a href="/logout">다른 계정으로 로그인</a><span class="muted">인증 앱 또는 백업 코드</span>'
+    return auth_page("추가 인증", "추가 인증이 필요합니다", body,
+                     subtitle="평소와 다른 접속 환경이 감지되어 본인 확인을 한 번 더 진행합니다.",
+                     badge="shield-check", tone="warn", foot_html=foot)
 
 
 def render_stepup_success(return_url):
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>인증 완료 - ZT Login Server</title>
-        <style>
-            body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
-            .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 400px; margin: 60px auto; text-align: center; }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h2>✅ 인증되었습니다</h2>
-            <p style="font-size:0.9em; color:#555;">잠시 후 원래 접속하려던 페이지로 이동합니다.</p>
-            <a href="{return_url}">지금 바로 이동</a>
-        </div>
-        <script>
-          setTimeout(function() {{ window.location.href = "{return_url}"; }}, 1500);
-        </script>
-    </body>
-    </html>
-    """
+    """재인증 성공 -> 잠시 후 원래 서비스로 이동(복귀 주소는 _safe_return_url로 검증된 값만 들어온다)."""
+    body = f"""<div class="center"><div class="spinner"></div>
+      <p class="auth-sub">잠시 후 원래 접속하려던 서비스로 이동합니다.</p>
+      {link_button(return_url, "지금 이동", "secondary", "arrow-right", block=True)}</div>
+    <script>setTimeout(function(){{window.location.href={json.dumps(return_url)};}},1200);</script>"""
+    return auth_page("인증 완료", "인증되었습니다", body, badge="check", tone="ok")
 
 
 # [기능추가] Access의 커스텀 거부 URL 리다이렉트에는 ?original_url=(원래 가려던 주소)가
@@ -918,37 +841,16 @@ def check_department_access(department, url):
 def render_no_permission(email, department, url):
     portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
     needed = ', '.join(PATH_PERMISSIONS.get(_resource_key(url), [])) or '-'
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>접근 권한 없음 - ZT Login Server</title>
-        <style>
-            body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
-            .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 440px; margin: 60px auto; }}
-            a.btn {{ display: inline-block; margin: 6px 8px 0 0; padding: 10px 16px; border-radius: 6px; background: #007bff; color: white; text-decoration: none; font-weight: bold; }}
-            a.sub {{ background: #6c757d; }}
-            dt {{ color: #777; font-size: 0.85em; margin-top: 10px; }}
-            dd {{ margin: 2px 0 0 0; }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h2>접근 권한이 없습니다</h2>
-            <p style="font-size:0.9em; color:#555;">이 계정의 소속으로는 요청한 페이지를 열 수 없습니다. 추가 인증으로 해결되는 문제가 아닙니다.</p>
-            <dl>
-                <dt>로그인한 계정</dt><dd>{escape(email)}</dd>
-                <dt>계정의 소속</dt><dd>{escape(department or '(지정되지 않음)')}</dd>
-                <dt>이 페이지를 열 수 있는 소속</dt><dd>{escape(needed)}</dd>
-            </dl>
-            <p style="font-size:0.9em; color:#555;">권한이 필요하면 관리자에게 소속 변경을 요청하세요.</p>
-            <a class="btn" href="https://{escape(portal_domain)}/">포털 홈으로</a>
-            <a class="btn sub" href="/logout">다른 계정으로 로그인</a>
-        </div>
-    </body>
-    </html>
-    """
+    body = f"""<p class="auth-sub">이 계정의 소속으로는 요청한 서비스를 열 수 없습니다. 추가 인증으로 해결되는 문제가 아닙니다.</p>
+    <dl class="kv">
+      <dt>로그인한 계정</dt><dd>{esc(email)}</dd>
+      <dt>계정의 소속</dt><dd>{esc(department or '(지정되지 않음)')}</dd>
+      <dt>필요한 소속</dt><dd>{esc(needed)}</dd>
+    </dl>
+    {alert("info", "업무상 필요하다면 소속 부서장을 통해 보안 관리자에게 권한을 요청하세요.")}
+    <div class="btn-row">{link_button(f"https://{portal_domain}/", "포털 홈으로", "primary", "home")}
+    {link_button("/logout", "다른 계정으로 로그인", "secondary", "logout")}</div>"""
+    return auth_page("접근 권한 없음", "접근 권한이 없습니다", body, badge="lock", tone="danger", wide=True)
 
 
 # [차단 화면] Access가 막으면 이유와 상관없이 /stepup으로 오기 때문에, 재인증으로 풀리지 않는 차단에도
@@ -981,23 +883,27 @@ def lookup_access_decision(email, return_url):
 
 
 def render_blocked(email, return_url, device_reasons, reauth=False):
+    """엔진이 차단한 요청. 사용자가 직접 고칠 수 있는 기기 사유만 보여 주고, 점수/다른 신호는 보여 주지 않는다
+    (공격자에게 무엇을 피하면 되는지 알려 주지 않기 위해)."""
     portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
-    items = "".join(f"<li><strong>{escape(DEVICE_HELP[r][0])}</strong><br>{escape(DEVICE_HELP[r][1])}</li>"
-                    for r in device_reasons if r in DEVICE_HELP)
-    body = (f'<p>이 기기에서는 요청한 페이지를 열 수 없습니다. 추가 인증으로 해결되지 않습니다.</p><ul>{items}</ul>'
-            f'<a class="btn" href="{escape(return_url)}">다시 시도</a>') if items else \
-           '<p>보안 정책에 따라 접근이 차단되었습니다. 계속되면 관리자에게 문의하세요.</p>'
+    account = f'<div class="auth-meta">{icon("user", 16)}<span>{esc(email)}</span></div>'
+    actions = (f'<div class="btn-row">{link_button(f"https://{portal_domain}/", "포털 홈으로", "secondary", "home")}'
+               f'{link_button("/logout", "다른 계정으로 로그인", "secondary", "logout")}</div>')
     if reauth:
-        body = ('<p>로그인한 위치와 지금 접속 위치가 달라 보안을 위해 이 세션을 사용할 수 없습니다. '
-                '추가 인증으로 해결되지 않으니, 아래 "다른 계정으로 로그인"을 눌러 로그아웃한 뒤 다시 로그인해 주세요.</p>')
-    return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>접근 차단 - ZT Login Server</title><style>
-body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
-.card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 440px; margin: 60px auto; }}
-a.btn {{ display: inline-block; margin: 6px 8px 0 0; padding: 10px 16px; border-radius: 6px; background: #007bff; color: white; text-decoration: none; font-weight: bold; }}
-a.sub {{ background: #6c757d; }} li {{ margin: 8px 0; }} p {{ font-size: 0.9em; color: #555; }}
-</style></head><body><div class="card"><h2>접근이 차단되었습니다</h2><p>로그인한 계정: {escape(email)}</p>{body}
-<a class="btn" href="https://{escape(portal_domain)}/">포털 홈으로</a><a class="btn sub" href="/logout">다른 계정으로 로그인</a>
-</div></body></html>"""
+        body = (f'{account}<p class="auth-sub">로그인한 위치와 지금 접속 위치가 달라, 보안을 위해 이 세션을 더 이상 사용할 수 없습니다. '
+                f'로그아웃한 뒤 다시 로그인해 주세요.</p>'
+                f'{link_button("/logout", "로그아웃 후 다시 로그인", "primary", "logout", block=True)}')
+        return auth_page("다시 로그인 필요", "다시 로그인이 필요합니다", body, badge="globe", tone="warn", wide=True)
+    items = "".join(f'<div class="reason">{icon("device", 20)}<div><b>{esc(DEVICE_HELP[r][0])}</b><p>{esc(DEVICE_HELP[r][1])}</p></div></div>'
+                    for r in device_reasons if r in DEVICE_HELP)
+    if items:
+        body = (f'{account}<p class="auth-sub">이 기기에서는 요청한 서비스를 열 수 없습니다. 아래 내용을 확인한 뒤 다시 시도하세요.</p>'
+                f'{items}<div style="height:6px"></div>'
+                f'{link_button(return_url, "다시 시도", "primary", "arrow-right", block=True)}<div style="height:10px"></div>{actions}')
+        return auth_page("기기 확인 필요", "기기 보안 요건을 충족하지 않습니다", body, badge="device", tone="warn", wide=True)
+    body = (f'{account}<p class="auth-sub">보안 정책에 따라 접근이 차단되었습니다. '
+            f'계속되면 보안 관리자에게 문의하세요.</p>{actions}')
+    return auth_page("접근 차단", "접근이 차단되었습니다", body, badge="block", tone="danger", wide=True)
 
 
 def _blocked_response(email, return_url):
@@ -1058,9 +964,10 @@ def stepup():
     email = get_sso_session_email(sso_token) if sso_token else None
     return_url = _resolve_return_url()
     if not email:
-        return """
-        <p>로그인이 필요합니다. <a href="https://xmcda.store">포털에서 다시 로그인해주세요</a>.</p>
-        """
+        portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
+        body = (f'<p class="auth-sub">로그인 세션이 없거나 만료되었습니다. 포털에서 다시 로그인해 주세요.</p>'
+                f'{link_button(f"https://{portal_domain}/", "포털에서 로그인", "primary", "arrow-right", block=True)}')
+        return auth_page("로그인 필요", "로그인이 필요합니다", body, badge="lock", tone="warn")
     # 소속이 달라서 막힌 경우에는 TOTP를 묻지 않고 "권한 없음"을 알려준다(인증해도 해결되지 않으므로)
     denied = _no_permission_response(Account.query.filter_by(email=email).first(), email, return_url)
     if denied:
@@ -1080,9 +987,10 @@ def stepup_verify():
     email = get_sso_session_email(sso_token) if sso_token else None
     return_url = _safe_return_url(request.form.get('return_url')) or _resolve_return_url()
     if not email:
-        return """
-        <p>로그인이 필요합니다. <a href="https://xmcda.store">포털에서 다시 로그인해주세요</a>.</p>
-        """
+        portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
+        body = (f'<p class="auth-sub">로그인 세션이 없거나 만료되었습니다. 포털에서 다시 로그인해 주세요.</p>'
+                f'{link_button(f"https://{portal_domain}/", "포털에서 로그인", "primary", "arrow-right", block=True)}')
+        return auth_page("로그인 필요", "로그인이 필요합니다", body, badge="lock", tone="warn")
 
     account = Account.query.filter_by(email=email).first()
     # 폼을 직접 POST해도 소속이 맞지 않으면 TOTP 확인 자체를 하지 않는다
@@ -1222,24 +1130,9 @@ def jwks():
 def logged_out():
     """로그아웃 완료 안내. 다시 로그인은 포털로 보내면 Access가 이 서버의 로그인 화면으로 데려온다."""
     portal_domain = os.environ.get('DOMAIN_NAME', 'auth.xmcda.store').replace('auth.', '')
-    response = make_response(f"""
-    <!DOCTYPE html>
-    <html>
-    <head><meta charset="utf-8"><title>로그아웃됨 - ZT Login Server</title>
-    <style>
-        body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; background-color: #f4f6f9; }}
-        .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 420px; margin: 60px auto; }}
-        a.btn {{ display: inline-block; margin-top: 10px; padding: 10px 16px; border-radius: 6px; background: #007bff; color: white; text-decoration: none; font-weight: bold; }}
-    </style></head>
-    <body>
-        <div class="card">
-            <h2>로그아웃되었습니다</h2>
-            <p style="font-size:0.9em; color:#555;">모든 업무 화면에서 로그아웃했습니다. 공용 PC라면 브라우저 창도 닫아 주세요.</p>
-            <a class="btn" href="https://{escape(portal_domain)}/">다시 로그인</a>
-        </div>
-    </body>
-    </html>
-    """)
+    body = (f'<p class="auth-sub">모든 업무 서비스에서 로그아웃했습니다. 공용 PC라면 브라우저 창도 모두 닫아 주세요.</p>'
+            f'{link_button(f"https://{portal_domain}/", "다시 로그인", "primary", "arrow-right", block=True)}')
+    response = make_response(auth_page("로그아웃", "로그아웃되었습니다", body, badge="check", tone="ok"))
     response.headers['Cache-Control'] = 'no-store'
     return response
 
@@ -1268,11 +1161,7 @@ def logout():
         f'<img src="{url}" style="display:none" onload="done()" onerror="done()">' for url in logout_urls
     )
 
-    response = make_response(f"""
-    <!DOCTYPE html>
-    <html>
-    <head><meta charset="utf-8"><title>로그아웃 중...</title></head>
-    <body>
+    body = f"""<div class="center"><div class="spinner"></div><p class="auth-sub">모든 업무 서비스에서 로그아웃하는 중입니다.</p></div>
         <script>
           // [버그수정] 예전엔 고정 1초 뒤에 이동해서, 앱 로그아웃 요청이 끝나기 전에 페이지가
           // 넘어가면 일부 세션 쿠키가 안 지워져 로그아웃을 두 번 눌러야 했음.
@@ -1290,11 +1179,8 @@ def logout():
           }}
           setTimeout(go, 5000);
         </script>
-        {logout_pixels}
-        <p>로그아웃 처리 중입니다. 잠시만 기다려주세요...</p>
-    </body>
-    </html>
-    """)
+        {logout_pixels}"""
+    response = make_response(auth_page("로그아웃 중", "로그아웃하는 중", body, badge="logout"))
     response.delete_cookie(SSO_COOKIE_NAME)
     return response
 

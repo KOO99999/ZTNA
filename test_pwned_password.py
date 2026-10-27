@@ -108,7 +108,7 @@ with patch.object(aa, "Account", SimpleNamespace(query=FQ())), \
     r = c.post("/authorize/verify-totp", data={"challenge_id": cid, "totp_code": pyotp.TOTP(acct.totp_secret).now()})
     h = r.get_data(as_text=True)
     ok("TOTP 통과 -> 변경 화면", "change-password" in h and r.status_code == 200 and not risk_calls)
-    ok("변경 버튼 문구는 '변경'", '<button type="submit">변경</button>' in h and "변경 후 로그인" not in h)
+    ok("변경 버튼 문구는 '변경'", 'type="submit">변경</button>' in h and "변경 후 로그인" not in h)
 
     def change(newpw, conf=None, pwned=None):
         with patch.object(aa, "pwned_count", lambda p: (pwned or {}).get(p, 0)):

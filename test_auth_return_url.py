@@ -298,5 +298,32 @@ if HAVE_FULL:
     t = aa.render_blocked('x"<b>@xmcda.store', "https://dev.xmcda.store/", ["device_unmanaged"])
     ok("차단 화면은 계정 이름을 이스케이프", "<b>@" not in t and "&lt;b&gt;" in t)
 
+    # [잠금] 비밀번호를 확인하기 전에 잠금을 본다(맞은 비밀번호에만 잠금 화면이 뜨면 정답 확인 신호가 됨)
+    pw_checks, failures = [], []
+    fake_db = SimpleNamespace(session=SimpleNamespace(add=lambda x: failures.append(x), commit=lambda: None))
+    locked = {"v": True}
+    lock_acct = SimpleNamespace(email="dev1@xmcda.store", password_hash="h", totp_enabled=True, totp_secret=pyotp.random_base32(), id=99)
+    lc = aa.app.test_client()
+    with aa.app.app_context(), \
+         patch.object(aa.Account, "query", SimpleNamespace(filter_by=lambda **kw: SimpleNamespace(first=lambda: lock_acct)), create=True), \
+         patch.object(aa, "check_brute_force", lambda e: locked["v"]), \
+         patch.object(aa, "check_password_hash", lambda h, p: pw_checks.append(p) or p == "right"), \
+         patch.object(aa, "LoginFailure", lambda **kw: kw), patch.object(aa, "db", fake_db):
+        for pw in ("wrong", "right"):
+            r = lc.post("/authorize", data={"email": "dev1@xmcda.store", "password": pw})
+            ok(f"[잠금] 잠긴 계정 + {'맞은' if pw == 'right' else '틀린'} 비밀번호 -> 같은 잠금 화면", "로그인 시도가 너무 많습니다" in r.get_data(as_text=True))
+        ok("[잠금] 잠긴 동안 비밀번호를 확인하지 않고 실패로 세지도 않음", not pw_checks and not failures, (pw_checks, failures))
+        # 로그인 2단계(TOTP): 실패를 세고, 잠기면 막음
+        locked["v"] = False
+        cid = "chal-1"
+        aa.PENDING_LOGINS[cid] = {"email": "dev1@xmcda.store", "must_change": False, "totp_verified": False, "expires_at": _time.time() + 300,
+                                  "client_id": "cid", "redirect_uri": "https://x/cb", "state": "s", "response_type": "code", "scope": "openid"}
+        with patch.object(aa, "BackupCode", SimpleNamespace(query=SimpleNamespace(filter_by=lambda **kw: SimpleNamespace(all=lambda: []))), create=True):
+            r = lc.post("/authorize/verify-totp", data={"challenge_id": cid, "totp_code": "000000"})
+        ok("[잠금] 로그인 TOTP 실패도 실패로 셈(예전엔 무제한 시도 가능)", len(failures) == 1 and "올바르지 않습니다" in r.get_data(as_text=True), failures)
+        locked["v"] = True
+        r = lc.post("/authorize/verify-totp", data={"challenge_id": cid, "totp_code": "000000"})
+        ok("[잠금] 잠기면 TOTP 단계도 잠금 화면 + 진행 중 로그인 폐기", "로그인 시도가 너무 많습니다" in r.get_data(as_text=True) and cid not in aa.PENDING_LOGINS)
+
 print(f"\n{'ALL PASS' if not fails else str(fails)+' FAILED'}")
 sys.exit(1 if fails else 0)

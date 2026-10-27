@@ -50,7 +50,7 @@ eng, auth, gate, waf, adm = read("risk_score_engine.py"), read("auth_app.py"), r
 for ev_name in ("login_allowed", "login_blocked", "login_failed", "login_locked", "pwned_password_detected", "password_changed",
                 "stepup_blocked", "stepup_no_permission", "stepup_verified", "mtls_client_rejected"):
     ok(f"로그인 서버 이벤트: {ev_name}", f'log_event("{ev_name}"' in auth)
-ok("로그인 서버: 무차별 대입 잠금(로그인/재인증 화면) 둘 다 기록", auth.count('log_event("login_locked"') == 3)
+ok("로그인 서버: 무차별 대입 잠금(로그인/로그인 TOTP/재인증 화면 2곳) 모두 기록", auth.count('log_event("login_locked"') == 4)
 ok("엔진: 판단(decision)과 기기 순찰(device_sweep) 이벤트", 'log_event("decision"' in eng and 'log_event("device_sweep"' in eng)
 ok("웹 서버: 차단(gate_deny) 이벤트, 점수는 엔진 이벤트에만", 'log_event("gate_deny"' in gate and "score=" not in gate.split('log_event("gate_deny"')[1][:200])
 ok("WAF: 신원 연결 보고(waf_reported) 이벤트", 'log_event("waf_reported"' in waf)

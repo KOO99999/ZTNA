@@ -103,6 +103,8 @@ with patch.object(aa, "Account", SimpleNamespace(query=FQ())), \
     c, html = login(OLD, {OLD: 100}); cid = next(iter(aa.PENDING_LOGINS))
     r = c.post("/authorize/verify-totp", data={"challenge_id": cid, "totp_code": "000000"})
     ok("TOTP 틀리면 변경 화면 안 나옴", "change-password" not in r.get_data(as_text=True))
+    ok("TOTP 틀린 것도 로그인 실패로 기록(무차별 대입 잠금 대상)", len(commits) == 1, commits)
+    commits.clear()   # 아래 "거부 중에는 해시 불변"은 비밀번호 변경 저장만 본다
     r = c.post("/authorize/verify-totp", data={"challenge_id": cid, "totp_code": pyotp.TOTP(acct.totp_secret).now()})
     h = r.get_data(as_text=True)
     ok("TOTP 통과 -> 변경 화면", "change-password" in h and r.status_code == 200 and not risk_calls)

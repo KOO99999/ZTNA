@@ -605,6 +605,18 @@ def authorize():
     password = request.form.get('password', '')
     client_ip = request.headers.get('CF-Connecting-IP', request.remote_addr)
 
+    # [잠금 먼저 확인] 잠긴 계정은 비밀번호를 확인하지 않고 같은 잠금 화면을 보여 준다.
+    # 예전에는 비밀번호를 먼저 확인하고 "맞았을 때만" 잠금 화면을 보여 줘서, 공격자가 "잠금 화면이 뜨면 비밀번호가 맞은 것"으로
+    # 정답을 알아낼 수 있었다(비밀번호 확인 신호 노출). 틀린 비밀번호만 넣는 사람에게는 잠금 안내도 뜨지 않았다(실측).
+    # 잠긴 동안의 시도는 실패로 더 세지 않는다(잠금이 끝없이 늘어나지 않게, 5분 창이 지나면 풀림).
+    # 존재하지 않는 이메일도 똑같이 처리한다(계정이 있는지 알려 주지 않음).
+    if check_brute_force(email):
+        log_event("login_locked", identity=email, stage="login", window_min=BRUTE_FORCE_WINDOW_MINUTES, threshold=BRUTE_FORCE_THRESHOLD)
+        return render_credentials_form(
+            client_id, redirect_uri, state, response_type, scope,
+            error=f"로그인 시도가 너무 많습니다. {BRUTE_FORCE_LOCKOUT_MINUTES}분 후 다시 시도해주세요."
+        )
+
     account = Account.query.filter_by(email=email).first()
     credentials_ok = bool(account) and check_password_hash(account.password_hash, password)
 
@@ -618,19 +630,7 @@ def authorize():
             error="이메일 또는 비밀번호가 올바르지 않습니다."
         )
 
-    # [방식변경] 예전엔 비밀번호가 맞으면 brute_force 여부와 무관하게 TOTP 화면으로
-    # 보내고, 걸린 경우 문구만 다르게 표시했음. 근데 이 시점엔 공격자가 비밀번호를
-    # 이미 맞힌 상태라 TOTP 화면 자체는 공격자든 주인이든 똑같이 겪는 절차라
-    # "추가 인증"으로서 실질적 의미가 없었음(업계도 MFA를 더 요구하기보다, 비밀번호가
-    # 맞아도 이 시점에 바로 잠그는 lockout 방식을 표준으로 씀 - Microsoft Entra ID,
-    # SecureAuth 등). 그래서 비밀번호가 맞았어도 brute_force면 TOTP 화면 자체를
-    # 안 보여주고 여기서 바로 막는다.
-    if check_brute_force(email):
-        log_event("login_locked", identity=email, stage="login", window_min=BRUTE_FORCE_WINDOW_MINUTES, threshold=BRUTE_FORCE_THRESHOLD)
-        return render_credentials_form(
-            client_id, redirect_uri, state, response_type, scope,
-            error=f"로그인 시도가 너무 많습니다. {BRUTE_FORCE_LOCKOUT_MINUTES}분 후 다시 시도해주세요."
-        )
+    # (잠금 확인은 위로 옮겼다: 비밀번호가 맞든 틀리든 잠긴 계정이면 TOTP 화면까지 가지 않는다 - Microsoft Entra ID 등 lockout 방식)
 
     # [pwned_password] 유출 목록에 있으면 즉시 차단하지 않고, TOTP 통과 후 새 비밀번호를 강제한다
     # (비번만 아는 공격자는 변경 화면에 도달 못함). 평문은 저장하지 않고 플래그만 둔다.
@@ -676,6 +676,15 @@ def authorize_verify_totp():
         )
 
     email = entry["email"]
+    # [잠금] 로그인 2단계(TOTP)도 같은 잠금을 따른다. 예전에는 이 단계의 실패를 세지 않아, 비밀번호를 아는 공격자가
+    # 5분 동안 TOTP를 제한 없이 넣어 볼 수 있었다(재인증 /stepup은 이미 세고 있었음).
+    if check_brute_force(email):
+        PENDING_LOGINS.pop(challenge_id, None)
+        log_event("login_locked", identity=email, stage="totp", window_min=BRUTE_FORCE_WINDOW_MINUTES, threshold=BRUTE_FORCE_THRESHOLD)
+        return render_credentials_form(
+            entry["client_id"], entry["redirect_uri"], entry["state"], entry["response_type"], entry["scope"],
+            error=f"로그인 시도가 너무 많습니다. {BRUTE_FORCE_LOCKOUT_MINUTES}분 후 다시 시도해주세요."
+        )
     account = Account.query.filter_by(email=email).first()
 
     totp_ok = False
@@ -690,6 +699,9 @@ def authorize_verify_totp():
                 break
 
     if not totp_ok:
+        db.session.add(LoginFailure(email=email, ip_address=request.headers.get('CF-Connecting-IP', request.remote_addr)))
+        db.session.commit()
+        log_event("login_failed", identity=email, stage="totp")
         return render_totp_form(challenge_id, error="TOTP 코드(또는 백업코드)가 올바르지 않습니다.")
 
     if entry.get("must_change"):

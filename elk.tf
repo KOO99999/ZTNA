@@ -176,6 +176,13 @@ resource "aws_iam_role_policy" "elk_read" {
         Condition = { StringEquals = { "kms:ViaService" = "ssm.${var.aws_region}.amazonaws.com" } }
       },
       {
+        # Kibana 저장 객체 파일만 읽기(다른 코드 파일, 목록 보기, 쓰기 없음)
+        Sid      = "ReadKibanaObjects"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = ["${aws_s3_bucket.app_code.arn}/elk/kibana/*"]
+      },
+      {
         # Filebeat aws-cloudwatch 입력에 필요한 권한(Filebeat 문서: DescribeLogGroups, FilterLogEvents). 우리 Lambda 3개 로그만.
         Sid    = "ReadLambdaLogs"
         Effect = "Allow"
@@ -189,6 +196,18 @@ resource "aws_iam_role_policy" "elk_read" {
 
 locals {
   elk_lambda_names = ["risk-score-engine", "zt-device-sweep", "risk-admin"]
+  # 관제 콘솔 Kibana 저장 객체(데이터 보기, 저장된 검색, 대시보드). 폴더에 ndjson을 넣으면 자동으로 올라가고 불러와진다.
+  kibana_files = { for f in fileset("${path.module}/kibana", "*.ndjson") : "elk/kibana/${f}" => "${path.module}/kibana/${f}" }
+}
+
+resource "aws_s3_object" "kibana" {
+  for_each = var.enable_elk ? local.kibana_files : {}
+  bucket   = aws_s3_bucket.app_code.id
+  key      = each.key
+  source   = each.value
+  etag     = filemd5(each.value)
+
+  depends_on = [aws_s3_bucket_server_side_encryption_configuration.app_code]
 }
 
 resource "aws_iam_instance_profile" "elk_profile" {
@@ -327,9 +346,14 @@ resource "aws_instance" "elk_server" {
     tunnel_token  = cloudflare_zero_trust_tunnel_cloudflared.elk_tunnel[0].tunnel_token
     kibana_host   = local.kibana_host
     lambda_groups = [for f in local.elk_lambda_names : "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/${f}:*"]
+    # Kibana 저장 객체(kibana/*.ndjson): S3에서 받아 가져오기. 파일 내용이 바뀌면 키 목록 해시가 바뀌어 관제 서버가 다시 만들어진다
+    code_bucket        = local.code_bucket_name
+    kibana_object_keys = jsonencode([for k in sort(keys(local.kibana_files)) : k])
+    kibana_version     = md5(join(",", [for k in sort(keys(local.kibana_files)) : filemd5(local.kibana_files[k])]))
   }))
 
-  depends_on = [aws_ssm_parameter.elk_password, aws_ssm_parameter.elk_cert, aws_ssm_parameter.elk_key, aws_ssm_parameter.elk_discord_webhook]
+  depends_on = [aws_ssm_parameter.elk_password, aws_ssm_parameter.elk_cert, aws_ssm_parameter.elk_key, aws_ssm_parameter.elk_discord_webhook,
+  aws_s3_object.kibana, aws_iam_role_policy.elk_read]
 
   tags = {
     Name        = "ZT-ELK-Monitor"

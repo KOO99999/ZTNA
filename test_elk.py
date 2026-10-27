@@ -136,7 +136,8 @@ rendered = {
     "filebeat(web)": render(fb, fbv),
     "filebeat(auth, WAF 파일 없음)": render(fb, {**fbv, "role": "auth", "units": ["auth-app.service"], "paths": []}),
     "관제 서버": render(tpl, {"aws_region": "ap-northeast-2", "param_prefix": "/zt/elk", "ca_param": "/zt/mtls/ca_cert", "tunnel_token": "T",
-                          "kibana_host": "kibana.xmcda.store", "lambda_groups": ["arn:aws:logs:r:1:log-group:/aws/lambda/a:*"]}),
+                          "kibana_host": "kibana.xmcda.store", "lambda_groups": ["arn:aws:logs:r:1:log-group:/aws/lambda/a:*"],
+                          "code_bucket": "b", "kibana_object_keys": '["elk/kibana/zt_saved_searches.ndjson"]', "kibana_version": "v"}),
 }
 ok("auth 서버 Filebeat에는 WAF 파일 입력이 없음", "zt-auth-waf" not in rendered["filebeat(auth, WAF 파일 없음)"])
 bash = shutil.which("bash")
@@ -161,3 +162,19 @@ except ImportError:
 mt = read("main.tf")
 ok("Kibana를 켜면 로그인 서버가 Kibana를 알게 함: 복귀 주소/로그아웃 목록 + 관리자만(소속 안내 화면)",
    'var.enable_elk ? ["kibana.${var.domain_name}"] : []' in mt and 'var.enable_elk ? { "kibana.${var.domain_name}" = ["admin"] } : {}' in mt)
+
+# ---------- 5. Kibana 저장 객체(표 6개) ----------
+objs = [json.loads(l) for l in read("kibana/zt_saved_searches.ndjson").splitlines() if l.strip()]
+searches = [o for o in objs if o["type"] == "search"]
+dv = [o for o in objs if o["type"] == "index-pattern"]
+ok("Kibana: 데이터 보기 1개(zt-logs-*, 시간 필드 @timestamp) + 표(저장된 검색) 6개",
+   len(dv) == 1 and dv[0]["attributes"]["title"] == "zt-logs-*" and dv[0]["attributes"]["timeFieldName"] == "@timestamp" and len(searches) == 6)
+ok("표는 모두 같은 데이터 보기를 참조하고, 최신순·KQL 검색", all(o["references"] == [{"name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern", "id": dv[0]["id"]}]
+   and o["attributes"]["sort"] == [["@timestamp", "desc"]] and json.loads(o["attributes"]["kibanaSavedObjectMeta"]["searchSourceJSON"])["query"]["language"] == "kuery"
+   for o in searches))
+all_events = set(re.findall(r'"([a-z_]+)"', " ".join(json.loads(o["attributes"]["kibanaSavedObjectMeta"]["searchSourceJSON"])["query"]["query"] for o in searches)))
+code_events = set(re.findall(r'log_event\("([a-z_]+)"', eng + auth + gate + waf)) | {"risk_release"}
+ok("표가 시스템이 남기는 이벤트 종류를 모두 덮음(빠진 이벤트 없음)", not (code_events - all_events), code_events - all_events)
+ok("관제 서버: kibana/*.ndjson을 S3에서 받아 가져오기(같은 ID 덮어씀), 읽기 권한은 elk/kibana/*만",
+   'fileset("${path.module}/kibana", "*.ndjson")' in tf and '"${aws_s3_bucket.app_code.arn}/elk/kibana/*"' in tf
+   and "/api/saved_objects/_import?overwrite=true" in tpl and "${kibana_version}" in tpl)

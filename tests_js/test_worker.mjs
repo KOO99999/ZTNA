@@ -93,6 +93,14 @@ const wrap = (t) => JSON.stringify({ token: t });
   check('Lambda 호출에 공유비밀키 헤더', lambdaCalls[0].headers['X-Evaluate-Secret'] === 'secret-for-test');
 }
 {
+  const { signed } = await call(wrap(await accessToken({ claims: { identity: { email: 'hana@test.com', geo: { country: 'KR' }, ip: '203.0.113.7' } } })));
+  check('[접속 IP] 신원 정보에 ip가 있으면 client_ip로 그대로 전달(판단은 엔진)', lambdaCalls[0]?.body.client_ip === '203.0.113.7' && signed.nonce === 'nonce-123', JSON.stringify(lambdaCalls[0]?.body));
+  await call(wrap(await accessToken()));
+  check('[접속 IP] 없으면 client_ip=null(지금처럼 동작)', lambdaCalls[0]?.body.client_ip === null, JSON.stringify(lambdaCalls[0]?.body));
+  await call(wrap(await accessToken({ claims: { identity: { email: 'hana@test.com', ip: 'x'.repeat(100) } } })));
+  check('[접속 IP] 비정상적으로 긴 값은 넘기지 않음', lambdaCalls[0]?.body.client_ip === null);
+}
+{
   lambdaMode = { kind: 'json', status: 200, body: { allow: false, action: 'block' } };
   const { signed } = await call(wrap(await accessToken()));
   check('Lambda 차단 -> success:true(차단 규칙에 해당)', signed.success === true && signed.nonce === 'nonce-123');

@@ -258,11 +258,21 @@ EASVC
 systemctl daemon-reload
 systemctl enable --now elastalert
 
-# ---------- Kibana 데이터 보기(zt-logs-*) 자동 생성 ----------
+# ---------- Kibana 저장 객체 가져오기: 데이터 보기 + 표(저장된 검색) 6개 + (있으면) 대시보드 ----------
+#   매일 destroy해도 다시 생기게 프로젝트의 kibana/*.ndjson을 S3에서 받아 Kibana 가져오기 API로 불러온다(같은 ID면 덮어씀).
 for i in $(seq 1 60); do curl -s -u "elastic:$(pw elastic)" http://127.0.0.1:5601/api/status | grep -q '"level":"available"' && break; sleep 5; done
-curl -s -u "elastic:$(pw elastic)" -H 'kbn-xsrf: true' -H 'Content-Type: application/json' \
-  -X POST http://127.0.0.1:5601/api/data_views/data_view \
-  -d '{"data_view":{"title":"zt-logs-*","name":"ZT 로그","timeFieldName":"@timestamp"}}' || true
+# 저장 객체 파일 버전(파일이 바뀌면 이 줄이 바뀌어 관제 서버가 새로 만들어진다): ${kibana_version}
+install -d -m 0700 /root/zt/kibana
+python3 - << 'PY' || echo "kibana objects download failed"
+import boto3
+s3 = boto3.client('s3', region_name='${aws_region}')
+for key in ${kibana_object_keys}:
+    s3.download_file('${code_bucket}', key, '/root/zt/kibana/' + key.split('/')[-1])
+PY
+for f in /root/zt/kibana/*.ndjson; do
+  [ -e "$f" ] || continue
+  curl -s -u "elastic:$(pw elastic)" -H 'kbn-xsrf: true' -X POST     "http://127.0.0.1:5601/api/saved_objects/_import?overwrite=true" -F "file=@$f" | grep -q '"success":true'     && echo "kibana import ok: $(basename "$f")" || echo "kibana import FAILED: $(basename "$f")"
+done
 
 # ---------- cloudflared: Kibana 전용 터널(이 서버 -> Cloudflare 바깥 방향 연결만, 열린 포트 없음) ----------
 curl -L --output /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb

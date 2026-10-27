@@ -141,6 +141,10 @@ export default {
     // 검사 결과는 종류/규칙 이름/통과 여부만 추린다. 판단(관리 기기인지, 검사 통과인지, 기기 주인이 맞는지)은 엔진이 한다.
     const idObj = (accessPayload.identity && typeof accessPayload.identity === 'object') ? accessPayload.identity : {};
     const deviceId = (typeof idObj.device_id === 'string' && idObj.device_id) ? idObj.device_id : null;
+    // [접속 IP] 신원 정보에 접속 IP(ip)가 있으면 그대로 넘긴다(위협 IP·불가능한 이동을 첫 관문에서도 판단하게).
+    // Cloudflare 문서에 External Evaluation 신원 필드 목록이 명시돼 있지 않아(get-identity로 확인하라고만 안내),
+    // 값이 없으면 지금처럼 IP 없이 판단한다. IP 형식 확인과 공개 IP 여부 판단은 엔진(normalize_public_ip)이 한다.
+    const clientIp = (typeof idObj.ip === 'string' && idObj.ip.length > 0 && idObj.ip.length <= 64) ? idObj.ip : null;
     const devicePosture = Object.values(idObj.devicePosture || {}).map((p) => ({
       type: p && p.type, rule: p && p.rule_name, success: p && p.success === true,
     }));
@@ -168,13 +172,13 @@ export default {
             device_context: true,
             device_id: deviceId,
             device_posture: devicePosture,
-            // TODO: 실제로는 클라이언트 IP 등 추가 위협 신호도 여기서 함께 실어 보내야 함
+            client_ip: clientIp,
           }),
         });
         trustResult = await lambdaResp.json();
         // 로그 확인 편의용 KST 표시 (Lambda로 보내는 실제 값은 위에서 UTC로 유지됨)
         const kstDisplay = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
-        console.log('[DEBUG] identity:', identity, 'request_timestamp(UTC):', requestTimestamp, 'request_timestamp(KST):', kstDisplay, 'geo_country:', geoCountry, 'resource_path:', resourcePath, 'trustResult:', JSON.stringify(trustResult));
+        console.log('[DEBUG] client_ip_present:', clientIp !== null, 'identity:', identity, 'request_timestamp(UTC):', requestTimestamp, 'request_timestamp(KST):', kstDisplay, 'geo_country:', geoCountry, 'resource_path:', resourcePath, 'trustResult:', JSON.stringify(trustResult));
       } catch (e) {
         // Lambda 호출 자체가 실패하면 Fail-Closed (5조 피드백 반영 - admin 등급 기준)
         console.log('[DEBUG] lambda call failed:', e.message);

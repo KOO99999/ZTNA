@@ -136,6 +136,5 @@
 ## 10. 참고 자료
 
 - 제로트러스트 가이드라인 2.0 (과학기술정보통신부·KISA·한국제로트러스트포럼)
-- 금융분야 제로트러스트 보안 안내서 (금융보안원)
 - CISA Zero Trust Maturity Model
 - Microsoft Entra Conditional Access, Okta Adaptive MFA (위험 기반 재인증 패턴 참고)

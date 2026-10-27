@@ -185,6 +185,7 @@ discord_embed_color: 0xe74c3c
 alert_subject: "[ZT 즉시 대응] {0} / {1}"
 alert_subject_args: ["zt.event", "zt.identity"]
 alert_text_type: alert_text_only
+alert_missing_value: "-"
 alert_text: "사용자: {0}\n판단/행동: {1}\n점수: {2}\n신호: {3}\n자원: {4}\n접속 IP: {5}\n서비스: {6}\n시각: {7}\n대응 절차: docs/runbook.md"
 alert_text_args: ["zt.identity", "zt.action", "zt.score", "zt.signals", "zt.resource", "zt.client_ip", "zt.service", "@timestamp"]
 EARULE
@@ -210,6 +211,7 @@ discord_embed_color: 0xf39c12
 alert_subject: "[ZT 반복 차단] {0}"
 alert_subject_args: ["zt.identity"]
 alert_text_type: alert_text_only
+alert_missing_value: "-"
 alert_text: "10분 안에 5번 이상 차단/재인증 요구됨\n사용자: {0}\n마지막 판단: {1} (점수 {2})\n신호: {3}\n대응 절차: docs/runbook.md"
 alert_text_args: ["zt.identity", "zt.action", "zt.score", "zt.signals"]
 EARULE
@@ -233,6 +235,7 @@ discord_webhook_url: "$HOOK"
 discord_embed_color: 0x8e44ad
 alert_subject: "[ZT 장애] 판단 엔진 응답 없음"
 alert_text_type: alert_text_only
+alert_missing_value: "-"
 alert_text: "웹 서버가 판단 엔진(Lambda)에 묻지 못해 요청을 막고 있습니다(fail-closed).\n마지막 사용자: {0}\n대응 절차: docs/runbook.md"
 alert_text_args: ["zt.identity"]
 EARULE

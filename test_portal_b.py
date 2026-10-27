@@ -143,15 +143,31 @@ check("등록되지 않은 경로는 404", r.status_code == 404, f"status={r.sta
 def page(path="/", host="hr.xmcda.store", **extra_headers):
     return client.get(path, headers={**H, "Host": host, **extra_headers}).get_data(as_text=True)
 
-check("X-ZT-Threshold: 40 -> '40점' 표시", "40점" in page(**{"X-ZT-Threshold": "40"}))
-check("X-ZT-Threshold: 20 (관리자 콘솔) -> '20점' 표시, 옛 문구('신뢰 점수') 없음",
-      "20점" in page("/", "admin.xmcda.store", **{"X-ZT-Threshold": "20"}) and "신뢰 점수" not in page("/", "admin.xmcda.store", **{"X-ZT-Threshold": "20"}))
-check("X-ZT-Threshold: 60 -> '60점' 표시", "60점" in page("/", "xmcda.store", **{"X-ZT-Threshold": "60"}))
-check("헤더가 없으면 '확인 불가' 표시", "확인 불가" in page())
-t = page(**{"X-ZT-Threshold": "40<script>alert(1)</script>"})
+# 허용 위험점수는 관리자 콘솔에서만 보여 준다(직원 화면에 판단 기준/점수를 노출하지 않음 - 실제 제품도 보여 주지 않음)
+ADMH = {"Host": "admin.xmcda.store"}
+def admin_page(**extra):
+    return client.get("/", headers={**hdr("hana@test.com"), **ADMH, **extra}).get_data(as_text=True)
+check("관리자 콘솔: X-ZT-Threshold 20 -> '20점 이하' 표시, 옛 문구('신뢰 점수') 없음",
+      "20점 이하" in admin_page(**{"X-ZT-Threshold": "20"}) and "신뢰 점수" not in admin_page(**{"X-ZT-Threshold": "20"}))
+check("직원 화면(팀 앱/포털)에는 허용 위험점수를 표시하지 않음",
+      "40점" not in page(**{"X-ZT-Threshold": "40"}) and "60점" not in page("/", "xmcda.store", **{"X-ZT-Threshold": "60"})
+      and "위험점수" not in page(**{"X-ZT-Threshold": "40"}) and "위험점수" not in page("/", "xmcda.store", **{"X-ZT-Threshold": "60"}))
+check("직원 화면에 판단 기준(위치·시간·기기·IP로 계산) 문구 없음",
+      "IP 평판" not in page("/", "xmcda.store") and "접근 정책" not in page() and "다시 계산" not in page("/", "xmcda.store"))
+check("관리자 콘솔: 헤더가 없으면 '확인 불가' 표시", "확인 불가" in admin_page())
+t = admin_page(**{"X-ZT-Threshold": "40<script>alert(1)</script>"})
 check("숫자가 아닌 헤더 값은 표시하지 않고(XSS 방지) '확인 불가'", "확인 불가" in t and "alert(1)" not in t)
-check("음수/소수/공백이 섞인 값은 '확인 불가'", all("확인 불가" in page(**{"X-ZT-Threshold": v}) for v in ("-5", "4.5", " 40", "")))
-check("자리수가 비정상적으로 긴 값은 '확인 불가'", "확인 불가" in page(**{"X-ZT-Threshold": "9" * 50}))
+check("음수/소수/공백이 섞인 값은 '확인 불가'", all("확인 불가" in admin_page(**{"X-ZT-Threshold": v}) for v in ("-5", "4.5", " 40", "")))
+check("자리수가 비정상적으로 긴 값은 '확인 불가'", "확인 불가" in admin_page(**{"X-ZT-Threshold": "9" * 50}))
+# 업무 앱 가상 데이터: 인사팀 검색(목록에서만 거름, 값은 이스케이프)
+t = page("/?q=개발팀")
+check("인사팀 명부 검색: 부서로 거름 + 연락처 가림", "김하나" in t and "최유나" not in t and "010-****-" in t and "시연용 가상 데이터" in t)
+t = page("/?q=%22%3E%3Cscript%3Ealert(9)%3C/script%3E")
+check("인사팀 검색어는 이스케이프(반사형 XSS 방지) + 결과 없음 안내", "<script>alert(9)" not in t and "&lt;script&gt;alert(9)" in t and "검색 결과가 없습니다" in t)
+check("검색어 길이 제한(50자)", 'maxlength="50"' in page() )
+t = home("kim@test.com")
+check("포털 홈: 권한 없는 앱은 잠긴 타일(링크·주소 없음)", t.count('class="app-tile locked"') == 3 and t.count('class="app-tile"') == 1 and "권한 없음" in t)
+check("모든 업무 화면에 자동 로그아웃 카운트다운", 'id="zt-left"' in t and "시간 연장" in t and 'id="zt-left"' in page())
 
 # ---------- 3. 관리자 콘솔 (서버가 직접 그림) / 해제 ----------
 def admin_get(path="/", email="hana@test.com"):
@@ -175,11 +191,17 @@ pa.table.scan.return_value = {"Items": [{"session_id": f"s{i}", "timestamp": i, 
 pa.table.scan.reset_mock()
 r0 = admin_get()
 t0 = r0.get_data(as_text=True)
-check("처음 접속: 로그는 안 보이고 빨간 버튼만 있음, DynamoDB 조회 안 함", r0.status_code == 200 and "판정 로그 불러오기" in t0 and 'href="/?logs=1"' in t0
+check("처음 접속: 로그는 안 보이고 버튼만 있음, 기록 저장소 조회 안 함", r0.status_code == 200 and "판정 로그 불러오기" in t0 and 'href="/?logs=1"' in t0
       and "<th>시각(KST)</th>" not in t0 and pa.table.scan.call_count == 0, pa.table.scan.call_count)
 r = admin_get("/?logs=1")
 t = r.get_data(as_text=True)
-check("버튼(/?logs=1): 콘솔이 서버에서 그려져 200, fetch 스크립트 없음", r.status_code == 200 and "fetch(" not in t and "/api/db-data" not in t)
+check("버튼(/?logs=1): 스크립트 없이도 서버가 그린 표가 보임(200), 옛 /api/db-data 호출 없음", r.status_code == 200 and "<th>시각(KST)</th>" in t and "/api/db-data" not in t)
+check("버튼은 같은 주소의 /logs만 불러와 아래에 펼침(다른 주소/외부 호출 없음)", "fetch('/logs'" in t and t.count("fetch(") == 1)
+rf = client.get("/logs", headers={**hdr("hana@test.com"), **ADM})
+check("/logs: 관리자 -> 표 조각만(전체 페이지 아님), 저장 안 함", rf.status_code == 200 and "<th>시각(KST)</th>" in rf.get_data(as_text=True)
+      and "<!DOCTYPE" not in rf.get_data(as_text=True) and rf.headers.get("Cache-Control") == "no-store")
+check("/logs: 관리자가 아니면 403", client.get("/logs", headers={**hdr("kim@test.com"), **ADM}).status_code == 403)
+check("/logs: 관리자 콘솔 주소가 아니면 404", client.get("/logs", headers={**hdr("hana@test.com"), "Host": "dev.xmcda.store"}).status_code == 404)
 check("로그 50건만 표시, 가장 최근(timestamp 120)이 먼저", t.count("<tr><td>") == 50 and t.index("1970-01-01 09:02:00") < t.index("1970-01-01 09:01:59"), t.count("<tr><td>"))
 
 pa.table.scan.return_value = {"Items": [{"timestamp": 5, "identity": "<img src=x onerror=alert(1)>", "resource_path": "/x<script>alert(2)</script>?a=\"'",

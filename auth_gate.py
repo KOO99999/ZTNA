@@ -102,10 +102,10 @@ def deny():
     if action == "session_reauth_required":
         # 출입증(Access 토큰)이 로그인한 나라와 다른 곳에서 쓰이는 중: TOTP 재인증으로는 같은 토큰이 남으므로 다시 로그인해야 한다
         if is_api:
-            return jsonify({"status": "ReauthRequired", "message": "로그인한 위치와 지금 위치가 달라 다시 로그인이 필요합니다."}), 403
+            return jsonify({"status": "ReauthRequired", "message": "보안을 위해 세션이 종료되었습니다. 다시 로그인해 주세요."}), 403
         return _status_page("다시 로그인이 필요합니다",
-                            "로그인한 위치와 지금 접속 위치가 달라 보안을 위해 세션을 사용할 수 없습니다. "
-                            "로그아웃한 뒤 다시 로그인해 주세요.", 403, tone="warn", badge="globe")
+                            # 이유(위치가 바뀜)는 쓰지 않는다: 쿠키를 훔친 사람에게 "같은 나라에서 쓰면 된다"는 힌트가 됨
+                            "보안을 위해 현재 세션이 종료되었습니다. 로그아웃한 뒤 다시 로그인해 주세요.", 403, tone="warn", badge="globe")
 
     if action == "pdp_unavailable":
         if is_api:

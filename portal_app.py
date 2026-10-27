@@ -14,6 +14,7 @@ import boto3
 from zt_jwt import JwtVerifyError, log_jwt_failure, verify_access_jwt
 from zt_mtls import build_server_context, client_allowed, client_cert_cn, mtls_settings
 from zt_ui import TIER_LABELS, alert, app_shell, icon, link_button, status_page, tier_chip
+import demo_data
 
 app = Flask(__name__)
 dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
@@ -32,21 +33,18 @@ for _item in os.environ.get("ACCOUNT_DEPARTMENTS", "").split(";"):
     if _sep and _email.strip() and _dept.strip():
         ACCOUNT_DEPARTMENTS[_email.strip().lower()] = _dept.strip()
 # 소속 -> 보여줄 앱 (서브도메인 이름, 화면 이름)
-# 소속 -> 포털 홈에 보여 줄 업무 앱 (서브도메인, 이름, 아이콘, 설명, 보안 등급). 등급은 엔진 RESOURCE_TIERS와 같은 구성.
-DEPARTMENT_APPS = {
-    "dev": [("dev", "개발 워크스페이스", "code", "소스코드·서버 접근 업무", "기밀")],
-    "marketing": [("marketing", "마케팅 워크스페이스", "megaphone", "캠페인·홍보 자료", "내부")],
-    "hr": [("hr", "인사 워크스페이스", "users", "인사·개인정보 업무", "기밀")],
-    "admin": [("admin", "관리자 콘솔", "settings", "위험 상태 해제·판정 기록", "최고기밀")],
-}
-# 팀 앱 첫 화면 정보 (서브도메인 -> 이름, 아이콘, 허용 소속 이름, 설명)
-TEAM_INFO = {
-    "dev": ("개발 워크스페이스", "code", "개발팀", "개발팀 전용 업무 공간입니다. 소스코드와 서버 접근 업무를 다룹니다."),
-    "marketing": ("마케팅 워크스페이스", "megaphone", "마케팅팀", "마케팅팀 전용 업무 공간입니다. 캠페인과 홍보 자료를 다룹니다."),
-    "hr": ("인사 워크스페이스", "users", "인사팀", "인사팀 전용 업무 공간입니다. 임직원 개인정보를 다루므로 접근 기록이 모두 남습니다."),
-}
-# 해제 폼의 CSRF 토큰 서명 키. 서버 시작 때 만들어 환경변수로 넘긴다(여러 워커가 같은 값을 써야 함).
-# 없으면 프로세스마다 임의 값(단일 워커에서만 동작) - 키를 못 읽어도 위조 토큰은 못 만든다.
+# 포털 홈의 업무 앱 (서브도메인, 이름, 아이콘, 설명, 보안 등급, 색). 등급은 엔진 RESOURCE_TIERS와 같은 구성.
+# 내 소속 앱만 링크가 걸리고, 나머지는 "권한 없음"으로 잠긴 타일(링크/주소 없음)로 보인다. 실제 허용/차단은 각 앱의 Access 정책이 한다.
+ALL_APPS = [
+    ("dev", "개발팀", "code", "배포 이력 · 서버 목록", "기밀", "c-indigo"),
+    ("hr", "인사팀", "users", "임직원 명부 · 인사 기록", "기밀", "c-pink"),
+    ("marketing", "마케팅팀", "megaphone", "캠페인 · 홍보 자료", "내부", "c-amber"),
+    ("admin", "관리자 콘솔", "settings", "위험 상태 · 판정 기록", "최고기밀", "c-sky"),
+]
+DEPARTMENT_APPS = {"dev": {"dev"}, "marketing": {"marketing"}, "hr": {"hr"}, "admin": {"admin"}}
+DEPARTMENT_NAMES = {"dev": "개발팀", "marketing": "마케팅팀", "hr": "인사팀", "admin": "보안관리"}
+COUNTRY_NAMES = {"KR": "대한민국", "US": "미국", "JP": "일본", "CN": "중국", "DE": "독일", "GB": "영국", "SG": "싱가포르"}
+WEEKDAYS = "월화수목금토일"
 CSRF_SECRET = (os.environ.get("CSRF_SECRET") or base64.b64encode(os.urandom(32)).decode()).encode()
 CSRF_TTL_SECONDS = 30 * 60
 LOG_SCAN_CAP = 3000      # 감사 로그는 최대 이만큼만 읽어서 최근 순으로 정렬
@@ -192,51 +190,40 @@ if os.environ.get("ZT_DEBUG_HEADERS") == "1":
         })
 
 
-# 15분 동안 아무 입력이 없으면 로그아웃한다(13분에 미리 알림, "계속 사용"을 누르면 연장).
-# 로그아웃은 로그인 서버의 /logout으로 보내 모든 앱의 세션을 같이 지운다(앱 하나만 지우면 다른 앱 세션이 남음).
-_INACTIVITY_SCRIPT = """<div class="toast" id="idle-toast" role="status"><div><b>곧 자동 로그아웃됩니다</b>
-<div class="small" style="opacity:.8;margin-top:2px">2분 동안 입력이 없으면 보안을 위해 로그아웃합니다.</div></div>
-<button class="btn btn-secondary" type="button" id="idle-keep">계속 사용</button></div>
-<script>
-(function(){var WARN=13*60*1000,LIMIT=15*60*1000,t1,t2,toast=document.getElementById('idle-toast');
-var out=document.querySelector('[data-logout]');var url=out?out.getAttribute('href'):'/';
-function reset(){clearTimeout(t1);clearTimeout(t2);toast.classList.remove('show');
-t1=setTimeout(function(){toast.classList.add('show');},WARN);t2=setTimeout(function(){window.location.href=url;},LIMIT);}
-['mousemove','keydown','click','scroll','touchstart'].forEach(function(ev){document.addEventListener(ev,function(){if(!toast.classList.contains('show'))reset();},{passive:true});});
-document.getElementById('idle-keep').addEventListener('click',reset);reset();})();
-</script>"""
-
 # 로그아웃 후 '뒤로 가기'로 브라우저가 저장해 둔 화면(bfcache)을 그대로 꺼내 보여주는 경우가 있다
 # (Cache-Control: no-store만으로는 브라우저에 따라 막히지 않음). 저장된 화면으로 돌아오면 다시 불러오게 한다.
 _BFCACHE_SCRIPT = "<script>window.addEventListener('pageshow',function(e){if(e.persisted)window.location.reload();});</script>"
 
 
-def session_card():
-    """내 세션 정보: 계정, 이 서비스의 보안 등급, 이 요청에 실제로 적용된 허용 위험점수(판단 서비스가 알려준 값)."""
-    threshold = getattr(g, 'threshold', None)
-    threshold_str = f"{threshold}점 이하" if threshold is not None else "확인 불가"
-    tier = getattr(g, 'tier', None)
-    tier_html = tier_chip(tier) if tier else '<span class="muted">확인 불가</span>'
-    return f"""<section class="card"><h2 class="card-title">{icon("shield-check", 18)}내 접속 보안 상태</h2>
-      <dl class="kv" style="margin-bottom:12px">
-        <dt>로그인 계정</dt><dd>{esc(getattr(g, 'identity', None) or '-')}</dd>
-        <dt>이 서비스 보안 등급</dt><dd>{tier_html}</dd>
-        <dt>허용 위험점수</dt><dd>{esc(threshold_str)}</dd>
-      </dl>
-      <p class="small muted">접속 위치·시간·기기·IP 평판으로 매 요청 위험도를 다시 계산합니다.
-      평소와 다르면 추가 인증을 요청하며, 15분 동안 사용하지 않으면 자동으로 로그아웃됩니다.</p></section>"""
-
-
 def render_page(title, content_html, heading=None, desc=None, crumb=None, wide=False, actions_html=""):
-    """업무 화면 공통 틀(zt_ui.app_shell) + 자동 로그아웃 + 뒤로 가기 캐시 방지."""
+    """업무 화면 공통 틀(zt_ui.app_shell: 상단 바, 자동 로그아웃 카운트다운) + 뒤로 가기 캐시 방지."""
     return app_shell(title, content_html, user=getattr(g, 'identity', None), heading=heading or title, desc=desc,
                      crumb=crumb, wide=wide, actions_html=actions_html, home_href=f"https://{PORTAL_DOMAIN}/",
-                     logout_href=f"https://{AUTH_DOMAIN}/logout", head_extra=_BFCACHE_SCRIPT, foot_html=_INACTIVITY_SCRIPT)
+                     logout_href=f"https://{AUTH_DOMAIN}/logout", head_extra=_BFCACHE_SCRIPT)
 
 
 def _crumb(*parts):
-    home = f'<a href="https://{esc(PORTAL_DOMAIN)}/">{icon("home", 14)} 홈</a>'
+    home = f'<a href="https://{esc(PORTAL_DOMAIN)}/">홈</a>'
     return " / ".join([home] + [esc(p) for p in parts])
+
+
+def _today_line(dept=None):
+    now = datetime.now(KST)
+    line = f"{now.month}월 {now.day}일 {WEEKDAYS[now.weekday()]}요일"
+    return f"{line} · {DEPARTMENT_NAMES.get(dept, dept)}" if dept else line
+
+
+def _greeting():
+    h = datetime.now(KST).hour
+    return "좋은 아침이에요" if 5 <= h < 12 else ("좋은 오후예요" if 12 <= h < 18 else "오늘도 수고 많으셨어요")
+
+
+def _demo_note():
+    return f'<span class="demo-note">{icon("info", 13)} 시연용 가상 데이터</span>'
+
+
+def _stat(label, value, small=False):
+    return f'<div class="stat"><div class="label">{esc(label)}</div><div class="value{" sm" if small else ""}">{value}</div></div>'
 
 
 @app.route('/')
@@ -253,39 +240,37 @@ def general():
         if host == f"{team}.{PORTAL_DOMAIN}":
             return page()
 
-    # 내 소속에서 쓸 수 있는 앱만 링크로 보여준다(Okta 대시보드·Microsoft My Apps처럼 "내 앱" 목록).
-    # 표시만 정하는 것이고, 링크를 직접 입력해도 실제 허용/차단은 각 앱의 Access 정책이 한다.
     identity = (getattr(g, "identity", "") or "").lower()
     dept = ACCOUNT_DEPARTMENTS.get(identity)
-    apps = DEPARTMENT_APPS.get(dept, [])
-    if apps:
-        tiles = "".join(
-            f'<a class="app-tile" href="https://{sub}.{PORTAL_DOMAIN}/">'
-            f'<span class="app-icon">{icon(ic, 22)}</span>'
-            f'<span class="app-name">{esc(name)}</span>'
-            f'<span class="app-desc">{esc(desc)}</span>'
-            f'<span class="app-foot">{tier_chip(label=tier)}<span>{icon("arrow-right", 16)}</span></span>'
-            f'</a>'
-            for sub, name, ic, desc, tier in apps)
-        app_html = f'<div class="app-grid">{tiles}</div>'
-    else:
-        app_html = '<div class="empty">사용할 수 있는 업무 앱이 없습니다. 필요하면 소속 부서장을 통해 권한을 요청하세요.</div>'
-    notices = (
-        ("alert", "피싱 메일 주의", "회사 로그인 화면은 auth 주소에서만 열립니다. 메일 링크로 열린 로그인 화면에는 비밀번호를 입력하지 마세요."),
-        ("device", "회사 기기 보안 유지", "보안 에이전트(WARP) 연결과 Windows 방화벽을 켠 상태로 업무 시스템을 이용하세요."),
-        ("logout", "공용 PC 사용 후 로그아웃", "자리를 비울 때는 오른쪽 위 로그아웃을 누르고 브라우저 창을 닫아 주세요."),
-    )
-    notice_html = "".join(f'<li>{icon(ic, 18)}<div><b>{esc(t)}</b><div class="small muted">{esc(d)}</div></div></li>'
-                          for ic, t, d in notices)
+    mine = DEPARTMENT_APPS.get(dept, set())
+    tiles = ""
+    for sub, name, ic, desc, tier, color in ALL_APPS:
+        inner = (f'<span class="bx {color}">{icon(ic, 24)}</span><span class="app-name">{esc(name)}</span>'
+                 f'<span class="app-desc">{esc(desc)}</span>')
+        if sub in mine:
+            tiles += (f'<a class="app-tile" href="https://{sub}.{PORTAL_DOMAIN}/">{inner}'
+                      f'<span class="app-foot">{tier_chip(label=tier)}<span class="faint">{icon("arrow-right", 18)}</span></span></a>')
+        else:   # 권한 없는 앱: 주소를 화면에 남기지 않는다(링크 없음)
+            tiles += (f'<div class="app-tile locked" aria-disabled="true">{inner}'
+                      f'<span class="app-foot"><span class="chip">{icon("lock", 13)}권한 없음</span></span></div>')
+    empty = ('' if mine else '<div class="empty" style="margin-bottom:14px">사용할 수 있는 업무 앱이 없습니다. '
+             '필요하면 소속 부서장을 통해 권한을 요청하세요.</div>')
+    notices = "".join(f'<li><span class="chip {"chip-" + kind if kind else ""}">{esc(tag)}</span>{esc(title)}<span class="end">{esc(date)}</span></li>'
+                      for tag, kind, title, date in demo_data.NOTICES)
+    country = request.headers.get("CF-IPCountry", "")
+    place = COUNTRY_NAMES.get(country, country) if country and country != "XX" else "확인 불가"
+    ip = request.headers.get("Cf-Connecting-Ip", "") or "확인 불가"
+    me = (f'<div class="sec-item"><span class="bx">{icon("user", 20)}</span><div><b>{esc(identity or "-")}</b><span>로그인 계정</span></div></div>'
+          f'<div class="sec-item"><span class="bx">{icon("globe", 20)}</span><div><b>{esc(place)}</b><span>현재 접속 위치</span></div></div>'
+          f'<div class="sec-item"><span class="bx">{icon("device", 20)}</span><div><b class="mono" style="font-size:14px">{esc(ip)}</b><span>현재 접속 IP</span></div></div>'
+          f'<p class="small faint" style="margin-top:10px">본인이 접속한 기록이 아니라면 즉시 보안 관리자에게 알려 주세요.</p>')
     name = identity.split("@")[0] if identity else "사용자"
-    html = f"""<div class="grid grid-2">
-      <section class="card"><h2 class="card-title">{icon("folder", 18)}내 업무 앱
-        <span class="right small muted">소속에 따라 보이는 앱이 다릅니다</span></h2>{app_html}</section>
-      <div class="grid" style="align-content:start">{session_card()}
-        <section class="card"><h2 class="card-title">{icon("info", 18)}보안 공지</h2><ul class="list">{notice_html}</ul></section>
-      </div></div>"""
-    return render_page("워크스페이스 홈", html, heading=f"안녕하세요, {name}님",
-                       desc="필요한 업무 앱을 선택하세요. 접속할 때마다 보안 상태를 확인합니다.")
+    html = f"""{empty}<div class="app-grid">{tiles}</div>
+    <div class="grid grid-2" style="margin-top:14px">
+      <section class="card"><h2 class="card-title">전사 공지<span class="right">{_demo_note()}</span></h2><ul class="list">{notices}</ul></section>
+      <section class="card"><h2 class="card-title">내 접속 정보</h2>{me}</section>
+    </div>"""
+    return render_page("사내 포털", html, heading=f"{name}님, {_greeting()}", desc=_today_line(dept))
 
 
 # 관리자 화면에서 신호/판정 코드를 사람이 읽는 이름으로 (코드도 작게 같이 보여 준다 - 관리자는 로그와 대조해야 하므로)
@@ -393,45 +378,70 @@ def admin_console():
         risk_html = ('<div class="table-wrap"><table class="table"><tr><th>사용자</th><th>신호</th><th>걸린 시각</th><th>마지막 감지</th><th>출처</th><th></th></tr>'
                      + rows + "</table></div>" + more)
 
-    # --- 최근 판정 로그: 빨간 버튼(/?logs=1)을 눌렀을 때만 읽는다(평소에는 DynamoDB를 조회하지 않음) ---
-    if request.args.get("logs") == "1":
-        logs, truncated = _recent_logs()
-        if logs is None:
-            log_body = alert("error", "판정 기록을 불러오지 못했습니다. 잠시 후 다시 시도하세요.")
-        elif not logs:
-            log_body = '<div class="empty">기록이 없습니다.</div>' 
-        else:
-            rows = ""
-            for it in logs:
-                reasons = it.get("reasons") or []
-                reasons = ", ".join(str(r) for r in reasons) if isinstance(reasons, (list, tuple, set)) else str(reasons)
-                rows += (f"<tr><td>{esc(_fmt_ts(it.get('timestamp')))}</td><td>{esc(it.get('identity', '-'))}</td>"
-                         f"<td>{esc(it.get('resource_path', '-'))}</td><td>{esc(it.get('risk_score', '-'))}</td>"
-                         f"<td>{esc(it.get('resource_threshold', '-'))}</td><td>{_action_chip(it.get('action'))}</td>"
-                         f"<td>{esc(it.get('source', '-'))}</td><td class=\"wrap small\">{esc(reasons)}</td></tr>")
-            note = (f"최근 {len(logs)}건 (최신순)" +
-                    (f" - 로그가 많아 최근 {LOG_SCAN_CAP}건 안에서만 정렬했습니다" if truncated else ""))
-            log_body = (f'<p class="small muted" style="margin-bottom:8px">{esc(note)}</p><div class="table-wrap"><table class="table">'
-                        "<tr><th>시각(KST)</th><th>사용자</th><th>자원</th><th>점수</th>"
-                        "<th>임계값</th><th>판정</th><th>출처</th><th>사유</th></tr>" + rows + "</table></div>")
-        log_tools = link_button("/", "닫기", "secondary btn-sm", "list")
-    else:
-        log_body = ('<div class="empty">판정 기록은 필요할 때만 불러옵니다(평소에는 기록 저장소를 조회하지 않음). '
-                    '실시간 분석은 관제 콘솔(Kibana)을 이용하세요.</div>')
-        log_tools = link_button("/?logs=1", "판정 로그 불러오기", "primary btn-sm", "list")
-
+    # --- 최근 판정 기록: 버튼을 눌렀을 때만 읽는다(평소에는 기록 저장소를 조회하지 않음) ---
+    #   버튼은 같은 주소의 /logs(표 조각)를 불러와 바로 아래에 펼친다(새로고침 없음). 스크립트가 꺼진 브라우저는 /?logs=1로 같은 표를 본다.
+    opened = request.args.get("logs") == "1"
+    log_panel = _logs_fragment() if opened else ""
+    log_tools = (f'<a class="btn btn-soft btn-sm" href="/?logs=1" data-logs-toggle aria-expanded="{"true" if opened else "false"}">'
+                 f'{icon("list", 16)}<span>{"판정 로그 접기" if opened else "판정 로그 불러오기"}</span></a>')
+    threshold = getattr(g, 'threshold', None)
+    count = len(listing.get("items") or []) if listing and listing.get("ok") else None
+    stats = (_stat("위험 상태 사용자", f"{count}명" if count is not None else "-")
+             + _stat("이 화면 보안 등급", tier_chip("top_secret"), small=True)
+             + _stat("허용 위험점수", esc(f"{threshold}점 이하" if threshold is not None else "확인 불가"), small=True)
+             + _stat("자동 로그아웃", "15분 무활동", small=True))
     html = f"""{msg_html}
-    <div class="grid">
-      <div class="grid grid-2">
-        <section class="card"><h2 class="card-title">{icon("alert", 18)}위험 상태가 걸린 사용자</h2>
-          <p class="small muted" style="margin:-6px 0 12px">해제하면 기록이 남습니다. 본인 항목은 다른 관리자가 해제해야 합니다.</p>{risk_html}</section>
-        <div class="grid" style="align-content:start">{session_card()}</div>
-      </div>
-      <section class="card"><h2 class="card-title">{icon("list", 18)}최근 판정 기록<span class="right">{log_tools}</span></h2>{log_body}</section>
-    </div>"""
+    <div class="grid grid-4" style="margin-bottom:14px">{stats}</div>
+    <section class="card" style="margin-bottom:14px"><h2 class="card-title">위험 상태가 걸린 사용자</h2>
+      <p class="card-desc">MFA로 풀리지 않는 보안 신호가 걸린 사용자입니다. 해제하면 기록이 남고, 본인 항목은 다른 관리자가 해제해야 합니다.</p>{risk_html}</section>
+    <section class="card"><h2 class="card-title">최근 판정 기록<span class="right">{log_tools}</span></h2>
+      <p class="card-desc">위험점수 판단 결과입니다. 실시간 분석과 알림은 관제 콘솔(Kibana)에서 봅니다.</p>
+      <div data-panel id="log-panel">{log_panel}</div></section>
+    <script>
+    (function(){{var b=document.querySelector('[data-logs-toggle]'),panel=document.getElementById('log-panel');if(!b)return;
+    b.addEventListener('click',function(e){{e.preventDefault();var label=b.querySelector('span');
+      if(b.getAttribute('aria-expanded')==='true'){{panel.innerHTML='';b.setAttribute('aria-expanded','false');label.textContent='판정 로그 불러오기';return;}}
+      label.textContent='불러오는 중...';
+      fetch('/logs',{{credentials:'same-origin',headers:{{'Accept':'text/html'}}}}).then(function(r){{if(!r.ok)throw new Error(r.status);return r.text();}})
+      .then(function(h){{panel.innerHTML=h;b.setAttribute('aria-expanded','true');label.textContent='판정 로그 접기';}})
+      .catch(function(){{panel.innerHTML='<div class="alert alert-error">판정 기록을 불러오지 못했습니다. 잠시 후 다시 시도하세요.</div>';label.textContent='판정 로그 불러오기';}});
+    }});}})();
+    </script>"""
     return render_page("관리자 콘솔", html, crumb=_crumb("관리자 콘솔"), wide=True,
-                       desc="MFA로 풀리지 않는 보안 신호가 걸린 사용자를 확인하고 해제합니다. 모든 작업은 기록됩니다.",
+                       desc="보안 신호가 걸린 사용자를 확인·해제하고 판정 기록을 봅니다. 모든 작업은 기록됩니다.",
                        actions_html=tier_chip("top_secret"))
+
+
+def _logs_fragment():
+    """최근 판정 기록 표(HTML 조각). 관리자 콘솔이 /logs로 불러와 끼워 넣거나 /?logs=1일 때 바로 그린다."""
+    logs, truncated = _recent_logs()
+    if logs is None:
+        return alert("error", "판정 기록을 불러오지 못했습니다. 잠시 후 다시 시도하세요.")
+    if not logs:
+        return '<div class="empty">기록이 없습니다.</div>'
+    rows = ""
+    for it in logs:
+        reasons = it.get("reasons") or []
+        reasons = ", ".join(str(r) for r in reasons) if isinstance(reasons, (list, tuple, set)) else str(reasons)
+        rows += (f"<tr><td>{esc(_fmt_ts(it.get('timestamp')))}</td><td>{esc(it.get('identity', '-'))}</td>"
+                 f"<td>{esc(it.get('resource_path', '-'))}</td><td><b>{esc(it.get('risk_score', '-'))}</b></td>"
+                 f"<td>{esc(it.get('resource_threshold', '-'))}</td><td>{_action_chip(it.get('action'))}</td>"
+                 f"<td>{esc(it.get('source', '-'))}</td><td class=\"wrap\">{esc(reasons)}</td></tr>")
+    note = (f"최근 {len(logs)}건 (최신순)" +
+            (f" - 기록이 많아 최근 {LOG_SCAN_CAP}건 안에서만 정렬했습니다" if truncated else ""))
+    return (f'<p class="small muted" style="margin-bottom:10px">{esc(note)}</p><div class="table-wrap"><table class="table">'
+            "<tr><th>시각(KST)</th><th>사용자</th><th>자원</th><th>점수</th>"
+            "<th>임계값</th><th>판정</th><th>출처</th><th>사유</th></tr>" + rows + "</table></div>")
+
+
+@app.route('/logs')
+def logs_fragment():
+    """관리자 콘솔 전용: 판정 기록 표 조각. 같은 Access 앱/같은 JWT 검증/같은 위험도 판단을 거친 요청만 여기 온다."""
+    if not request.host.startswith('admin.'):
+        return _status_page("찾을 수 없음", "잘못된 경로입니다.", 404)
+    if not _is_admin(g.identity):
+        return _status_page("접근이 거부되었습니다", "관리자 권한이 필요한 영역입니다.", 403)
+    return _logs_fragment(), 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 @app.route('/risk/release', methods=['POST'])
@@ -461,40 +471,73 @@ def risk_release():
 # 범위라, 거기서 팀 페이지를 보여주면 다른 팀 직원도 볼 수 있게 되기 때문이다.
 
 
-def team_page(team):
-    """팀 앱 첫 화면: 이 서비스가 어떤 조건으로 보호되는지(접근 정책)와 팀 공지 자리."""
-    name, ic, members, desc = TEAM_INFO[team]
-    tier = getattr(g, 'tier', None)
-    threshold = getattr(g, 'threshold', None)
-    policy = (
-        ("users", "허용 대상", f"{members} 소속 계정"),
-        ("lock", "로그인", "회사 계정 + 2단계 인증(인증 앱)"),
-        ("shield-check", "요청마다 재확인", "접속 위치·시간·기기·IP 평판으로 위험도를 다시 계산" +
-         (f" (허용 위험점수 {threshold}점 이하)" if threshold is not None else "")),
-        ("alert", "평소와 다르면", "추가 인증을 요구하고, 위험이 크면 차단해 보안 이벤트로 기록"),
-    )
-    policy_html = "".join(f'<li>{icon(i, 18)}<div><b>{esc(t)}</b><div class="small muted">{esc(d)}</div></div></li>'
-                          for i, t, d in policy)
-    html = f"""<div class="grid grid-2">
-      <div class="grid" style="align-content:start">
-        <section class="card"><h2 class="card-title">{icon(ic, 18)}팀 공지</h2>
-          <div class="empty">등록된 공지가 없습니다.</div></section>
-        <section class="card"><h2 class="card-title">{icon("shield", 18)}이 서비스의 접근 정책</h2><ul class="list">{policy_html}</ul></section>
-      </div>
-      <div class="grid" style="align-content:start">{session_card()}</div></div>"""
-    return render_page(name, html, crumb=_crumb(name), desc=desc, actions_html=tier_chip(tier) if tier else "")
+def _table(headers, rows_html):
+    head = "".join(f"<th>{esc(h)}</th>" for h in headers)
+    return f'<div class="table-wrap"><table class="table"><tr>{head}</tr>{rows_html}</table></div>'
+
+
+_STATUS_DOT = {"성공": "dot-ok", "정상": "dot-ok", "재직": "dot-ok", "진행 중": "dot-warn", "점검 중": "dot-warn", "준비": "dot-warn",
+               "휴직": "dot-warn", "실패": "dot-bad", "경고": "dot-bad", "종료": ""}
+
+
+def _status(text):
+    return f'<span class="dot {_STATUS_DOT.get(text, "")}"></span>{esc(text)}'
 
 
 def dev_page():
-    return team_page("dev")
+    d = demo_data.DEPLOYMENTS
+    stats = (_stat("최근 배포", f"{len(d)}건") + _stat("실패", f"{sum(1 for x in d if x[3] == '실패')}건")
+             + _stat("운영 서버", f"{sum(1 for x in demo_data.SERVERS if x[2] == '운영')}대") + _stat("진행 중", f"{sum(1 for x in d if x[3] == '진행 중')}건"))
+    deploy = "".join(f"<tr><td><b>{esc(a)}</b></td><td class=\"mono\">{esc(b)}</td><td>{esc(c)}</td><td>{_status(r)}</td><td>{esc(t)}</td><td>{esc(o)}</td></tr>"
+                     for a, b, c, r, t, o in d)
+    servers = "".join(f"<tr><td class=\"mono\">{esc(h)}</td><td>{esc(r)}</td><td>{esc(e)}</td><td>{_status(st)}</td><td>{esc(c)}</td></tr>"
+                      for h, r, e, st, c in demo_data.SERVERS)
+    html = f"""<div class="grid grid-4" style="margin-bottom:14px">{stats}</div>
+    <section class="card" style="margin-bottom:14px"><h2 class="card-title">최근 배포 이력<span class="right">{_demo_note()}</span></h2>
+      {_table(("서비스", "버전", "환경", "결과", "시각", "담당"), deploy)}</section>
+    <section class="card"><h2 class="card-title">서버 목록<span class="right">{_demo_note()}</span></h2>
+      {_table(("호스트", "역할", "환경", "상태", "최근 점검"), servers)}</section>"""
+    return render_page("개발팀", html, crumb=_crumb("개발팀"), desc="개발팀 전용 업무 공간입니다. 배포 이력과 서버 현황을 확인합니다.",
+                       actions_html=tier_chip(getattr(g, 'tier', None)) if getattr(g, 'tier', None) else "")
 
 
 def marketing_page():
-    return team_page("marketing")
+    c = demo_data.CAMPAIGNS
+    stats = (_stat("진행 중 캠페인", f"{sum(1 for x in c if x[4] == '진행 중')}건") + _stat("준비", f"{sum(1 for x in c if x[4] == '준비')}건")
+             + _stat("총 예산", f"{sum(x[3] for x in c):,}만원") + _stat("종료", f"{sum(1 for x in c if x[4] == '종료')}건"))
+    rows = "".join(f"<tr><td><b>{esc(n)}</b></td><td>{esc(ch)}</td><td>{esc(per)}</td><td>{b:,}만원</td><td>{_status(st)}</td>"
+                   f"<td><div style=\"background:var(--line-2);border-radius:6px;height:8px;width:120px\">"
+                   f"<div style=\"background:var(--brand);border-radius:6px;height:8px;width:{int(pct) * 120 // 100}px\"></div></div></td></tr>"
+                   for n, ch, per, b, st, pct in c)
+    html = f"""<div class="grid grid-4" style="margin-bottom:14px">{stats}</div>
+    <section class="card"><h2 class="card-title">캠페인 현황<span class="right">{_demo_note()}</span></h2>
+      {_table(("캠페인", "채널", "기간", "예산", "상태", "진행률"), rows)}</section>"""
+    return render_page("마케팅팀", html, crumb=_crumb("마케팅팀"), desc="마케팅팀 전용 업무 공간입니다. 캠페인과 홍보 자료를 관리합니다.",
+                       actions_html=tier_chip(getattr(g, 'tier', None)) if getattr(g, 'tier', None) else "")
 
 
 def hr_page():
-    return team_page("hr")
+    """인사팀: 임직원 명부와 검색. 검색어는 목록에서만 거른다(SQL 없음). 웹 서버 WAF가 검색어를 먼저 검사한다(시연 표적)."""
+    query = (request.args.get("q") or "")[:50]
+    found = demo_data.search_employees(query)
+    e = demo_data.EMPLOYEES
+    stats = (_stat("전체 임직원", f"{len(e)}명") + _stat("부서", f"{len({x[2] for x in e})}개")
+             + _stat("이번 달 입사", f"{sum(1 for x in e if x[4].startswith('2026-10'))}명") + _stat("휴직", f"{sum(1 for x in e if x[6] == '휴직')}명"))
+    rows = "".join(f"<tr><td class=\"mono\">{esc(no)}</td><td><b>{esc(nm)}</b></td><td>{esc(dp)}</td><td>{esc(rk)}</td><td>{esc(jd)}</td>"
+                   f"<td class=\"mono\">{esc(demo_data.masked_phone(ph))}</td><td>{_status(st)}</td></tr>"
+                   for no, nm, dp, rk, jd, ph, st in found)
+    table = _table(("사번", "이름", "부서", "직급", "입사일", "연락처", "상태"), rows) if found else '<div class="empty">검색 결과가 없습니다.</div>'
+    result = (f'<span class="small muted">"{esc(query)}" 검색 결과 {len(found)}명</span>' if query else
+              f'<span class="small muted">전체 {len(found)}명</span>')
+    html = f"""<div class="grid grid-4" style="margin-bottom:14px">{stats}</div>
+    <section class="card"><h2 class="card-title">임직원 명부<span class="right">{_demo_note()}</span></h2>
+      <form class="toolbar" method="get" action="/" role="search">
+        <label class="search">{icon("search", 18)}<input type="search" name="q" value="{esc(query)}" maxlength="50" placeholder="이름, 부서, 사번으로 검색"></label>
+        <button class="btn btn-primary btn-sm" type="submit">검색</button>{result}</form>
+      {table}
+      <p class="small faint" style="margin-top:12px">개인정보 보호를 위해 연락처 일부를 가려서 표시합니다. 이 화면의 조회 기록은 모두 남습니다.</p></section>"""
+    return render_page("인사팀", html, crumb=_crumb("인사팀"), desc="인사팀 전용 업무 공간입니다. 임직원 개인정보를 다룹니다.",
+                       actions_html=tier_chip(getattr(g, 'tier', None)) if getattr(g, 'tier', None) else "")
 
 
 TEAM_PAGES = {"dev": dev_page, "marketing": marketing_page, "hr": hr_page}

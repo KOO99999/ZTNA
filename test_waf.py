@@ -208,6 +208,12 @@ cb = read("code_bucket.tf")
 ok("S3: 웹 서버 역할은 자기 코드(web/) GetObject만", '"web/zt_waf.py"    = "${path.module}/zt_waf.py"' in cb
    and 'resource "aws_iam_role_policy" "web_code_read"' in cb and "role = aws_iam_role.ec2_role.id" in cb)
 ok("웹 서버는 코드 파일과 읽기 권한이 생긴 뒤 생성", "aws_s3_object.web_code, aws_iam_role_policy.web_code_read," in read("ec2_web.tf"))
+ok("화면 글꼴: nginx 앞단 두 곳(로그인/업무)에서 /_zt/assets/만 정적 제공(이 폴더 밖/앱으로 넘기지 않음), 캐시·nosniff",
+   tpl.count("location ^~ /_zt/assets/ {") == 2 and tpl.count("alias /opt/ztgate/assets/;") == 2
+   and "types { font/woff2 woff2; }" in tpl and 'add_header X-Content-Type-Options nosniff;' in tpl)
+ok("글꼴은 S3에서 받고 실패해도 서버 기동은 계속", "web/assets/PretendardVariable.woff2" in tpl and 'echo "font download failed' in tpl
+   and '"web/assets/PretendardVariable.woff2" = "${path.module}/assets/PretendardVariable.woff2"' in read("code_bucket.tf"))
+ok("nginx 안내 화면(차단/장애)에 내부 판단 방식 문구 없음", "위험도에 반영" not in tpl and "접근 판단 서비스에 연결할 수 없어 접근을 차단했습니다. 잠시" not in tpl)
 ok("Ubuntu 24.04(PEP 668): 판단 서비스는 전용 가상환경으로 실행",
    "python3 -m venv /opt/ztgate/venv" in tpl and "ExecStart=/opt/ztgate/venv/bin/python -m gunicorn" in tpl
    and "pip3 install" not in tpl and "  if python3 -c" not in tpl)

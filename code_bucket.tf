@@ -75,6 +75,7 @@ locals {
     "app/zt_jwt.py"     = "${path.module}/zt_jwt.py"
     "app/zt_mtls.py"    = "${path.module}/zt_mtls.py"
     "app/zt_ui.py"      = "${path.module}/zt_ui.py"
+    "app/demo_data.py"  = "${path.module}/demo_data.py"
   }
   # 웹 서버(판단 서비스)가 내려받는 코드 파일
   web_code_files = {
@@ -83,6 +84,8 @@ locals {
     "web/zt_risk.py"   = "${path.module}/zt_risk.py"
     "web/zt_waf.py"    = "${path.module}/zt_waf.py"
     "web/zt_ui.py"     = "${path.module}/zt_ui.py"
+    # 화면 글꼴(Pretendard, SIL OFL 1.1 - assets/Pretendard-OFL.txt). nginx가 /_zt/assets/로 직접 내려준다
+    "web/assets/PretendardVariable.woff2" = "${path.module}/assets/PretendardVariable.woff2"
   }
 }
 

@@ -31,6 +31,13 @@ for name in ('auth_gate.py', 'zt_jwt.py', 'zt_risk.py', 'zt_waf.py', 'zt_ui.py')
   sleep 10
 done
 test -s /opt/ztgate/auth_gate.py || { echo "gate code download failed"; exit 1; }
+# 화면 글꼴(Pretendard, SIL OFL 1.1): nginx가 /_zt/assets/에서 직접 내려준다. 실패해도 화면은 운영체제 글꼴로 보이므로 계속 진행.
+mkdir -p /opt/ztgate/assets
+/opt/ztgate/venv/bin/python -c "
+import boto3
+boto3.client('s3', region_name='${aws_region}').download_file('${code_bucket}', 'web/assets/PretendardVariable.woff2', '/opt/ztgate/assets/PretendardVariable.woff2')
+" || echo "font download failed (fallback to system font)"
+chmod 755 /opt/ztgate/assets; chmod 644 /opt/ztgate/assets/* 2>/dev/null || true
 
 chown -R root:root /opt/ztgate
 chmod 755 /opt/ztgate
@@ -188,6 +195,17 @@ server {
     listen 80;
     server_name ${auth_domain};
 
+    # 화면 글꼴 같은 공개 정적 파일: 인증 없이 nginx가 직접 내려준다(숨길 것이 없는 파일이고, 차단 화면에서도 글꼴이 보이게).
+    # 이 경로에는 이 폴더의 파일만 있고 앱으로 넘어가지 않는다.
+    location ^~ /_zt/assets/ {
+        alias /opt/ztgate/assets/;
+        types { font/woff2 woff2; }
+        default_type application/octet-stream;
+        add_header Cache-Control "public, max-age=2592000, immutable";
+        add_header X-Content-Type-Options nosniff;
+        access_log off;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:8082;
         proxy_set_header Host $host;
@@ -200,6 +218,17 @@ server {
 
 server {
     listen 80 default_server;
+
+    # 화면 글꼴 같은 공개 정적 파일: 인증 없이 nginx가 직접 내려준다(숨길 것이 없는 파일이고, 차단 화면에서도 글꼴이 보이게).
+    # 이 경로에는 이 폴더의 파일만 있고 앱으로 넘어가지 않는다.
+    location ^~ /_zt/assets/ {
+        alias /opt/ztgate/assets/;
+        types { font/woff2 woff2; }
+        default_type application/octet-stream;
+        add_header Cache-Control "public, max-age=2592000, immutable";
+        add_header X-Content-Type-Options nosniff;
+        access_log off;
+    }
 
     location = /_zt_auth {
         internal;
@@ -230,7 +259,7 @@ server {
     location @zt_unavailable {
         internal;
         default_type "text/html; charset=utf-8";
-        return 503 '<!DOCTYPE html><html><head><meta charset="utf-8"><title>일시적으로 확인할 수 없습니다</title></head><body><h2>일시적으로 확인할 수 없습니다</h2><p>접근 판단 서비스에 연결할 수 없어 접근을 차단했습니다. 잠시 후 다시 시도해 주세요.</p></body></html>';
+        return 503 '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>일시적으로 확인할 수 없습니다 · XMCDA</title><style>@font-face{font-family:Pretendard;src:url(/_zt/assets/PretendardVariable.woff2) format("woff2");font-weight:45 920}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;font-family:Pretendard,"Malgun Gothic",sans-serif;color:#191f28;background:linear-gradient(135deg,#e8f0fe,#f5f6f8 45%,#eaf6f3)}.c{max-width:440px;width:100%;background:#fff;border-radius:12px;padding:44px;box-shadow:0 2px 4px rgba(0,0,0,.06),0 18px 44px rgba(17,24,39,.12)}h1{font-size:24px;margin:18px 0 8px}p{color:#4e5968;line-height:1.6;margin:0 0 24px}a{display:inline-block;background:#3182f6;color:#fff;text-decoration:none;font-weight:600;padding:12px 18px;border-radius:10px}.b{width:44px;height:44px;border-radius:12px;background:#ffeeee;color:#e42939;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px}</style></head><body><div class="c"><div class="b">!</div><h1>일시적으로 확인할 수 없습니다</h1><p>보안 확인 서비스에 연결할 수 없어 안전을 위해 접속을 막았습니다. 잠시 후 다시 시도해 주세요.</p><a href="https://${domain_name}/">포털 홈으로</a></div></body></html>';
     }
 
     location @zt_unavailable_api {
@@ -275,7 +304,7 @@ server {
 
     location @zt_waf_blocked {
         default_type "text/html; charset=utf-8";
-        return 403 '<!DOCTYPE html><html><head><meta charset="utf-8"><title>요청이 차단되었습니다</title></head><body style="font-family:sans-serif;margin:40px;background:#f4f6f9;"><div style="background:white;padding:30px;border-radius:12px;max-width:520px;margin:60px auto;"><h2>요청이 차단되었습니다</h2><p>보안 정책에 맞지 않는 요청이 감지되어 차단했습니다. 이 기록은 계정의 위험도에 반영되며, 계속 접근이 막히면 관리자에게 문의하세요.</p></div></body></html>';
+        return 403 '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>요청이 차단되었습니다 · XMCDA</title><style>@font-face{font-family:Pretendard;src:url(/_zt/assets/PretendardVariable.woff2) format("woff2");font-weight:45 920}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;font-family:Pretendard,"Malgun Gothic",sans-serif;color:#191f28;background:linear-gradient(135deg,#e8f0fe,#f5f6f8 45%,#eaf6f3)}.c{max-width:440px;width:100%;background:#fff;border-radius:12px;padding:44px;box-shadow:0 2px 4px rgba(0,0,0,.06),0 18px 44px rgba(17,24,39,.12)}h1{font-size:24px;margin:18px 0 8px}p{color:#4e5968;line-height:1.6;margin:0 0 24px}a{display:inline-block;background:#3182f6;color:#fff;text-decoration:none;font-weight:600;padding:12px 18px;border-radius:10px}.b{width:44px;height:44px;border-radius:12px;background:#ffeeee;color:#e42939;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px}</style></head><body><div class="c"><div class="b">!</div><h1>요청이 차단되었습니다</h1><p>보안 정책에 맞지 않는 요청이 감지되어 차단했습니다. 계속 접근이 막히면 보안 관리자에게 문의하세요.</p><a href="https://${domain_name}/">포털 홈으로</a></div></body></html>';
     }
 
     location / {
@@ -309,7 +338,7 @@ server {
 
     location @zt_waf_blocked {
         default_type "text/html; charset=utf-8";
-        return 403 '<!DOCTYPE html><html><head><meta charset="utf-8"><title>요청이 차단되었습니다</title></head><body style="font-family:sans-serif;margin:40px;background:#f4f6f9;"><div style="background:white;padding:30px;border-radius:12px;max-width:520px;margin:60px auto;"><h2>요청이 차단되었습니다</h2><p>보안 정책에 맞지 않는 요청이 감지되어 차단했습니다.</p></div></body></html>';
+        return 403 '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>요청이 차단되었습니다 · XMCDA</title><style>@font-face{font-family:Pretendard;src:url(/_zt/assets/PretendardVariable.woff2) format("woff2");font-weight:45 920}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;font-family:Pretendard,"Malgun Gothic",sans-serif;color:#191f28;background:linear-gradient(135deg,#e8f0fe,#f5f6f8 45%,#eaf6f3)}.c{max-width:440px;width:100%;background:#fff;border-radius:12px;padding:44px;box-shadow:0 2px 4px rgba(0,0,0,.06),0 18px 44px rgba(17,24,39,.12)}h1{font-size:24px;margin:18px 0 8px}p{color:#4e5968;line-height:1.6;margin:0 0 24px}a{display:inline-block;background:#3182f6;color:#fff;text-decoration:none;font-weight:600;padding:12px 18px;border-radius:10px}.b{width:44px;height:44px;border-radius:12px;background:#ffeeee;color:#e42939;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px}</style></head><body><div class="c"><div class="b">!</div><h1>요청이 차단되었습니다</h1><p>보안 정책에 맞지 않는 요청이 감지되어 차단했습니다.</p><a href="https://${domain_name}/">포털 홈으로</a></div></body></html>';
     }
 
     location / {

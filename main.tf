@@ -54,7 +54,10 @@ locals {
     hr        = "hr.${var.domain_name}"
     admin     = "admin.${var.domain_name}"
   }
-  app_hosts_env = join(",", [for k in ["portal", "dev", "marketing", "hr", "admin"] : local.app_hosts[k]])
+  # 로그인 서버의 복귀 주소 허용 목록 + 로그아웃할 앱 목록. 관제 콘솔(Kibana)을 켰으면 같이 넣는다
+  # (넣지 않으면 Kibana에서 재인증한 뒤 포털로 돌아가고, 로그아웃해도 Kibana 세션이 남는다).
+  app_hosts_env = join(",", concat([for k in ["portal", "dev", "marketing", "hr", "admin"] : local.app_hosts[k]],
+  var.enable_elk ? ["kibana.${var.domain_name}"] : []))
 
   dev_team_emails       = ["employee01@xmcda.store", "employee02@xmcda.store", "employee03@xmcda.store", "employee04@xmcda.store"]
   marketing_team_emails = ["employee05@xmcda.store", "employee06@xmcda.store", "employee07@xmcda.store"]
@@ -67,12 +70,14 @@ locals {
   # 포털(전 직원 공통)은 표에 없음 = 소속 제한 없음.
   # 소속은 DB accounts.department 값이며, 위 *_team_emails 목록과 같은 사람 구성으로 맞춰 둬야 한다
   # (Access 정책은 이메일 그룹으로 허용/차단하고, 이 표는 안내 화면만 고른다 - 두 곳이 어긋나면 안내가 틀릴 뿐 권한이 새지는 않음).
-  path_departments = {
+  # 관제 콘솔(Kibana)은 관리자만(Access 정책 admin_gate_console과 같은 구성). 표에 없으면 소속이 안 맞아 막힌 직원에게도
+  # 재인증 화면이 떠서, TOTP를 넣어도 다시 막히는 엉뚱한 흐름이 된다(실측).
+  path_departments = merge({
     (local.app_hosts.dev)       = ["dev"]
     (local.app_hosts.marketing) = ["marketing"]
     (local.app_hosts.hr)        = ["hr"]
     (local.app_hosts.admin)     = ["admin"]
-  }
+  }, var.enable_elk ? { "kibana.${var.domain_name}" = ["admin"] } : {})
   path_permissions_env = join(";", [for path, depts in local.path_departments : "${path}=${join(",", depts)}"])
 
   # [계정 소속 자동 반영] 위 *_team_emails / admin_allowed_emails 목록에서 "이메일=소속;..." 문자열을 만든다.

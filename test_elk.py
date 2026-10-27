@@ -157,3 +157,7 @@ try:
     ok("ElastAlert2 규칙 YAML 3개 파싱 + Discord 주소 자리", len(parsed) == 3 and all(p["discord_webhook_url"] == "h" for p in parsed))
 except ImportError:
     print("[SKIP] YAML 파싱(pyyaml 없음)")
+
+mt = read("main.tf")
+ok("Kibana를 켜면 로그인 서버가 Kibana를 알게 함: 복귀 주소/로그아웃 목록 + 관리자만(소속 안내 화면)",
+   'var.enable_elk ? ["kibana.${var.domain_name}"] : []' in mt and 'var.enable_elk ? { "kibana.${var.domain_name}" = ["admin"] } : {}' in mt)

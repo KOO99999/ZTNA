@@ -117,8 +117,6 @@
 └── README.md
 ```
 
-> 실제 폴더명/경로는 레포 상태에 맞춰 조정해주세요.
-
 ## 8. 실행 방법 (개요)
 
 1. **인프라 배포**: `terraform/` 에서 `terraform.tfvars` 작성 후 `terraform apply`

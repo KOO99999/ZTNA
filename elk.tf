@@ -10,7 +10,7 @@
 #   - 알림: Kibana 무료(Basic) 등급은 외부(웹훅) 알림 커넥터가 유료라, 직접 구축 환경에서 흔히 쓰는 오픈소스
 #     ElastAlert2가 Elasticsearch를 주기적으로 조회해 조건이 맞으면 Discord로 보낸다.
 #
-#  스위치: enable_elk(기본 false). 큰 서버(t3.large)라 시험/데모 날만 켠다. 켜고 끄면 웹/인증/앱 서버의 user_data(Filebeat 설치)가
+#  스위치: enable_elk(기본 false). 큰 서버(m7i-flex.large, 8GB)라 시험/데모 날만 켠다. 켜고 끄면 웹/인증/앱 서버의 user_data(Filebeat 설치)가
 #          바뀌어 그 서버들도 다시 만들어지므로, 하루 시작할 때 apply에서 정한다.
 #  데이터: 매일 destroy하므로 로그도 그날치만 남는다(시연용). 오래 보관하려면 S3 스냅샷 저장소를 쓴다(향후 과제).
 # ==========================================

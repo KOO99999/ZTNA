@@ -199,9 +199,11 @@ variable "enable_elk" {
 }
 
 # Elasticsearch(힙 2GB) + Logstash(1GB) + Kibana(약 1GB)가 함께 돌아 8GB가 필요하다.
+# 2025-07-15 이후 만든 AWS 계정의 무료 플랜은 "프리 티어 대상" 유형만 띄울 수 있다(EC2 User Guide: Track your Free Tier usage).
+# 그 목록 중 8GB인 유형이 m7i-flex.large(2 vCPU, 8GiB)다. 무료가 아니라 크레딧에서 차감된다(서울 약 $0.12/시간).
 variable "elk_instance_type" {
   type        = string
-  default     = "t3.large"
+  default     = "m7i-flex.large"
   description = "관제 서버 인스턴스 유형"
 }
 

@@ -29,7 +29,7 @@ PY
 chmod 600 /root/zt/*
 pw() { cat "/root/zt/$1"; }
 
-# ---------- Elasticsearch: 이 서버 안에서만, 힙 2GB(t3.large 8GB 중 Logstash 1GB, Kibana 약 1GB 몫을 남김) ----------
+# ---------- Elasticsearch: 이 서버 안에서만, 힙 2GB(8GB 중 Logstash 1GB, Kibana 약 1GB 몫을 남김) ----------
 sed -i -E 's/^#?network\.host:.*/network.host: 127.0.0.1/; s/^http\.host:.*/http.host: 127.0.0.1/' /etc/elasticsearch/elasticsearch.yml
 grep -q '^network.host' /etc/elasticsearch/elasticsearch.yml || echo 'network.host: 127.0.0.1' >> /etc/elasticsearch/elasticsearch.yml
 printf -- '-Xms2g\n-Xmx2g\n' > /etc/elasticsearch/jvm.options.d/heap.options

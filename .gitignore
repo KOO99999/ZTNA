@@ -5,7 +5,6 @@ terraform.tfvars*
 lambda.zip
 private-key.pem
 public-jwks.json
-README.md
 node_modules/
 .wrangler/
 account/

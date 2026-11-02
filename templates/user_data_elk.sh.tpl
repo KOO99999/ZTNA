@@ -65,6 +65,8 @@ elasticsearch.username: "kibana_system"
 elasticsearch.password: "$(pw kibana_system)"
 elasticsearch.ssl.certificateAuthorities: ["/etc/kibana/http_ca.crt"]
 xpack.encryptedSavedObjects.encryptionKey: "$(pw kibana_encryption_key)"
+telemetry.optIn: false
+telemetry.allowChangingOptInStatus: false
 KBCONF
 systemctl enable --now kibana
 
@@ -92,6 +94,11 @@ input {
   }
 }
 filter {
+  # Lambda 실행마다 AWS가 자동으로 남기는 줄(시작/끝/실행 시간)은 보안 기록이 아니라서 저장하지 않는다
+  # (Elastic 공식 drop 필터: 조건에 맞는 이벤트를 버림). 기기 순찰의 "할 일 없었음" 요약 줄(1분마다)도 같이 버린다.
+  if [message] =~ /^(START|END|REPORT) RequestId: / or [message] =~ /^INIT_(START|REPORT) / or [message] =~ /^\[DEVICE_SWEEP_SUMMARY\] \{"active": 0,/ {
+    drop { }
+  }
   # 서비스마다 같은 형식의 구조화 줄: "ZT_EVENT {json}" -> zt.* 필드
   if [message] =~ /ZT_EVENT \{/ {
     grok { match => { "message" => "ZT_EVENT %%{GREEDYDATA:[@metadata][zt_json]}" } }

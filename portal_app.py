@@ -226,6 +226,163 @@ def _stat(label, value, small=False):
     return f'<div class="stat"><div class="label">{esc(label)}</div><div class="value{" sm" if small else ""}">{value}</div></div>'
 
 
+# ---------- 내 최근 보안 활동(직원 본인용) ----------
+# Microsoft "내 로그인", Google "최근 보안 활동"과 같은 목적: 본인이 아닌 접속을 직원이 먼저 알아채게 한다.
+# 보여 주는 것: 시각 / 서비스 / 나라 / 결과. 보여 주지 않는 것: 점수, 걸린 신호(판단 기준 보호).
+# 데이터: risk_score_log의 사람별 색인(identity-timestamp-index). 색인에는 점수/신호 칸이 복사되지 않는다(main.tf).
+ACTIVITY_INDEX = "identity-timestamp-index"
+ACTIVITY_SHOW = 10         # "내 보안 기록" 페이지에 보여 줄 줄 수
+ACTIVITY_HOME_DAYS = 7     # 홈 상단 안내: 최근 이 기간 안의 "확인이 필요한 기록"만
+HOME_COUNTRY = os.environ.get("HOME_COUNTRY", "KR").strip().upper() or "KR"
+# 직원이 확인해야 하는 결과(차단/세션 종료/다시 로그인). 추가 인증 요청은 야간 접속 등에서 늘 생겨서 제외.
+ACTIVITY_ATTENTION = {"block", "block_until_mfa", "block_device", "device_session_revoked", "session_reauth_required"}
+ACTIVITY_FETCH = 50        # 묶고 거르기 전에 읽어 올 최근 기록 수
+ACTIVITY_MERGE_SECONDS = 600   # 같은 서비스/나라/결과가 10분 안에 반복되면 한 줄로
+ACTIVITY_LABELS = {
+    "allow": ("정상 접속", "chip-ok"),
+    "step_up_mfa_verified": ("추가 인증 완료", "chip-ok"),
+    "step_up_mfa_required": ("추가 인증 요청", "chip-warn"),
+    "session_reauth_required": ("다시 로그인 요청", "chip-warn"),
+    "block": ("접속 차단", "chip-danger"),
+    "block_until_mfa": ("접속 차단", "chip-danger"),
+    "block_device": ("접속 차단", "chip-danger"),
+    "device_session_revoked": ("세션 종료", "chip-danger"),
+    "risk_release": ("보안 관리자 확인 완료", "chip-brand"),
+}
+ACTIVITY_APPS = {"admin": "관리자 콘솔", "kibana": "관제 콘솔", "hr": "인사팀", "dev": "개발팀",
+                 "marketing": "마케팅팀", "auth": "로그인"}
+
+
+def _activity_app(resource_path):
+    """판정 기록의 자원(호스트[/경로])을 직원이 아는 서비스 이름으로."""
+    rp = str(resource_path or "").lower()
+    if rp in ("all-apps", "user_risk"):
+        return "전체 서비스"
+    host = rp.split("://")[-1].split("/")[0].split(":")[0]
+    if host == PORTAL_DOMAIN:
+        return "사내 포털"
+    sub = host[: -len(PORTAL_DOMAIN) - 1] if host.endswith("." + PORTAL_DOMAIN) else ""
+    return ACTIVITY_APPS.get(sub, "사내 서비스")
+
+
+def _my_activity(identity, limit=ACTIVITY_SHOW):
+    """본인 기록만 최근 순으로 limit줄. 실패하면 None.
+
+    - 키 조건이 로그인한 본인(g.identity)으로 고정이라 다른 사람 기록은 조회할 방법이 없다.
+    - 포털이 화면을 열 때마다 하는 재확인(source B)의 '정상 접속'은 그 앱에 로그인할 때(정문 판단)와 나라가 같으면 뺀다
+      (같은 내용 반복). 나라가 다르면 남긴다 - 세션을 훔쳐 다른 나라에서 쓰는 경우를 직원이 볼 수 있어야 하므로.
+      차단/추가 인증/다시 로그인은 출처와 상관없이 항상 남긴다.
+    - 결과 표가 없는 내부 동작(기록만 하는 report 모드 등)은 직원에게 보이지 않는다.
+    """
+    if not identity:
+        return []
+    try:
+        resp = table.query(IndexName=ACTIVITY_INDEX, KeyConditionExpression="#id = :me",
+                           ExpressionAttributeNames={"#id": "identity"}, ExpressionAttributeValues={":me": identity},
+                           ScanIndexForward=False, Limit=ACTIVITY_FETCH)
+    except Exception as e:
+        print("내 최근 보안 활동 조회 실패:", str(e))
+        return None
+    items = [it for it in resp.get("Items", []) if it.get("action") in ACTIVITY_LABELS]
+    rows = []
+    for i, it in enumerate(items):
+        action = it.get("action")
+        app_name, country = _activity_app(it.get("resource_path")), str(it.get("country") or "")
+        if it.get("source") == "B" and action == "allow":
+            # 최근 순이므로 뒤쪽이 더 옛날 기록. 같은 앱의 가장 가까운 정문 판단(로그인 시점)과 나라를 비교한다.
+            login = next((o for o in items[i + 1:] if o.get("source") != "B"
+                          and _activity_app(o.get("resource_path")) == app_name), None)
+            if login is not None and str(login.get("country") or "") == country:
+                continue
+        ts = int(it.get("timestamp", 0) or 0)
+        row = {"ts": ts, "app": app_name, "country": country, "action": action}
+        prev = rows[-1] if rows else None
+        if prev and (prev["app"], prev["country"], prev["action"]) == (row["app"], row["country"], row["action"]) \
+                and prev["ts"] - ts <= ACTIVITY_MERGE_SECONDS:
+            continue    # 최근 순이므로 prev가 더 최신 - 최신 시각만 남긴다
+        rows.append(row)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _activity_table(rows):
+    if rows is None:
+        return '<div class="empty">지금은 보안 기록을 불러올 수 없습니다. 잠시 후 다시 확인해 주세요.</div>'
+    if not rows:
+        return '<div class="empty">아직 기록된 보안 활동이 없습니다.</div>'
+    trs = ""
+    for r in rows:
+        label, cls = ACTIVITY_LABELS[r["action"]]
+        when = datetime.fromtimestamp(r["ts"], KST).strftime("%m.%d %H:%M")
+        trs += (f'<tr><td class="mono">{esc(when)}</td><td>{esc(r["app"])}</td><td>{esc(_place(r["country"]))}</td>'
+                f'<td><span class="chip {cls}">{esc(label)}</span></td></tr>')
+    return (f'<div class="table-wrap"><table class="table compact"><tr><th>시각</th><th>서비스</th><th>접속 나라</th><th>결과</th></tr>'
+            f'{trs}</table></div>')
+
+
+def _place(country):
+    return COUNTRY_NAMES.get(country, country) if country and country != "XX" else "-"
+
+
+def _needs_attention(row, now):
+    """홈 상단에 띄울 기록: 최근 7일 안의 차단/세션 종료/다시 로그인, 또는 회사 나라(HOME_COUNTRY)가 아닌 곳에서의 접속."""
+    if now - row["ts"] > ACTIVITY_HOME_DAYS * 86400:
+        return False
+    foreign = row["country"] not in ("", "XX", HOME_COUNTRY)
+    return row["action"] in ACTIVITY_ATTENTION or foreign
+
+
+def _security_summary(identity):
+    """홈의 보안 한 줄. (위쪽 안내 HTML, 아래쪽 요약 HTML) - 둘 중 하나만 채운다.
+
+    평소에는 맨 아래 "보안 상태 정상" 한 줄, 확인할 기록이 있을 때만 맨 위 주황 안내(Gmail '마지막 계정 활동',
+    Google '보안 알림'과 같은 방식: 평소엔 조용히, 이상할 때만 눈에 띄게)."""
+    rows = _my_activity(identity, limit=ACTIVITY_SHOW)
+    link = f'<a class="go" href="/security">{{label}} {icon("arrow-right", 16)}</a>'
+    if rows is None:
+        return "", (f'<div class="secbar"><span class="bx">{icon("info", 22)}</span><div><b>보안 기록을 불러올 수 없습니다</b>'
+                    f'<div class="sub">잠시 후 다시 확인해 주세요</div></div>{link.format(label="내 보안 기록")}</div>')
+    now = int(time.time())
+    flagged = [r for r in rows if _needs_attention(r, now)]
+    if flagged:
+        r = flagged[0]
+        label, _ = ACTIVITY_LABELS[r["action"]]
+        when = datetime.fromtimestamp(r["ts"], KST).strftime("%m.%d %H:%M")
+        more = f" 외 {len(flagged) - 1}건" if len(flagged) > 1 else ""
+        return (f'<div class="secbar warn" style="margin:0 0 14px"><span class="bx wn">{icon("alert", 22)}</span>'
+                f'<div><b>확인이 필요한 보안 활동 {len(flagged)}건</b>'
+                f'<div class="sub">{esc(when)} · {esc(r["app"])} · {esc(_place(r["country"]))} · {esc(label)}{esc(more)}'
+                f' — 본인이 아니라면 보안 관리자에게 알려 주세요</div></div>{link.format(label="확인하기")}</div>'), ""
+    last = (f'최근 접속 {datetime.fromtimestamp(rows[0]["ts"], KST).strftime("%m.%d %H:%M")} · {_place(rows[0]["country"])}'
+            if rows else "아직 기록된 보안 활동이 없습니다")
+    return "", (f'<div class="secbar"><span class="bx ok">{icon("shield-check", 22)}</span><div><b>보안 상태 정상</b>'
+                f'<div class="sub">{esc(last)}</div></div>{link.format(label="내 보안 기록")}</div>')
+
+
+@app.route('/security')
+def my_security():
+    """내 보안 기록(포털 전용). 접속 정보 + 최근 활동 표. 다른 앱 주소로 오면 없는 페이지."""
+    host = request.host.split(':')[0].lower()
+    if host != PORTAL_DOMAIN:
+        return _status_page("찾을 수 없음", "잘못된 경로입니다.", 404)
+    identity = (getattr(g, "identity", "") or "").lower()
+    country = request.headers.get("CF-IPCountry", "")
+    place = COUNTRY_NAMES.get(country, country) if country and country != "XX" else "확인 불가"
+    ip = request.headers.get("Cf-Connecting-Ip", "") or "확인 불가"
+    me = (f'<section class="card"><h2 class="card-title">내 접속 정보</h2>'
+          f'<div class="sec-item"><span class="bx">{icon("user", 20)}</span><div><b>{esc(identity or "-")}</b><span>로그인 계정</span></div></div>'
+          f'<div class="sec-item"><span class="bx">{icon("globe", 20)}</span><div><b>{esc(place)}</b><span>현재 접속 위치</span></div></div>'
+          f'<div class="sec-item"><span class="bx">{icon("device", 20)}</span><div><b class="mono" style="font-size:14px">{esc(ip)}</b><span>현재 접속 IP</span></div></div>'
+          f'</section>')
+    act = (f'<section class="card"><h2 class="card-title">최근 보안 활동</h2>{_activity_table(_my_activity(identity))}'
+           f'<p class="small faint" style="margin-top:10px">본인이 하지 않은 접속이나 차단이 보이면 즉시 보안 관리자에게 알려 주세요. '
+           f'비밀번호를 바꾸는 것도 도움이 됩니다.</p></section>')
+    html = f'<div class="grid grid-sec">{me}{act}</div>'
+    return render_page("내 보안 기록", html, heading="내 보안 기록", crumb=_crumb("내 보안 기록"),
+                       desc="내 계정의 접속 기록입니다. 본인이 아닌 기록이 보이면 보안 관리자에게 알려 주세요.")
+
+
 @app.route('/')
 def general():
     # [정리] admin.xmcda.store로 들어온 요청은 여기서 관리자 콘솔을 보여준다.
@@ -257,19 +414,11 @@ def general():
              '필요하면 소속 부서장을 통해 권한을 요청하세요.</div>')
     notices = "".join(f'<li><span class="chip {"chip-" + kind if kind else ""}">{esc(tag)}</span>{esc(title)}<span class="end">{esc(date)}</span></li>'
                       for tag, kind, title, date in demo_data.NOTICES)
-    country = request.headers.get("CF-IPCountry", "")
-    place = COUNTRY_NAMES.get(country, country) if country and country != "XX" else "확인 불가"
-    ip = request.headers.get("Cf-Connecting-Ip", "") or "확인 불가"
-    me = (f'<div class="sec-item"><span class="bx">{icon("user", 20)}</span><div><b>{esc(identity or "-")}</b><span>로그인 계정</span></div></div>'
-          f'<div class="sec-item"><span class="bx">{icon("globe", 20)}</span><div><b>{esc(place)}</b><span>현재 접속 위치</span></div></div>'
-          f'<div class="sec-item"><span class="bx">{icon("device", 20)}</span><div><b class="mono" style="font-size:14px">{esc(ip)}</b><span>현재 접속 IP</span></div></div>'
-          f'<p class="small faint" style="margin-top:10px">본인이 접속한 기록이 아니라면 즉시 보안 관리자에게 알려 주세요.</p>')
+    top, bottom = _security_summary(identity)
     name = identity.split("@")[0] if identity else "사용자"
-    html = f"""{empty}<div class="app-grid">{tiles}</div>
-    <div class="grid grid-2" style="margin-top:14px">
-      <section class="card"><h2 class="card-title">전사 공지<span class="right">{_demo_note()}</span></h2><ul class="list">{notices}</ul></section>
-      <section class="card"><h2 class="card-title">내 접속 정보</h2>{me}</section>
-    </div>"""
+    html = f"""{top}{empty}<div class="app-grid">{tiles}</div>
+    <section class="card" style="margin-top:14px"><h2 class="card-title">전사 공지<span class="right">{_demo_note()}</span></h2><ul class="list">{notices}</ul></section>
+    {bottom}"""
     return render_page("사내 포털", html, heading=f"{name}님, {_greeting()}", desc=_today_line(dept))
 
 

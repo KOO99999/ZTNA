@@ -1126,22 +1126,26 @@ def lambda_handler(event, context):
     if has_identity and detected_sticky and body.get("persist_risk") is True:
         persist_user_risk(risk_identity, detected_sticky, body.get("source", "A"), current_time)
 
+    # 접속 나라(CF 국가 코드)는 직원 포털의 "내 최근 보안 활동" 카드에 쓴다. 형식이 이상하면 저장하지 않는다.
+    log_country = str(body.get("geo_country") or "").strip().upper()
     try:
-        table.put_item(
-            Item={
-                'session_id': session_id,
-                'timestamp': current_time,
-                'risk_score': risk_score,
-                'reasons': reasons,
-                'allow': allow_access,
-                'action': action,
-                'identity': body.get('identity', 'unknown'),
-                'resource_path': resource_path or 'unknown',
-                'resource_threshold': resource_threshold,
-                # 호출 출처 구분(A=Worker/로그인서버, B=portal_app.py 세션 중 재확인) - 로그 조회/검증용
-                'source': body.get('source', 'A')
-            }
-        )
+        item = {
+            'session_id': session_id,
+            'timestamp': current_time,
+            'risk_score': risk_score,
+            'reasons': reasons,
+            'allow': allow_access,
+            'action': action,
+            # 사람별 색인(identity-timestamp-index)의 키라 빈 값/None/숫자면 저장 자체가 실패한다 -> 항상 비어 있지 않은 문자열
+            'identity': str(body.get('identity') or 'unknown'),
+            'resource_path': resource_path or 'unknown',
+            'resource_threshold': resource_threshold,
+            # 호출 출처 구분(A=Worker/로그인서버, B=portal_app.py 세션 중 재확인) - 로그 조회/검증용
+            'source': body.get('source', 'A')
+        }
+        if _COUNTRY_RE.match(log_country):
+            item['country'] = log_country
+        table.put_item(Item=item)
     except Exception as e:
         print("DynamoDB logging failed:", str(e))
 

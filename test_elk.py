@@ -178,3 +178,37 @@ ok("표가 시스템이 남기는 이벤트 종류를 모두 덮음(빠진 이�
 ok("관제 서버: kibana/*.ndjson을 S3에서 받아 가져오기(같은 ID 덮어씀), 읽기 권한은 elk/kibana/*만",
    'fileset("${path.module}/kibana", "*.ndjson")' in tf and '"${aws_s3_bucket.app_code.arn}/elk/kibana/*"' in tf
    and "/api/saved_objects/_import?overwrite=true" in tpl and "${kibana_version}" in tpl)
+
+# ---------- Kibana 비밀번호 고정 + 사용 통계(telemetry) 끄기 ----------
+outs, ex = read("outputs.tf"), read("terraform.tfvars.example")
+ok("kibana_password: sensitive, 비우면 무작위, 15~64자 허용 문자만",
+   'variable "kibana_password"' in var and re.search(r'variable "kibana_password" \{[^}]*sensitive\s*=\s*true', var, re.S)
+   and 'default     = ""' in var.split('variable "kibana_password"')[1].split("validation")[0]
+   and "^[A-Za-z0-9!@#%^*_+=.~-]{15,64}$" in var)
+pat = re.compile(r"^[A-Za-z0-9!@#%^*_+=.~-]{15,64}$")
+ok("허용 문자 규칙: 따옴표/$/역슬래시/공백/짧은 값은 거부",
+   pat.match("Zt-Kibana_2026!x") and not any(pat.match(x) for x in ('short1!', 'Elevenchar12345'[:14], 'has"quote1234', 'dollar$sign1234', 'back\\slash1234', 'has space 1234', "it's-apostrophe1")))
+ok("elastic 비밀번호만 tfvars 값 사용(나머지 서버끼리 쓰는 비밀번호는 계속 무작위)",
+   'k == "elastic" && var.kibana_password != "" ? var.kibana_password : v.result' in tf
+   and "value    = local.elk_secret_values[each.key]" in tf)
+ok("output kibana_elastic_password도 같은 값(고정값 또는 무작위)", 'local.elk_secret_values["elastic"]' in outs)
+ok("tfvars.example: 비밀번호 칸은 비어 있음(예시 파일에 실제 비밀번호 없음)", 'kibana_password     = ""' in ex)
+ok("kibana.yml: 사용 통계 끄기 + 화면에서 다시 켜지 못하게(배너 없음)",
+   "telemetry.optIn: false" in tpl and "telemetry.allowChangingOptInStatus: false" in tpl)
+
+# ---------- Lambda 자동 줄(시작/끝/실행 시간) 버리기 ----------
+m = re.search(r"if (\[message\] =~ /.*?/(?: or \[message\] =~ /.*?/)*) \{\n\s*drop \{ \}", tpl)
+ok("Logstash: 조건에 맞는 줄은 drop(저장 안 함)", m is not None)
+if m:
+    pats = [re.compile(x) for x in re.findall(r"=~ /(.*?)/(?= or|$)", m.group(1))]
+    dropped = lambda line: any(p.search(line) for p in pats)
+    drop_lines = ["START RequestId: 8c1f-e21 Version: $LATEST", "END RequestId: 8c1f-e21",
+                  "REPORT RequestId: 8c1f-e21\tDuration: 498.21 ms\tBilled Duration: 499 ms",
+                  "INIT_START Runtime Version: python:3.12.v40",
+                  '[DEVICE_SWEEP_SUMMARY] {"active": 0, "checked": 0, "bad": 0, "revoked": [], "unknown": 0, "mode": "report"}']
+    keep_lines = ['ZT_EVENT {"event": "device_sweep", "identity": "a@b.c"}', 'ZT_EVENT {"event": "decision", "msg": "START RequestId: x"}',
+                  '[DEVICE_SWEEP_SUMMARY] {"active": 2, "checked": 2, "bad": 1, "revoked": ["a@b.c"]}',
+                  "[GEO_VELOCITY] identity=a from=KR to=JP", "Traceback (most recent call last):",
+                  '127.0.0.1 - - "GET /REPORT RequestId: " 200']
+    ok("버리는 줄: START/END/REPORT/INIT_START, 할 일 없던 순찰 요약", all(dropped(l) for l in drop_lines), [l for l in drop_lines if not dropped(l)])
+    ok("남기는 줄: 보안 기록(ZT_EVENT), 실제로 기기를 본 순찰 요약, 오류, 사람이 읽는 태그 줄", not any(dropped(l) for l in keep_lines), [l for l in keep_lines if dropped(l)])

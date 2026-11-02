@@ -115,6 +115,13 @@ resource "aws_iam_role_policy" "app_admin_console" {
         Resource = [aws_dynamodb_table.risk_score_log.arn]
       },
       {
+        # 포털 홈의 "내 최근 보안 활동": 사람별 색인만 Query(색인에는 점수/신호가 없음). 본인 것만 조회하는 건 portal_app.py가 지킨다.
+        Sid      = "QueryMyActivityIndex"
+        Effect   = "Allow"
+        Action   = ["dynamodb:Query"]
+        Resource = ["${aws_dynamodb_table.risk_score_log.arn}/index/identity-timestamp-index"]
+      },
+      {
         Sid      = "InvokeRiskAdminOnly"
         Effect   = "Allow"
         Action   = ["lambda:InvokeFunction"]

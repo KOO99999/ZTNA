@@ -110,6 +110,22 @@ resource "aws_dynamodb_table" "risk_score_log" {
     type = "N"
   }
 
+  attribute {
+    name = "identity"
+    type = "S"
+  }
+
+  # [내 최근 보안 활동] 사람별 최근 기록을 바로 찾는 색인(전체 Scan 없이 Query 한 번).
+  # 직원 화면에 필요한 칸만 복사한다(INCLUDE) - 점수(risk_score)와 걸린 신호(reasons)는 색인에 아예 없어서
+  # 이 색인만 읽을 수 있는 권한으로는 판단 기준이 새지 않는다.
+  global_secondary_index {
+    name               = "identity-timestamp-index"
+    hash_key           = "identity"
+    range_key          = "timestamp"
+    projection_type    = "INCLUDE"
+    non_key_attributes = ["action", "resource_path", "country", "source"]
+  }
+
   tags = {
     Environment = "ZeroTrust-Project"
   }

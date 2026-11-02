@@ -207,6 +207,20 @@ variable "elk_instance_type" {
   description = "관제 서버 인스턴스 유형"
 }
 
+# Kibana 로그인 비밀번호(사용자 elastic). 정해 두면 destroy/apply 후에도 그대로, 비우면 apply마다 무작위.
+# 최소 15자: NIST SP 800-63B-4가 "단일 요소로 쓰는 비밀번호"에 요구하는 길이(elastic은 Kibana 최고 권한 계정).
+# 서버 설정 스크립트 안에서 따옴표로 감싸 쓰므로 영문/숫자와 일부 기호만 허용한다.
+variable "kibana_password" {
+  type        = string
+  sensitive   = true
+  default     = ""
+  description = "Kibana 로그인 비밀번호 (terraform.tfvars, 15~64자)"
+  validation {
+    condition     = var.kibana_password == "" || can(regex("^[A-Za-z0-9!@#%^*_+=.~-]{15,64}$", var.kibana_password))
+    error_message = "kibana_password는 15~64자, 영문/숫자와 ! @ # % ^ * _ + = . ~ - 만 쓸 수 있습니다."
+  }
+}
+
 # Discord 채널 웹훅 주소(채널 설정 > 연동 > 웹후크). 이 주소만 알면 누구나 채널에 글을 쓸 수 있어 비밀로 다룬다.
 variable "discord_webhook_url" {
   type        = string

@@ -54,6 +54,7 @@ from urllib.parse import urlencode
 ADM = {"Host": "admin.xmcda.store"}
 pa.table = MagicMock()
 pa.table.scan.return_value = {"Items": []}
+pa.table.query.return_value = {"Items": []}
 invoked = []
 risk_state = {"list": {"ok": True, "items": [], "truncated": False}, "release": {"ok": True, "audit": True}}
 
@@ -429,6 +430,94 @@ reset()
 r = client.get("/", headers={**hdr(key=NEW_KEY, kid="kid-new"), "Host": "dev.xmcda.store"})
 check("Cloudflare 키 교체: 새 kid가 나오면 공개키를 다시 받아 통과", r.status_code == 200, r.status_code)
 zj._fetch_jwks = orig_fetch
+
+# ---------- 4b. 내 보안 기록(포털 /security) + 홈 한 줄 요약 ----------
+def sec_page(email="kim@test.com", host="xmcda.store", path="/security"):
+    return client.get(path, headers={**hdr(email=email), "Host": host})
+
+NOW = int(_time.time())
+ITEMS = [
+    {"timestamp": NOW - 10, "action": "step_up_mfa_verified", "resource_path": "dev.xmcda.store", "country": "JP", "source": "A"},
+    {"timestamp": NOW - 60, "action": "allow", "resource_path": "xmcda.store", "country": "KR", "source": "B"},          # 재확인 통과, 로그인(NOW-100)과 같은 나라: 숨김
+    {"timestamp": NOW - 70, "action": "step_up_mfa_report_only", "resource_path": "dev.xmcda.store", "country": "KR"},     # 모르는 동작: 숨김
+    {"timestamp": NOW - 100, "action": "allow", "resource_path": "xmcda.store", "country": "KR", "source": "A"},
+    {"timestamp": NOW - 200, "action": "allow", "resource_path": "xmcda.store", "country": "KR", "source": "A"},           # 10분 안 반복: 한 줄로
+    {"timestamp": NOW - 3000, "action": "block", "resource_path": "hr.xmcda.store", "country": "<b>X</b>", "source": "B"},  # 차단은 B여도 보임
+    {"timestamp": NOW - 4000, "action": "allow", "resource_path": "auth.xmcda.store/authorize", "source": "login"},
+    {"timestamp": NOW - 5000, "action": "device_session_revoked", "resource_path": "all-apps", "source": "sweep"},
+    {"timestamp": NOW - 6000, "action": "risk_release", "resource_path": "user_risk", "source": "ADMIN"},
+]
+pa.table.query.reset_mock(); pa.table.scan.reset_mock(); pa.table.query.side_effect = None
+pa.table.query.return_value = {"Items": ITEMS}
+r = sec_page()
+t = r.get_data(as_text=True)
+qk = pa.table.query.call_args.kwargs if pa.table.query.call_args else {}
+check("내 보안 기록: 200, 사람별 색인을 최신순 Query(전체 Scan 아님)",
+      r.status_code == 200 and qk.get("IndexName") == "identity-timestamp-index" and qk.get("ScanIndexForward") is False
+      and pa.table.scan.call_count == 0, (r.status_code, qk))
+check("조회 키는 로그인한 본인 이메일(요청 값으로 바꿀 수 없음)",
+      qk.get("KeyConditionExpression") == "#id = :me" and qk.get("ExpressionAttributeNames") == {"#id": "identity"}
+      and qk.get("ExpressionAttributeValues") == {":me": "kim@test.com"}, qk)
+sec_page(path="/security?identity=lee@test.com&user=lee@test.com")
+check("주소에 다른 사람 이메일을 넣어도 본인 기록만 조회",
+      pa.table.query.call_args.kwargs.get("ExpressionAttributeValues") == {":me": "kim@test.com"})
+check("내 보안 기록: 접속 정보 + 최근 활동 + 안내 문장", all(x in t for x in ("내 접속 정보", "최근 보안 활동", "본인이 하지 않은 접속", "kim@test.com")))
+check("서비스/나라/결과가 사람이 읽는 말로", all(x in t for x in ("개발팀", "일본", "추가 인증 완료", "사내 포털", "대한민국", "정상 접속", "인사팀", "접속 차단", "보안 관리자 확인 완료")))
+check("점수/신호/임계값 코드가 없음", not any(x in t for x in ("risk_score", "reasons", "임계", "step_up_mfa_verified", "night_access", "점수")))
+check("이상한 나라 값은 이스케이프", "<b>X</b>" not in t and "&lt;b&gt;X&lt;/b&gt;" in t)
+for h in ("dev.xmcda.store", "admin.xmcda.store"):
+    check(f"/security는 포털에서만({h} -> 404)", sec_page(host=h).status_code == 404)
+rows = pa._my_activity("kim@test.com")
+check("_my_activity: 재확인 통과(같은 나라)/모르는 동작/10분 안 반복 제외, 나머지는 최신순",
+      [(r["app"], r["action"]) for r in rows] == [("개발팀", "step_up_mfa_verified"), ("사내 포털", "allow"), ("인사팀", "block"),
+                                                ("로그인", "allow"), ("전체 서비스", "device_session_revoked"), ("전체 서비스", "risk_release")], rows)
+check("_my_activity(limit=2): 줄 수 제한", len(pa._my_activity("kim@test.com", limit=2)) == 2)
+# 재확인(B) '정상'이라도 로그인 때와 나라가 다르면 보여야 함(세션 탈취 의심)
+pa.table.query.return_value = {"Items": [
+    {"timestamp": NOW - 10, "action": "allow", "resource_path": "dev.xmcda.store", "country": "CN", "source": "B"},
+    {"timestamp": NOW - 20, "action": "allow", "resource_path": "dev.xmcda.store", "country": "KR", "source": "B"},
+    {"timestamp": NOW - 900, "action": "allow", "resource_path": "dev.xmcda.store", "country": "KR", "source": "A"},
+    {"timestamp": NOW - 950, "action": "allow", "resource_path": "hr.xmcda.store", "country": "JP", "source": "B"},
+]}
+rows2 = pa._my_activity("kim@test.com")
+check("재확인 '정상': 로그인 때와 나라가 같으면 숨김, 다르면(CN) 표시, 로그인 기록을 못 찾으면 표시",
+      [(r["app"], r["country"]) for r in rows2] == [("개발팀", "CN"), ("개발팀", "KR"), ("인사팀", "JP")], rows2)
+
+# 홈: 평소엔 맨 아래 한 줄, 확인할 기록이 있을 때만 맨 위 주황 안내. 홈에는 표/접속 정보 칸이 없다.
+t = home("kim@test.com")   # 위 rows2: 중국 접속(다른 나라) -> 안내
+check("홈: 다른 나라 접속이 있으면 맨 위 '확인이 필요한 보안 활동' + 확인하기 링크",
+      "확인이 필요한 보안 활동 2건" in t and 'href="/security"' in t and "확인하기" in t
+      and t.index("확인이 필요한 보안 활동") < t.index('class="app-grid"'), t[t.find("secbar warn"):][:300])
+check("홈: 보안 표/접속 정보 칸은 홈에 없음(별도 페이지)", "<table" not in t and "내 접속 정보" not in t)
+pa.table.query.return_value = {"Items": [
+    {"timestamp": NOW - 10, "action": "allow", "resource_path": "xmcda.store", "country": "KR", "source": "A"},
+    {"timestamp": NOW - 9 * 86400, "action": "block", "resource_path": "hr.xmcda.store", "country": "KR", "source": "A"},  # 7일 지난 차단: 안내 안 함
+    {"timestamp": NOW - 20, "action": "step_up_mfa_required", "resource_path": "dev.xmcda.store", "country": "KR", "source": "A"},  # 추가 인증 요청: 일상적
+]}
+t = home("kim@test.com")
+check("홈: 평소엔 맨 아래 '보안 상태 정상' + 최근 접속 + 내 보안 기록 링크(7일 지난 차단/추가 인증 요청은 안내 안 함)",
+      "보안 상태 정상" in t and "최근 접속" in t and "내 보안 기록" in t and "확인이 필요한" not in t
+      and t.index("보안 상태 정상") > t.index("전사 공지"))
+pa.table.query.return_value = {"Items": [{"timestamp": NOW - 10, "action": "session_reauth_required", "resource_path": "xmcda.store", "country": "KR", "source": "B"}]}
+check("홈: 다시 로그인 요청(세션 나라 변경 등)도 안내", "확인이 필요한 보안 활동 1건" in home("kim@test.com"))
+pa.table.query.side_effect = RuntimeError("db secret detail")
+t, t2 = home("kim@test.com"), sec_page().get_data(as_text=True)
+check("조회 실패: 홈/페이지 모두 안내 문구만, 내부 오류 노출 없음", "불러올 수 없습니다" in t and "불러올 수 없습니다" in t2
+      and "db secret detail" not in t + t2 and 'class="app-grid"' in t)
+pa.table.query.side_effect = None
+pa.table.query.return_value = {"Items": []}
+check("기록 없음: 홈은 정상 표시, 페이지는 빈 안내", "보안 상태 정상" in home("kim@test.com")
+      and "아직 기록된 보안 활동이 없습니다" in sec_page().get_data(as_text=True))
+eng = open("risk_score_engine.py", encoding="utf-8").read()
+check("엔진: 판정 기록에 나라(country) 저장 + identity는 항상 문자열(색인 키)",
+      "item['country'] = log_country" in eng and "'identity': str(body.get('identity') or 'unknown')" in eng)
+tf = open("main.tf", encoding="utf-8").read()
+check("main.tf: 색인은 INCLUDE로 점수/신호를 복사하지 않음",
+      'name               = "identity-timestamp-index"' in tf and 'projection_type    = "INCLUDE"' in tf
+      and 'non_key_attributes = ["action", "resource_path", "country", "source"]' in tf)
+ra = open("risk_admin.tf", encoding="utf-8").read()
+check("risk_admin.tf: 앱 역할은 색인 Query만(테이블 Query 아님)",
+      '"${aws_dynamodb_table.risk_score_log.arn}/index/identity-timestamp-index"' in ra and "QueryMyActivityIndex" in ra)
 
 # ---------- 5. 디버그 라우트는 기본으로 꺼져 있음 ----------
 reset()

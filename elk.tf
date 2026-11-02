@@ -48,11 +48,17 @@ resource "random_password" "elk" {
   special  = false
 }
 
+# elastic(=Kibana 로그인) 비밀번호만 terraform.tfvars의 kibana_password를 쓴다(비우면 무작위).
+# 매일 destroy/apply해도 같은 비밀번호로 로그인하기 위함. 나머지는 서버끼리만 쓰므로 계속 무작위.
+locals {
+  elk_secret_values = { for k, v in random_password.elk : k => (k == "elastic" && var.kibana_password != "" ? var.kibana_password : v.result) }
+}
+
 resource "aws_ssm_parameter" "elk_password" {
   for_each = random_password.elk
   name     = "${local.elk_param_prefix}/${each.key}"
   type     = "SecureString"
-  value    = each.value.result
+  value    = local.elk_secret_values[each.key]
 }
 
 resource "aws_ssm_parameter" "elk_discord_webhook" {

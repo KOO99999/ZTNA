@@ -348,6 +348,22 @@ engine.lambda_handler(
 )
 _logged_default = mock_table.put_item.call_args.kwargs["Item"]
 print(f"[{'PASS' if _logged_default.get('source') == 'A' else 'FAIL'}] [v12] source 미지정 시 기본값 A")
+# [내 최근 보안 활동] 판정 기록에 접속 나라 저장(형식 맞을 때만), identity는 색인 키라 항상 문자열
+for _body, _expect, _name in [
+    ({"session_id": "c1", "identity": "hana@test.com", "geo_country": "jp"}, "JP", "geo_country 소문자도 대문자로 저장"),
+    ({"session_id": "c2", "identity": "hana@test.com", "geo_country": "<script>"}, None, "이상한 나라 값은 저장 안 함"),
+    ({"session_id": "c3", "identity": "hana@test.com"}, None, "나라가 없으면 칸 자체를 만들지 않음"),
+]:
+    mock_table.reset_mock()
+    engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps(_body)}, None)
+    _it = mock_table.put_item.call_args.kwargs["Item"]
+    print(f"[{'PASS' if _it.get('country') == _expect and ('country' in _it) == (_expect is not None) else 'FAIL'}] [활동] {_name}")
+for _idv in (None, "", 123):
+    mock_table.reset_mock()
+    engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps({"session_id": "c4", "identity": _idv})}, None)
+    _it = mock_table.put_item.call_args.kwargs["Item"] if mock_table.put_item.called else {}
+    _good = isinstance(_it.get("identity"), str) and _it.get("identity") != ""
+    print(f"[{'PASS' if _good else 'FAIL'}] [활동] identity={_idv!r}여도 색인 키는 비어 있지 않은 문자열 -> {_it.get('identity')!r}")
 print()
 
 

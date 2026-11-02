@@ -193,6 +193,13 @@ p{margin:0}
 .sec-item{display:flex;align-items:center;gap:14px;padding:10px 0}
 .sec-item .bx{width:40px;height:40px;border-radius:12px;background:var(--brand-soft);color:var(--brand);display:flex;align-items:center;justify-content:center;flex:none}
 .sec-item b{display:block;font-size:15px}.sec-item span{color:var(--faint);font-size:13.5px}
+.secbar{display:flex;align-items:center;gap:14px;margin-top:14px;padding:16px 20px;background:#fff;border-radius:20px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.secbar .bx{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;flex:none;background:var(--line-2);color:var(--muted)}
+.secbar .bx.ok{background:var(--ok-bg);color:var(--ok)}.secbar .bx.wn{background:var(--warn-bg);color:var(--warn)}
+.secbar>div{flex:1;min-width:0}.secbar b{font-size:15px}.secbar .sub{color:var(--faint);font-size:13.5px;margin-top:2px}
+.secbar .go{margin-left:auto;color:var(--brand);font-weight:600;font-size:14px;white-space:nowrap;display:flex;align-items:center;gap:4px;text-decoration:none}
+.secbar.warn{box-shadow:inset 0 0 0 1.5px #ffcf8a}
+.grid-sec{grid-template-columns:1fr 2fr}
 .app-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
 .app-tile{display:flex;flex-direction:column;background:var(--surface);border-radius:var(--radius);padding:22px;color:inherit;
   text-decoration:none!important;transition:transform .15s,box-shadow .15s}
@@ -229,9 +236,9 @@ table.table{width:100%;border-collapse:collapse;font-size:14px;background:#fff}
 .toast.show{display:flex}
 .footer{margin-top:44px;font-size:12.5px;color:var(--faint);text-align:center}
 [data-panel]{margin-top:14px}
-@media (max-width:960px){.app-grid,.grid-4{grid-template-columns:repeat(2,1fr)}.grid-2{grid-template-columns:1fr}}
+@media (max-width:960px){.app-grid,.grid-4{grid-template-columns:repeat(2,1fr)}.grid-2,.grid-sec{grid-template-columns:1fr}}
 .topbar .logo-text{white-space:nowrap}
-@media (max-width:640px){.topbar{padding:0 14px}.timer span.lbl,.timer .btn,.topbar .avatar{display:none}.topbar .logo-text{font-size:15px}.shell{padding:24px 16px 48px}.app-grid{grid-template-columns:1fr}.grid-4{grid-template-columns:repeat(2,1fr)}.stat .value{font-size:22px}
+@media (max-width:640px){.secbar{flex-wrap:wrap}.secbar .go{margin-left:54px;flex-basis:100%}.table.compact th,.table.compact td{padding:10px 8px;white-space:normal;word-break:keep-all}.topbar{padding:0 14px}.timer span.lbl,.timer .btn,.topbar .avatar{display:none}.topbar .logo-text{font-size:15px}.shell{padding:24px 16px 48px}.app-grid{grid-template-columns:1fr}.grid-4{grid-template-columns:repeat(2,1fr)}.stat .value{font-size:22px}
   .auth-card{padding:32px 24px 26px}.page-title{font-size:24px}.search{min-width:0;max-width:none}}
 """.replace("__FONT__", FONT_URL)
 

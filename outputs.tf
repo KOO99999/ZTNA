@@ -68,7 +68,7 @@ output "kibana_url" {
 }
 
 output "kibana_elastic_password" {
-  value       = var.enable_elk ? random_password.elk["elastic"].result : ""
+  value       = var.enable_elk ? local.elk_secret_values["elastic"] : ""
   sensitive   = true
   description = "Kibana 로그인 비밀번호(사용자 elastic)"
 }

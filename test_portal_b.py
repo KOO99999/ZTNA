@@ -461,7 +461,7 @@ check("조회 키는 로그인한 본인 이메일(요청 값으로 바꿀 수 �
 sec_page(path="/security?identity=lee@test.com&user=lee@test.com")
 check("주소에 다른 사람 이메일을 넣어도 본인 기록만 조회",
       pa.table.query.call_args.kwargs.get("ExpressionAttributeValues") == {":me": "kim@test.com"})
-check("내 보안 기록: 접속 정보 + 최근 활동 + 안내 문장", all(x in t for x in ("내 접속 정보", "최근 보안 활동", "본인이 하지 않은 접속", "kim@test.com")))
+check("내 보안 기록: 접속 정보 + 최근 활동 + 안내 문장", all(x in t for x in ("내 접속 정보", "최근 보안 활동", "본인 아님", "kim@test.com")))
 check("서비스/나라/결과가 사람이 읽는 말로", all(x in t for x in ("개발팀", "일본", "추가 인증 완료", "사내 포털", "대한민국", "정상 접속", "인사팀", "접속 차단", "보안 관리자 확인 완료")))
 check("점수/신호/임계값 코드가 없음", not any(x in t for x in ("risk_score", "reasons", "임계", "step_up_mfa_verified", "night_access", "점수")))
 check("이상한 나라 값은 이스케이프", "<b>X</b>" not in t and "&lt;b&gt;X&lt;/b&gt;" in t)
@@ -485,9 +485,9 @@ check("재확인 '정상': 로그인 때와 나라가 같으면 숨김, 다르�
 
 # 홈: 평소엔 맨 아래 한 줄, 확인할 기록이 있을 때만 맨 위 주황 안내. 홈에는 표/접속 정보 칸이 없다.
 t = home("kim@test.com")   # 위 rows2: 중국 접속(다른 나라) -> 안내
-check("홈: 다른 나라 접속이 있으면 맨 위 '확인이 필요한 보안 활동' + 확인하기 링크",
-      "확인이 필요한 보안 활동 2건" in t and 'href="/security"' in t and "확인하기" in t
-      and t.index("확인이 필요한 보안 활동") < t.index('class="app-grid"'), t[t.find("secbar warn"):][:300])
+check("홈: 다른 나라 접속이 있으면 오른쪽 보안 카드가 주황(확인 필요) + 확인하기 링크(업무 앱 칸 아래, 공지 옆)",
+      "확인이 필요한 보안 활동 2건" in t and 'sec-card wn' in t and 'href="/security"' in t and "확인하기" in t
+      and t.index('class="app-grid"') < t.index("sec-card wn"), t[t.find("sec-card"):][:300])
 check("홈: 보안 표/접속 정보 칸은 홈에 없음(별도 페이지)", "<table" not in t and "내 접속 정보" not in t)
 pa.table.query.return_value = {"Items": [
     {"timestamp": NOW - 10, "action": "allow", "resource_path": "xmcda.store", "country": "KR", "source": "A"},
@@ -497,7 +497,7 @@ pa.table.query.return_value = {"Items": [
 t = home("kim@test.com")
 check("홈: 평소엔 맨 아래 '보안 상태 정상' + 최근 접속 + 내 보안 기록 링크(7일 지난 차단/추가 인증 요청은 안내 안 함)",
       "보안 상태 정상" in t and "최근 접속" in t and "내 보안 기록" in t and "확인이 필요한" not in t
-      and t.index("보안 상태 정상") > t.index("전사 공지"))
+      and "sec-card ok" in t and t.index("전사 공지") < t.index("보안 상태 정상"))
 pa.table.query.return_value = {"Items": [{"timestamp": NOW - 10, "action": "session_reauth_required", "resource_path": "xmcda.store", "country": "KR", "source": "B"}]}
 check("홈: 다시 로그인 요청(세션 나라 변경 등)도 안내", "확인이 필요한 보안 활동 1건" in home("kim@test.com"))
 pa.table.query.side_effect = RuntimeError("db secret detail")
@@ -547,6 +547,70 @@ for h in ("dev.xmcda.store", "admin.xmcda.store"):
     check(f"명세서는 포털에서만({h} -> 404, 거부 표시 없음)", pay("/payslip/110", host=h).status_code == 404
           and "X-ZT-Authz" not in pay("/payslip/110", host=h).headers)
 check("포털 홈에 '내 급여명세서' 바로가기", 'href="/payslip"' in home("kim@test.com"))
+
+# ---------- 4d. 확인이 필요한 활동: 본인 맞음 / 본인 아님(서버 저장) ----------
+import io as _io2, contextlib as _cl2
+NOW2 = int(_time.time())
+CN_ROW = {"timestamp": NOW2 - 30, "action": "allow", "resource_path": "xmcda.store", "country": "CN", "source": "B"}
+KR_ROW = {"timestamp": NOW2 - 9000, "action": "allow", "resource_path": "xmcda.store", "country": "KR", "source": "A"}
+pa.table.query.side_effect = None
+pa.table.query.return_value = {"Items": [CN_ROW, KR_ROW]}
+pa.ack_table = MagicMock()
+pa.ack_table.query.return_value = {"Items": []}
+t = home("kim@test.com")
+check("확인 전: 홈에 주황 카드(확인이 필요한 보안 활동 1건)", "확인이 필요한 보안 활동 1건" in t and "sec-card wn" in t)
+t = sec_page().get_data(as_text=True)
+check("내 보안 기록: 확인이 필요한 줄에만 [본인 맞음][본인 아님] 버튼(평범한 한국 접속 줄에는 없음)",
+      t.count('action="/security/ack"') == 1 and f'name="ts" value="{NOW2 - 30}"' in t and "본인 맞음" in t, t.count('action="/security/ack"'))
+
+def ack_post(form, email="kim@test.com", origin="https://xmcda.store", with_origin=True):
+    h = {**hdr(email=email), "Host": "xmcda.store"}
+    if with_origin:
+        h["Origin"] = origin
+    return client.post("/security/ack", data=form, headers=h)
+
+tokk = pa._csrf_token("kim@test.com")
+pa.ack_table.put_item.reset_mock()
+r = ack_post({"csrf": tokk, "ts": str(NOW2 - 30), "verdict": "mine"})
+it = pa.ack_table.put_item.call_args.kwargs["Item"] if pa.ack_table.put_item.called else {}
+check("본인 맞음: 서버에 저장(본인 이메일, 활동 시각, mine, 8일 뒤 자동 삭제) 후 /security로", r.status_code == 303
+      and "msg=ack_mine" in r.headers["Location"] and it.get("identity") == "kim@test.com" and it.get("ts") == NOW2 - 30
+      and it.get("verdict") == "mine" and it.get("expires_at") == NOW2 - 30 + 8 * 86400, (r.status_code, it))
+pa.ack_table.query.return_value = {"Items": [{"identity": "kim@test.com", "ts": NOW2 - 30, "verdict": "mine"}]}
+t = home("kim@test.com")
+check("확인 후: 홈 경고가 사라지고 초록 '보안 상태 정상'(서버 기록 기준이라 어느 기기에서든 같음)",
+      "확인이 필요한" not in t and "sec-card ok" in t)
+t = sec_page().get_data(as_text=True)
+check("확인 후: 그 줄에는 버튼 대신 '본인 확인' 표시", 'action="/security/ack"' not in t and "본인 확인" in t)
+
+pa.ack_table.query.return_value = {"Items": []}
+pa.ack_table.put_item.reset_mock()
+buf = _io2.StringIO()
+with _cl2.redirect_stdout(buf):
+    r = ack_post({"csrf": tokk, "ts": str(NOW2 - 30), "verdict": "not_mine"})
+ev = [l for l in buf.getvalue().splitlines() if l.startswith("ZT_EVENT ")]
+check("본인 아님: 저장 + 관제에 user_reported_not_me(관리자 Discord 알림 대상)",
+      r.status_code == 303 and "msg=ack_report" in r.headers["Location"] and pa.ack_table.put_item.called
+      and ev and '"event": "user_reported_not_me"' in ev[-1] and '"country": "CN"' in ev[-1], buf.getvalue())
+for name, form, kw in [
+    ("CSRF 토큰 없음", {"ts": str(NOW2 - 30), "verdict": "mine"}, {}),
+    ("다른 사람 토큰", {"csrf": pa._csrf_token("lee@test.com"), "ts": str(NOW2 - 30), "verdict": "mine"}, {}),
+    ("다른 사이트에서 보낸 요청(Origin)", {"csrf": tokk, "ts": str(NOW2 - 30), "verdict": "mine"}, {"origin": "https://evil.com"}),
+    ("확인 대상이 아닌 평범한 접속", {"csrf": tokk, "ts": str(NOW2 - 9000), "verdict": "mine"}, {}),
+    ("내 기록에 없는 시각", {"csrf": tokk, "ts": "123", "verdict": "mine"}, {}),
+    ("이상한 선택 값", {"csrf": tokk, "ts": str(NOW2 - 30), "verdict": "delete"}, {}),
+]:
+    pa.ack_table.put_item.reset_mock()
+    r = ack_post(form, **kw)
+    check(f"거부: {name} -> 저장 안 함", r.status_code == 303 and "msg=ack_invalid" in r.headers["Location"]
+          and not pa.ack_table.put_item.called, (r.status_code, r.headers.get("Location")))
+pa.ack_table.query.side_effect = RuntimeError("ddb")
+check("확인 기록 조회 실패: 경고를 계속 보여 줌(안전한 쪽), 홈은 정상", "확인이 필요한 보안 활동" in home("kim@test.com"))
+pa.ack_table.query.side_effect = None
+r = client.post("/security/ack", data={"csrf": tokk, "ts": str(NOW2 - 30), "verdict": "mine"},
+                headers={**hdr(email="kim@test.com"), "Host": "dev.xmcda.store", "Origin": "https://dev.xmcda.store"})
+check("확인은 포털에서만(dev 호스트 -> 404)", r.status_code == 404)
+pa.table.query.return_value = {"Items": []}
 
 # ---------- 5. 디버그 라우트는 기본으로 꺼져 있음 ----------
 reset()

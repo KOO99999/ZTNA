@@ -19,6 +19,7 @@ import demo_data
 app = Flask(__name__)
 dynamodb = boto3.resource('dynamodb', region_name='ap-northeast-2')
 table = dynamodb.Table('risk_score_log')
+ack_table = dynamodb.Table('activity_ack')   # 직원이 '본인 맞음/아님'으로 확인한 보안 활동(서버에 저장 -> 어느 기기에서든 같은 상태)
 lambda_client = boto3.client('lambda', region_name='ap-northeast-2')
 
 # 관리자 콘솔 설정. ADMIN_EMAILS는 Terraform의 admin_allowed_emails와 같은 값(쉼표 구분)이다.
@@ -306,18 +307,55 @@ def _my_activity(identity, limit=ACTIVITY_SHOW):
     return rows
 
 
-def _activity_table(rows):
+ACK_TTL_SECONDS = (ACTIVITY_HOME_DAYS + 1) * 86400   # 경고를 띄우는 기간(7일)보다 하루 길게 보관 후 자동 삭제
+ACK_VERDICTS = {"mine": ("본인 확인", "chip-ok"), "not_mine": ("신고함", "chip-danger")}
+
+
+def log_event(event, **fields):
+    """관제(ELK)용 구조화 로그 한 줄 "ZT_EVENT {json}"(다른 서비스와 같은 형식). journald -> Filebeat -> Logstash."""
+    record = {"event": event, "service": "portal", "ts": int(time.time())}
+    record.update({k: v for k, v in fields.items() if v is not None})
+    print("ZT_EVENT " + json.dumps(record, ensure_ascii=False, default=str), flush=True)
+
+
+def _load_acks(identity):
+    """{활동 시각(ts): 'mine'|'not_mine'}. 조회 실패면 빈 dict(확인 안 한 것으로 보고 경고를 계속 보여 줌 = 안전한 쪽)."""
+    if not identity:
+        return {}
+    try:
+        resp = ack_table.query(KeyConditionExpression="#id = :me AND #ts >= :since",
+                               ExpressionAttributeNames={"#id": "identity", "#ts": "ts"},
+                               ExpressionAttributeValues={":me": identity, ":since": int(time.time()) - ACK_TTL_SECONDS})
+        return {int(it["ts"]): str(it.get("verdict", "")) for it in resp.get("Items", []) if "ts" in it}
+    except Exception as e:
+        print("보안 활동 확인 기록 조회 실패:", str(e))
+        return {}
+
+
+def _activity_table(rows, acks=None, csrf=None):
     if rows is None:
         return '<div class="empty">지금은 보안 기록을 불러올 수 없습니다. 잠시 후 다시 확인해 주세요.</div>'
     if not rows:
         return '<div class="empty">아직 기록된 보안 활동이 없습니다.</div>'
+    acks = acks or {}
+    now = int(time.time())
     trs = ""
     for r in rows:
         label, cls = ACTIVITY_LABELS[r["action"]]
         when = datetime.fromtimestamp(r["ts"], KST).strftime("%m.%d %H:%M")
+        check = ""
+        if r["ts"] in acks:
+            text, ccls = ACK_VERDICTS.get(acks[r["ts"]], ("확인함", ""))
+            check = f'<span class="chip {ccls}">{esc(text)}</span>'
+        elif csrf and _needs_attention(r, now):
+            # 확인이 필요한 활동: 본인 맞음(경고 닫기) / 본인 아님(보안 관리자에게 신고)
+            check = (f'<form method="POST" action="/security/ack" class="ack">'
+                     f'<input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="ts" value="{r["ts"]}">'
+                     f'<button class="btn btn-sm btn-soft" name="verdict" value="mine">본인 맞음</button>'
+                     f'<button class="btn btn-sm btn-danger-soft" name="verdict" value="not_mine">본인 아님</button></form>')
         trs += (f'<tr><td class="mono">{esc(when)}</td><td>{esc(r["app"])}</td><td>{esc(_place(r["country"]))}</td>'
-                f'<td><span class="chip {cls}">{esc(label)}</span></td></tr>')
-    return (f'<div class="table-wrap"><table class="table compact"><tr><th>시각</th><th>서비스</th><th>접속 나라</th><th>결과</th></tr>'
+                f'<td><span class="chip {cls}">{esc(label)}</span></td><td>{check}</td></tr>')
+    return (f'<div class="table-wrap"><table class="table compact"><tr><th>시각</th><th>서비스</th><th>접속 나라</th><th>결과</th><th>확인</th></tr>'
             f'{trs}</table></div>')
 
 
@@ -333,31 +371,33 @@ def _needs_attention(row, now):
     return row["action"] in ACTIVITY_ATTENTION or foreign
 
 
-def _security_summary(identity):
-    """홈의 보안 한 줄. (위쪽 안내 HTML, 아래쪽 요약 HTML) - 둘 중 하나만 채운다.
-
-    평소에는 맨 아래 "보안 상태 정상" 한 줄, 확인할 기록이 있을 때만 맨 위 주황 안내(Gmail '마지막 계정 활동',
-    Google '보안 알림'과 같은 방식: 평소엔 조용히, 이상할 때만 눈에 띄게)."""
+def _security_card(identity):
+    """홈 오른쪽 위 '보안 상태' 카드. 평소엔 초록 '정상', 확인할 기록이 있으면 주황 테두리로 바뀐다
+    (Gmail '마지막 계정 활동', Google '보안 알림'처럼 평소엔 조용히, 이상할 때만 눈에 띄게)."""
     rows = _my_activity(identity, limit=ACTIVITY_SHOW)
-    link = f'<a class="go" href="/security">{{label}} {icon("arrow-right", 16)}</a>'
     if rows is None:
-        return "", (f'<div class="secbar"><span class="bx">{icon("info", 22)}</span><div><b>보안 기록을 불러올 수 없습니다</b>'
-                    f'<div class="sub">잠시 후 다시 확인해 주세요</div></div>{link.format(label="내 보안 기록")}</div>')
-    now = int(time.time())
-    flagged = [r for r in rows if _needs_attention(r, now)]
-    if flagged:
-        r = flagged[0]
-        label, _ = ACTIVITY_LABELS[r["action"]]
-        when = datetime.fromtimestamp(r["ts"], KST).strftime("%m.%d %H:%M")
-        more = f" 외 {len(flagged) - 1}건" if len(flagged) > 1 else ""
-        return (f'<div class="secbar warn" style="margin:0 0 14px"><span class="bx wn">{icon("alert", 22)}</span>'
-                f'<div><b>확인이 필요한 보안 활동 {len(flagged)}건</b>'
-                f'<div class="sub">{esc(when)} · {esc(r["app"])} · {esc(_place(r["country"]))} · {esc(label)}{esc(more)}'
-                f' — 본인이 아니라면 보안 관리자에게 알려 주세요</div></div>{link.format(label="확인하기")}</div>'), ""
-    last = (f'최근 접속 {datetime.fromtimestamp(rows[0]["ts"], KST).strftime("%m.%d %H:%M")} · {_place(rows[0]["country"])}'
-            if rows else "아직 기록된 보안 활동이 없습니다")
-    return "", (f'<div class="secbar"><span class="bx ok">{icon("shield-check", 22)}</span><div><b>보안 상태 정상</b>'
-                f'<div class="sub">{esc(last)}</div></div>{link.format(label="내 보안 기록")}</div>')
+        tone, ic, title, sub, link = "", "info", "보안 기록을 불러올 수 없습니다", "잠시 후 다시 확인해 주세요", "내 보안 기록"
+    else:
+        now = int(time.time())
+        acks = _load_acks(identity)
+        flagged = [r for r in rows if _needs_attention(r, now) and r["ts"] not in acks]
+        if flagged:
+            r = flagged[0]
+            label, _ = ACTIVITY_LABELS[r["action"]]
+            when = datetime.fromtimestamp(r["ts"], KST).strftime("%m.%d %H:%M")
+            more = f" 외 {len(flagged) - 1}건" if len(flagged) > 1 else ""
+            tone, ic, link = "wn", "alert", "확인하기"
+            title = f"확인이 필요한 보안 활동 {len(flagged)}건"
+            sub = f"{when} · {r['app']} · {_place(r['country'])} · {label}{more}"
+        else:
+            tone, ic, title, link = "ok", "shield-check", "보안 상태 정상", "내 보안 기록"
+            sub = (f'최근 접속 {datetime.fromtimestamp(rows[0]["ts"], KST).strftime("%m.%d %H:%M")} · {_place(rows[0]["country"])}'
+                   if rows else "아직 기록된 보안 활동이 없습니다")
+    note = ('<p class="small" style="margin:10px 0 0;color:#b25e00">본인이 아니라면 보안 관리자에게 알려 주세요.</p>'
+            if tone == "wn" else "")
+    return (f'<section class="sec-card {tone}"><div class="row"><span class="bx">{icon(ic, 22)}</span><div><b>{esc(title)}</b>'
+            f'<div class="sub">{esc(sub)}</div></div></div>{note}'
+            f'<a class="lk" href="/security">{esc(link)} {icon("arrow-right", 15)}</a></section>')
 
 
 # ---------- 내 급여명세서(셀프서비스) + IDOR 방어 ----------
@@ -434,12 +474,57 @@ def my_security():
           f'<div class="sec-item"><span class="bx">{icon("globe", 20)}</span><div><b>{esc(place)}</b><span>현재 접속 위치</span></div></div>'
           f'<div class="sec-item"><span class="bx">{icon("device", 20)}</span><div><b class="mono" style="font-size:14px">{esc(ip)}</b><span>현재 접속 IP</span></div></div>'
           f'</section>')
-    act = (f'<section class="card"><h2 class="card-title">최근 보안 활동</h2>{_activity_table(_my_activity(identity))}'
-           f'<p class="small faint" style="margin-top:10px">본인이 하지 않은 접속이나 차단이 보이면 즉시 보안 관리자에게 알려 주세요. '
-           f'비밀번호를 바꾸는 것도 도움이 됩니다.</p></section>')
-    html = f'<div class="grid grid-sec">{me}{act}</div>'
+    act = (f'<section class="card"><h2 class="card-title">최근 보안 활동</h2>'
+           f'{_activity_table(_my_activity(identity), _load_acks(identity), _csrf_token(identity))}'
+           f'<p class="small faint" style="margin-top:10px">확인이 필요한 활동은 <b>본인 맞음</b>을 누르면 홈 경고가 사라지고, '
+           f'<b>본인 아님</b>을 누르면 보안 관리자에게 바로 신고됩니다.</p></section>')
+    msg = SECURITY_MESSAGES.get(request.args.get("msg", ""))
+    banner = alert(msg[0], msg[1]) if msg else ""
+    html = f'{banner}<div class="grid grid-sec">{me}{act}</div>'
     return render_page("내 보안 기록", html, heading="내 보안 기록", crumb=_crumb("내 보안 기록"),
                        desc="내 계정의 접속 기록입니다. 본인이 아닌 기록이 보이면 보안 관리자에게 알려 주세요.")
+
+
+SECURITY_MESSAGES = {
+    "ack_mine": ("ok", "본인 활동으로 확인했습니다. 홈의 경고가 사라집니다."),
+    "ack_report": ("warn", "보안 관리자에게 신고했습니다. 관리자 안내가 오기 전까지 비밀번호를 다른 곳에 쓰지 말고, 필요하면 비밀번호를 바꿔 주세요."),
+    "ack_invalid": ("error", "확인할 수 없는 요청입니다. 페이지를 새로고침한 뒤 다시 시도하세요."),
+    "ack_failed": ("error", "저장하지 못했습니다. 잠시 후 다시 시도하세요."),
+}
+
+
+@app.route('/security/ack', methods=['POST'])
+def security_ack():
+    """직원이 '확인이 필요한 활동'을 본인 맞음/아님으로 확인. 기록은 서버(activity_ack)에 저장해 어느 기기에서든 같은 상태가 된다.
+    - 대상 활동은 로그인한 본인의 최근 기록 중 '확인이 필요한' 줄만(남의 기록이나 임의 시각은 받지 않음)
+    - 본인 아님: 관제에 user_reported_not_me 기록 -> Discord 즉시 알림(관리자가 조사)"""
+    host = request.host.split(':')[0].lower()
+    if host != PORTAL_DOMAIN:
+        return _status_page("찾을 수 없음", "잘못된 경로입니다.", 404)
+    identity = (getattr(g, "identity", "") or "").lower()
+    if not _same_origin() or not _csrf_valid(identity, request.form.get("csrf")):
+        return redirect("/security?msg=ack_invalid", code=303)
+    verdict = request.form.get("verdict", "")
+    try:
+        ts = int(request.form.get("ts", ""))
+    except ValueError:
+        ts = None
+    rows = _my_activity(identity) or []
+    now = int(time.time())
+    target = next((r for r in rows if r["ts"] == ts and _needs_attention(r, now)), None)
+    if verdict not in ACK_VERDICTS or target is None:
+        return redirect("/security?msg=ack_invalid", code=303)
+    try:
+        ack_table.put_item(Item={"identity": identity, "ts": ts, "verdict": verdict, "acked_at": now,
+                                 "expires_at": ts + ACK_TTL_SECONDS})
+    except Exception as e:
+        print("보안 활동 확인 저장 실패:", str(e))
+        return redirect("/security?msg=ack_failed", code=303)
+    if verdict == "not_mine":
+        log_event("user_reported_not_me", identity=identity, activity_ts=ts, app=target["app"],
+                  country=target["country"], action=target["action"],
+                  client_ip=request.headers.get("Cf-Connecting-Ip"))
+    return redirect(f"/security?msg={'ack_mine' if verdict == 'mine' else 'ack_report'}", code=303)
 
 
 @app.route('/')
@@ -473,16 +558,16 @@ def general():
              '필요하면 소속 부서장을 통해 권한을 요청하세요.</div>')
     notices = "".join(f'<li><span class="chip {"chip-" + kind if kind else ""}">{esc(tag)}</span>{esc(title)}<span class="end">{esc(date)}</span></li>'
                       for tag, kind, title, date in demo_data.NOTICES)
-    top, bottom = _security_summary(identity)
     name = identity.split("@")[0] if identity else "사용자"
     quick = (f'<section class="card"><h2 class="card-title">바로가기</h2><ul class="list">'
-             f'<li><a class="quick" href="/payslip">{icon("folder", 18)}<span>내 급여명세서</span>{icon("arrow-right", 16)}</a></li>'
-             f'<li><a class="quick" href="/security">{icon("shield", 18)}<span>내 보안 기록</span>{icon("arrow-right", 16)}</a></li></ul></section>')
-    html = f"""{top}{empty}<div class="app-grid">{tiles}</div>
+             f'<li><a class="quick" href="/payslip"><span class="bx">{icon("folder", 18)}</span><span>내 급여명세서</span>{icon("arrow-right", 16)}</a></li>'
+             f'<li><a class="quick" href="/security"><span class="bx">{icon("shield", 18)}</span><span>내 보안 기록</span>{icon("arrow-right", 16)}</a></li></ul></section>')
+    name = identity.split("@")[0] if identity else "사용자"
+    # 위: 업무 앱 4칸(권한 없는 앱도 잠긴 칸으로 보여 줌) / 아래: 왼쪽 공지, 오른쪽 위 보안 상태 + 그 아래 바로가기
+    html = f"""{empty}<div class="app-grid">{tiles}</div>
     <div class="grid grid-home" style="margin-top:14px">
     <section class="card"><h2 class="card-title">전사 공지<span class="right">{_demo_note()}</span></h2><ul class="list">{notices}</ul></section>
-    {quick}</div>
-    {bottom}"""
+    <div class="side">{_security_card(identity)}{quick}</div></div>"""
     return render_page("사내 포털", html, heading=f"{name}님, {_greeting()}", desc=_today_line(dept))
 
 

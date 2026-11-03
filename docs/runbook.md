@@ -13,6 +13,7 @@ Discord 알림이 오면 아래 순서로 확인한다. Kibana: `https://kibana.
 | `decision` + `geo_velocity` / `session_country_change` | 불가능한 이동 / 세션 도중 나라 바뀜(쿠키 탈취 의심) | 이전/이후 접속 위치, 시간 간격, VPN 사용 여부 | 본인이 아니면 세션 폐기 + 비밀번호/TOTP 재설정 |
 | `decision` + `threat_intel_match` | 위험 IP에서 접속(그 요청만 차단) | AbuseIPDB 점수, 같은 IP의 다른 계정 시도 | 반복되면 해당 IP 대역 확인 |
 | `mtls_client_rejected` | 내부 서버에 인증서 없는 접속 | `zt.remote`(보낸 곳 사설 IP) | 내부 침해 의심 → 해당 서버 확인 |
+| `user_reported_not_me` | 직원이 "내 보안 기록"에서 확인이 필요한 활동을 **본인 아님**으로 신고 | 신고한 활동의 시각/나라(`zt.activity_ts`, `zt.country`), 같은 시각의 `decision` 기록과 접속 IP | 계정 탈취로 보고 세션 폐기 + 비밀번호/TOTP 재설정 안내. 필요하면 관리자 콘솔 기록과 함께 보고 |
 | `idor_reported` / `decision` + `resource_owner_mismatch` | 남의 자료(급여명세서 등)를 10분에 3번 이상 요청 → 앱이 모두 거부, 계정 전체 차단(해제 불가 위험) | Kibana ⑦에서 요청한 번호(`zt.path`)와 횟수, 같은 사람의 이전 로그인 위치/시간 | 본인(내부자)인지 탈취인지 확인. 탈취면 비밀번호/TOTP 재설정, 내부자면 인사 절차. 확인 전에는 해제하지 않음 |
 
 ## 2. [ZT 반복 차단] (같은 사람 10분 5회 이상 차단/재인증 요구)

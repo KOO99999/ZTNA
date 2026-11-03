@@ -201,7 +201,7 @@ index: zt-logs-*
 filter:
   - query:
       query_string:
-        query: 'zt.event:(waf_reported OR idor_reported OR login_locked OR pwned_password_detected OR mtls_client_rejected OR risk_release) OR (zt.event:device_sweep AND zt.action:device_session_revoked) OR (zt.event:decision AND zt.signals:(threat_intel_match OR geo_velocity OR session_country_change OR waf_sqli OR waf_attack OR resource_owner_mismatch))'
+        query: 'zt.event:(waf_reported OR idor_reported OR user_reported_not_me OR login_locked OR pwned_password_detected OR mtls_client_rejected OR risk_release) OR (zt.event:device_sweep AND zt.action:device_session_revoked) OR (zt.event:decision AND zt.signals:(threat_intel_match OR geo_velocity OR session_country_change OR waf_sqli OR waf_attack OR resource_owner_mismatch))'
 query_key: zt.identity
 realert:
   minutes: 5
@@ -213,8 +213,8 @@ alert_subject: "[ZT 즉시 대응] {0} / {1}"
 alert_subject_args: ["zt.event", "zt.identity"]
 alert_text_type: alert_text_only
 alert_missing_value: "-"
-alert_text: "사용자: {0}\n판단/행동: {1}\n점수: {2}\n신호: {3}\n자원: {4}\n접속 IP: {5}\n서비스: {6}\n시각: {7}\n대응 절차: docs/runbook.md"
-alert_text_args: ["zt.identity", "zt.action", "zt.score", "zt.signals", "zt.resource", "zt.client_ip", "zt.service", "@timestamp"]
+alert_text: "사용자: {0}\n판단/행동: {1}\n점수: {2}\n신호: {3}\n자원: {4}\n요청 경로: {8}\n횟수(10분): {9}\n나라: {10}\n접속 IP: {5}\n서비스: {6}\n시각: {7}\n대응 절차: docs/runbook.md"
+alert_text_args: ["zt.identity", "zt.action", "zt.score", "zt.signals", "zt.resource", "zt.client_ip", "zt.service", "@timestamp", "zt.path", "zt.count", "zt.country"]
 EARULE
 # 규칙 2: 같은 사람이 10분에 5번 이상 막힘(반복 시도)
 cat > /opt/elastalert/rules/zt_repeated_denials.yaml << EARULE

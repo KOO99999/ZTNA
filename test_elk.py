@@ -174,8 +174,8 @@ ok("표는 모두 같은 데이터 보기를 참조하고, 최신순·KQL 검색
    and o["attributes"]["sort"] == [["@timestamp", "desc"]] and json.loads(o["attributes"]["kibanaSavedObjectMeta"]["searchSourceJSON"])["query"]["language"] == "kuery"
    for o in searches))
 all_events = set(re.findall(r'"([a-z_]+)"', " ".join(json.loads(o["attributes"]["kibanaSavedObjectMeta"]["searchSourceJSON"])["query"]["query"] for o in searches)))
-authz_src, risk_src = read("zt_authz.py"), read("zt_risk.py")
-code_events = (set(re.findall(r'log_event\("([a-z_]+)"', eng + auth + gate + waf + authz_src + risk_src))
+authz_src, risk_src, portal_src = read("zt_authz.py"), read("zt_risk.py"), read("portal_app.py")
+code_events = (set(re.findall(r'log_event\("([a-z_]+)"', eng + auth + gate + waf + authz_src + risk_src + portal_src))
                | {"risk_release", "pdp_degraded_allow", "pdp_degraded_deny"})
 ok("표가 시스템이 남기는 이벤트 종류를 모두 덮음(빠진 이벤트 없음)", not (code_events - all_events), code_events - all_events)
 ok("관제 서버: kibana/*.ndjson을 S3에서 받아 가져오기(같은 ID 덮어씀), 읽기 권한은 elk/kibana/*만",
@@ -238,3 +238,5 @@ ok("Discord 즉시 대응 규칙: IDOR 알림(idor_reported)과 resource_owner_m
 r3 = tpl.split("zt_pdp_unavailable.yaml")[1].split("EARULE")[1] if "zt_pdp_unavailable.yaml" in tpl else ""
 ok("Discord 장애 규칙: 차단(pdp_unavailable)뿐 아니라 장애 모드 통과/차단(pdp_degraded_*)도 알림",
    "pdp_degraded_allow" in tpl and "pdp_degraded_deny" in tpl and "zt.mode" in tpl)
+ok("Discord 즉시 대응: 직원의 '본인 아님' 신고(user_reported_not_me), IDOR 경로/횟수/나라 표시",
+   "user_reported_not_me" in tpl and '"zt.path", "zt.count", "zt.country"' in tpl)

@@ -18,14 +18,14 @@ mkdir -p /opt/ztgate /etc/ztgate
 python3 -m venv /opt/ztgate/venv
 /opt/ztgate/venv/bin/pip install --no-cache-dir flask "gunicorn==26.2.0" pyjwt cryptography requests boto3
 
-# [코드 받기] 판단 서비스 코드(auth_gate.py, zt_jwt.py, zt_risk.py, zt_waf.py)는 S3(code_bucket.tf)에서 받는다.
+# [코드 받기] 판단 서비스 코드(auth_gate.py, zt_jwt.py, zt_risk.py, zt_waf.py, zt_authz.py)는 S3(code_bucket.tf)에서 받는다.
 # user_data에 넣으면 압축 후에도 16KB 한도를 넘는다(WAF 모듈 추가 후). 이 서버 역할은 자기 코드 파일만 읽을 수 있다.
 # 코드 버전(파일 해시) - 코드가 바뀌면 이 줄이 바뀌어 서버가 새로 만들어진다: ${web_code_version}
 for i in $(seq 1 30); do
   if /opt/ztgate/venv/bin/python -c "
 import boto3
 s3 = boto3.client('s3', region_name='${aws_region}')
-for name in ('auth_gate.py', 'zt_jwt.py', 'zt_risk.py', 'zt_waf.py', 'zt_ui.py'):
+for name in ('auth_gate.py', 'zt_jwt.py', 'zt_risk.py', 'zt_waf.py', 'zt_authz.py', 'zt_ui.py'):
     s3.download_file('${code_bucket}', 'web/' + name, '/opt/ztgate/' + name)
 "; then echo "gate code ok after $i tries"; break; fi
   sleep 10
@@ -49,6 +49,7 @@ EVALUATE_SHARED_SECRET=${evaluate_shared_secret}
 AUTH_DOMAIN=${auth_domain}
 ZT_WAF_ENABLED=1
 ZT_WAF_LOG=/var/log/modsec/zt_waf_app.log
+ZT_AUTHZ_LOG=/var/log/modsec/zt_authz_app.log
 CF_TEAM_DOMAIN=${cf_team_domain}
 CF_ACCESS_AUDS=${cf_access_auds}
 ZTENV
@@ -177,6 +178,14 @@ cat << 'LOGROTATE' > /etc/logrotate.d/zt-modsec
 LOGROTATE
 
 cat << 'NGINX' > /etc/nginx/sites-available/default
+# [IDOR] 앱이 객체 접근을 거부하며 붙인 X-ZT-Authz(예: owner_mismatch)가 있을 때만 남기는 기록.
+#   신원은 앞단이 JWT 검증 결과로 덮어쓴 X-ZT-Identity(내부 단계 요청 헤더)라 위조할 수 없다. 판단 서비스(zt_authz.py)가 읽는다.
+map $upstream_http_x_zt_authz $zt_authz_event {
+    ""       0;
+    default  1;
+}
+log_format zt_authz escape=json '{"time":"$time_iso8601","identity":"$http_x_zt_identity","host":"$host","uri":"$request_uri","authz":"$upstream_http_x_zt_authz","status":"$status"}';
+
 map $request_uri $zt_unavailable_target {
     ~^/api/  @zt_unavailable_api;
     default  @zt_unavailable;
@@ -297,6 +306,8 @@ server {
     listen 127.0.0.1:8081;
     # 앱 단계 WAF 차단 기록만 따로 남긴다(판단 서비스 zt_waf.py가 이 파일을 읽어 신원과 연결)
     error_log /var/log/modsec/zt_waf_app.log warn;
+    # 앱의 객체 접근 거부(IDOR 시도) 기록: X-ZT-Authz가 붙은 응답만(판단 서비스 zt_authz.py가 읽음)
+    access_log /var/log/modsec/zt_authz_app.log zt_authz if=$zt_authz_event;
     modsecurity on;
     modsecurity_rules_file /etc/nginx/zt-modsec/main.conf;
     # WAF가 막으면 보여줄 화면(named location: 실측에서 이 방식일 때 차단 기록이 정상으로 남음)
@@ -324,6 +335,8 @@ server {
         proxy_set_header X-Forwarded-For $http_x_forwarded_for;
         # WAF 기록용 신원 헤더는 앱에 넘기지 않는다(앱은 서명 검증된 JWT만 씀)
         proxy_set_header X-ZT-Identity "";
+        # 앱이 붙인 거부 사유는 기록에만 쓰고 사용자에게는 보내지 않는다(번호 존재 여부 등 힌트가 되지 않게)
+        proxy_hide_header X-ZT-Authz;
     }
 }
 

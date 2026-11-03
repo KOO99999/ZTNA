@@ -72,3 +72,28 @@ def search_employees(query):
     if not q:
         return list(EMPLOYEES)
     return [e for e in EMPLOYEES if any(q in str(v).lower() for v in (e[0], e[1], e[2], e[3]))]
+
+
+# ---------- 급여명세서(셀프서비스): IDOR 시험 대상 ----------
+# 직원 employee01~09의 최근 3개월 명세서. 번호 = 직원 번호 * 100 + 월(예: employee01의 10월 = 110, employee02의 10월 = 210).
+# 실제 서비스에서도 흔한 "번호만 바꾸면 남의 것을 요청할 수 있는" 주소 형태라, 서버가 주인 확인을 해야 한다(포털이 함).
+PAYSLIP_MONTHS = (8, 9, 10)
+_BASE_PAY = {1: 412, 2: 538, 3: 365, 4: 401, 5: 489, 6: 377, 7: 352, 8: 615, 9: 395}   # 만원(가상)
+_NAMES = {1: "김하나", 2: "이도윤", 3: "박서준", 4: "정민지", 5: "최유나", 6: "강지호", 7: "윤채원", 8: "임서연", 9: "한지민"}
+
+
+def payslips(domain):
+    """{번호: 명세서 dict}. owner는 로그인 이메일(소문자)."""
+    out = {}
+    for n, base in _BASE_PAY.items():
+        for m in PAYSLIP_MONTHS:
+            pid = n * 100 + m
+            overtime = (n * 7 + m * 3) % 9 * 5
+            gross = base + overtime
+            tax = round(gross * 0.093)
+            insurance = round(gross * 0.094)
+            out[pid] = {"id": pid, "owner": f"employee{n:02d}@{domain}".lower(), "name": _NAMES[n],
+                        "month": f"2026.{m:02d}", "base": base, "overtime": overtime, "gross": gross,
+                        "tax": tax, "insurance": insurance, "net": gross - tax - insurance,
+                        "account": f"***-**-{(n * 4271 + m) % 10000:04d}"}
+    return out

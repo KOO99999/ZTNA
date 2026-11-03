@@ -47,6 +47,60 @@ _cache = {}
 _cache_lock = threading.Lock()
 _CACHE_MAX_ENTRIES = 1000
 
+# [장애 모드] 엔진(Lambda)에 닿지 못할 때, 이미 로그인한 세션의 재확인을 등급별로 다르게 처리한다(엔진 FAIL_POLICY 표와 같음).
+#   top_secret  : 차단(아래 표에 없음)
+#   confidential: 이 사람이 이 자원에서 받은 마지막 '통과'가 10분 안이면 재사용
+#   internal    : 마지막 '통과' 15분 재사용, 없으면 장애가 시작된 뒤 15분까지 통과(위험 수용) - 관제 알림
+#   등급은 엔진의 지난 응답(resource_tier)에서 배운 값만 쓴다. 이 모듈이 등급표를 따로 갖지 않기 위함(기준이 두 곳으로 갈라지지 않게).
+#   등급을 모르거나(서버가 막 켜짐) 정해진 시간이 지나면 차단. 새 로그인(Access/Worker)은 이 모듈과 무관하게 항상 차단.
+#   10/15분: 표준 수치가 없어 재인증 유효 시간(10분)과 Access 세션 길이(15분)에 맞춘 팀 판단.
+DEGRADED_REUSE_SECONDS = {"confidential": 600, "internal": 900}
+DEGRADED_OPEN_SECONDS = {"internal": 900}
+_last_allow = {}       # (identity, resource_path) -> 엔진이 실제로 '통과'라고 한 마지막 시각
+_known_tier = {}       # resource_path 또는 호스트 -> 엔진이 알려 준 등급
+_outage = {"since": None}
+_LAST_ALLOW_MAX = 5000
+
+
+def _tier_for(resource_path):
+    host = (resource_path or "").split("/")[0]
+    return _known_tier.get(resource_path) or _known_tier.get(host)
+
+
+def _remember(identity, resource_path, result, now):
+    """정상 응답에서 등급과 마지막 통과를 배운다. 차단/추가 인증 응답이면 그 자원의 마지막 통과를 지운다."""
+    tier = result.get("resource_tier")
+    with _cache_lock:
+        _outage["since"] = None
+        if isinstance(tier, str):
+            _known_tier[resource_path] = tier
+            _known_tier.setdefault((resource_path or "").split("/")[0], tier)
+        key = (identity, resource_path)
+        if result.get("allow"):
+            if len(_last_allow) >= _LAST_ALLOW_MAX:
+                for k in [k for k, t in _last_allow.items() if now - t > max(DEGRADED_REUSE_SECONDS.values())]:
+                    del _last_allow[k]
+            if len(_last_allow) < _LAST_ALLOW_MAX:
+                _last_allow[key] = now
+        else:
+            _last_allow.pop(key, None)
+
+
+def _degraded(identity, resource_path, now):
+    """엔진 장애 중 판단. (모드, 등급) - 모드가 None이면 차단."""
+    with _cache_lock:
+        if _outage["since"] is None:
+            _outage["since"] = now
+        tier = _tier_for(resource_path)
+        last = _last_allow.get((identity, resource_path))
+        reuse = DEGRADED_REUSE_SECONDS.get(tier)
+        if reuse and last is not None and now - last <= reuse:
+            return "degraded_reuse", tier
+        open_for = DEGRADED_OPEN_SECONDS.get(tier)
+        if open_for and now - _outage["since"] <= open_for:
+            return "degraded_open", tier
+    return None, tier
+
 
 def _call_pdp(identity, country, resource_path, client_ip=None, session_country=None):
     """Lambda(PDP) 호출. 실패하면 fail-closed(차단) 결과를 돌려준다 - Worker와 같은 정책."""
@@ -116,6 +170,17 @@ def check_risk(identity, country, resource_path, client_ip=None, session_country
     result = _call_pdp(identity, country, resource_path, client_ip, session_country)
     result["from_cache"] = False
 
+    if result["error"]:
+        mode, tier = _degraded(identity, resource_path, now)
+        log_event("pdp_degraded_allow" if mode else "pdp_degraded_deny", identity=identity, resource=resource_path,
+                  tier=tier, mode=mode, outage_seconds=int(now - (_outage["since"] or now)))
+        if mode:
+            # 통과지만 캐시하지 않는다(엔진이 돌아오면 바로 정상 판단으로 돌아가게)
+            return {"allow": True, "action": mode, "resource_tier": tier, "error": False, "degraded": True,
+                    "from_cache": False}
+        return result
+    _remember(identity, resource_path, result, now)
+
     if result["allow"] and not result["error"]:
         ttl = result.get("cache_ttl_seconds")
         if isinstance(ttl, bool) or not isinstance(ttl, (int, float)):
@@ -143,6 +208,9 @@ def invalidate_identity(identity):
     with _cache_lock:
         for key in [k for k in _cache if str(k[0]).strip().lower() == identity]:
             del _cache[key]
+        # 장애 모드에서 재사용할 '마지막 통과'도 지운다(방금 공격이 확인된 사람을 장애 중에 들여보내지 않게)
+        for key in [k for k in _last_allow if str(k[0]).strip().lower() == identity]:
+            del _last_allow[key]
 
 
 def resource_path_for(host, path):

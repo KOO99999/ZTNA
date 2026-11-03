@@ -502,8 +502,8 @@ t("[보안] 틀린 비밀키로 거부된 호출의 로그에도 입력값이 �
 def _flag(identity, signal, status="active"):
     return {"identity": identity, "signal": signal, "status": status, "set_at": now}
 
-t("[UserRisk] STICKY_SIGNALS는 resettable=False인 security 신호 3개",
-  sorted(engine.STICKY_SIGNALS) == ["threat_intel_match", "waf_attack", "waf_sqli"], engine.STICKY_SIGNALS)
+t("[UserRisk] STICKY_SIGNALS는 resettable=False인 security 신호 4개(IDOR 포함)",
+  sorted(engine.STICKY_SIGNALS) == ["resource_owner_mismatch", "threat_intel_match", "waf_attack", "waf_sqli"], engine.STICKY_SIGNALS)
 
 # 1) persist_risk=true + 감지 -> 저장
 r = _call({"session_id": "u1", "identity": "kim@test.com", "waf_sqli": True, "persist_risk": True, "source": "B"})
@@ -1418,3 +1418,29 @@ t("[기준] BASELINE_MODE=fixed: 이력 조회 없이 공통 규칙(23시 -> nig
   _has(r, "night_access") and not mock_history.query.called and not mock_history.put_item.called, r)
 engine.BASELINE_MODE = "personal"
 mock_history.query.return_value = {"Items": []}
+
+
+# ======================================================================
+# [IDOR] resource_owner_mismatch: 웹 서버 앞단(zt_authz)이 persist_risk=True로 알리면 저장 -> 이후 모든 앱 차단, MFA로 안 풀림
+# ======================================================================
+mock_user_risk.reset_mock(); mock_user_risk.query.return_value = {"Items": []}
+r = json.loads(engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps({
+    "session_id": "idor1", "identity": "kim@xmcda.store", "source": "app_authz", "persist_risk": True,
+    "resource_owner_mismatch": True, "resource_path": "xmcda.store/payslip/210"})}, None)["body"])
+upd = [c.kwargs for c in mock_user_risk.update_item.call_args_list]
+t("[IDOR] 알림 받은 판단: 차단 + user_risk에 resource_owner_mismatch 저장",
+  r["allow"] is False and any(u.get("Key", {}).get("signal") == "resource_owner_mismatch" for u in upd), (r, upd))
+for path, tier in (("xmcda.store/", "internal"), ("dev.xmcda.store/", "confidential"), ("admin.xmcda.store/", "top_secret")):
+    mock_user_risk.query.return_value = {"Items": [{"identity": "kim@xmcda.store", "signal": "resource_owner_mismatch", "status": "active"}]}
+    r = json.loads(engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps({
+        "session_id": "idor2", "identity": "kim@xmcda.store", "resource_path": path, "source": "B"})}, None)["body"])
+    t(f"[IDOR] 딱지가 있으면 {tier} 자원도 차단(신호 자체는 다른 앱에서 걸렸어도)", r["allow"] is False and r["action"] == "block_until_mfa", r)
+mock_user_risk.query.return_value = {"Items": [{"identity": "kim@xmcda.store", "signal": "resource_owner_mismatch", "status": "active"}]}
+r = json.loads(engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps({
+    "session_id": "idor3", "identity": "kim@xmcda.store", "resource_path": "xmcda.store/", "source": "B",
+    "security_mfa_passed": True})}, None)["body"])
+t("[IDOR] MFA를 통과해도 풀리지 않음(관리자 해제 대상)", r["allow"] is False, r)
+mock_user_risk.query.return_value = {"Items": []}
+t("[장애 정책] 기록표: 최고기밀 차단, 새 로그인 차단, 기밀 10분/내부 15분",
+  engine.FAIL_POLICY["top_secret"] == "fail_closed" and engine.FAIL_POLICY["new_login"] == "fail_closed"
+  and "600" in engine.FAIL_POLICY["confidential"] and "900" in engine.FAIL_POLICY["internal"])

@@ -27,6 +27,7 @@ TESTS = [
     ("WAF 신원 연결 (zt_waf.py)", "test_waf.py"),
     ("관제 콘솔 (elk.tf, ZT_EVENT)", "test_elk.py"),
     ("개인별 기준 (시드·이력)", "test_baseline.py"),
+    ("IDOR 신호 (zt_authz.py)", "test_authz.py"),
 ]
 
 env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")

@@ -360,6 +360,65 @@ def _security_summary(identity):
                 f'<div class="sub">{esc(last)}</div></div>{link.format(label="내 보안 기록")}</div>')
 
 
+# ---------- 내 급여명세서(셀프서비스) + IDOR 방어 ----------
+# 1차 방어(예방): 명세서 주인(owner)과 로그인한 사람(서명 검증된 JWT의 email)이 다르면 항상 거부한다.
+#   엔진을 꺼도 이 확인은 그대로다(OWASP: 객체 접근 권한은 서버에서 매 요청 확인).
+#   남의 명세서와 없는 명세서에 같은 응답(404)을 줘서, 번호가 존재하는지도 알려 주지 않는다.
+# 2차(탐지): 주인이 다른 경우에만 응답에 X-ZT-Authz: owner_mismatch를 붙인다. 웹 서버 nginx가 이 헤더를 지우고
+#   (사용자에게 안 보임) 검증된 신원과 함께 기록하면, 앞단 판단 서비스(zt_authz.py)가 사람별로 세어 반복되면 엔진에 알린다.
+#   앱 서버에는 엔진 비밀키가 없으므로(최소 권한) 엔진에 직접 알리지 않는다 - WAF 탐지와 같은 경로.
+PAYSLIP_NOT_FOUND = ("명세서를 찾을 수 없습니다", "요청한 급여명세서가 없거나 열람 권한이 없습니다. 본인 명세서는 '내 급여명세서'에서 확인하세요.")
+
+
+def _won(v):
+    return f"{int(v) * 10000:,}원"
+
+
+@app.route('/payslip')
+def payslip_list():
+    host = request.host.split(':')[0].lower()
+    if host != PORTAL_DOMAIN:
+        return _status_page("찾을 수 없음", "잘못된 경로입니다.", 404)
+    identity = (getattr(g, "identity", "") or "").lower()
+    mine = sorted((p for p in demo_data.payslips(PORTAL_DOMAIN).values() if p["owner"] == identity),
+                  key=lambda p: p["month"], reverse=True)
+    if mine:
+        rows = "".join(f'<tr><td>{esc(p["month"])}</td><td>{esc(_won(p["gross"]))}</td><td><b>{esc(_won(p["net"]))}</b></td>'
+                       f'<td><a class="btn btn-sm btn-soft" href="/payslip/{p["id"]}">보기</a></td></tr>' for p in mine)
+        body = (f'<div class="table-wrap"><table class="table compact"><tr><th>지급 월</th><th>지급 총액</th><th>실수령액</th><th></th></tr>'
+                f'{rows}</table></div>')
+    else:
+        body = '<div class="empty">조회할 급여명세서가 없습니다.</div>'
+    html = f'<section class="card"><h2 class="card-title">내 급여명세서<span class="right">{_demo_note()}</span></h2>{body}</section>'
+    return render_page("내 급여명세서", html, heading="내 급여명세서", crumb=_crumb("내 급여명세서"),
+                       desc="본인 명세서만 조회할 수 있습니다.")
+
+
+@app.route('/payslip/<int:pid>')
+def payslip_detail(pid):
+    host = request.host.split(':')[0].lower()
+    if host != PORTAL_DOMAIN:
+        return _status_page("찾을 수 없음", "잘못된 경로입니다.", 404)
+    identity = (getattr(g, "identity", "") or "").lower()
+    p = demo_data.payslips(PORTAL_DOMAIN).get(pid)
+    if p is None or p["owner"] != identity:
+        html, code = _status_page(*PAYSLIP_NOT_FOUND, 404)
+        headers = {}
+        if p is not None:
+            headers["X-ZT-Authz"] = "owner_mismatch"
+            print(f"[AUTHZ_DENIED] identity={identity} object=payslip/{pid} reason=owner_mismatch", flush=True)
+        return html, code, headers
+    rows = [("기본급", p["base"]), ("시간외 수당", p["overtime"]), ("지급 총액", p["gross"]),
+            ("소득세 등", -p["tax"]), ("4대 보험", -p["insurance"])]
+    items = "".join(f'<li><span>{esc(k)}</span><span class="end">{esc(("-" if v < 0 else "") + _won(abs(v)))}</span></li>' for k, v in rows)
+    html = (f'<section class="card"><h2 class="card-title">{esc(p["month"])} 급여명세서<span class="right">{_demo_note()}</span></h2>'
+            f'<div class="sec-item"><span class="bx">{icon("user", 20)}</span><div><b>{esc(p["name"])}</b><span>{esc(identity)}</span></div></div>'
+            f'<ul class="list" style="margin-top:8px">{items}</ul>'
+            f'<div class="secbar" style="box-shadow:none;padding:14px 0 0"><div><b>실수령액</b><div class="sub">입금 계좌 {esc(p["account"])}</div></div>'
+            f'<b style="margin-left:auto;font-size:20px">{esc(_won(p["net"]))}</b></div></section>')
+    return render_page(f'{p["month"]} 급여명세서', html, heading="급여명세서", crumb=_crumb("내 급여명세서", p["month"]))
+
+
 @app.route('/security')
 def my_security():
     """내 보안 기록(포털 전용). 접속 정보 + 최근 활동 표. 다른 앱 주소로 오면 없는 페이지."""
@@ -416,8 +475,13 @@ def general():
                       for tag, kind, title, date in demo_data.NOTICES)
     top, bottom = _security_summary(identity)
     name = identity.split("@")[0] if identity else "사용자"
+    quick = (f'<section class="card"><h2 class="card-title">바로가기</h2><ul class="list">'
+             f'<li><a class="quick" href="/payslip">{icon("folder", 18)}<span>내 급여명세서</span>{icon("arrow-right", 16)}</a></li>'
+             f'<li><a class="quick" href="/security">{icon("shield", 18)}<span>내 보안 기록</span>{icon("arrow-right", 16)}</a></li></ul></section>')
     html = f"""{top}{empty}<div class="app-grid">{tiles}</div>
-    <section class="card" style="margin-top:14px"><h2 class="card-title">전사 공지<span class="right">{_demo_note()}</span></h2><ul class="list">{notices}</ul></section>
+    <div class="grid grid-home" style="margin-top:14px">
+    <section class="card"><h2 class="card-title">전사 공지<span class="right">{_demo_note()}</span></h2><ul class="list">{notices}</ul></section>
+    {quick}</div>
     {bottom}"""
     return render_page("사내 포털", html, heading=f"{name}님, {_greeting()}", desc=_today_line(dept))
 
@@ -425,6 +489,7 @@ def general():
 # 관리자 화면에서 신호/판정 코드를 사람이 읽는 이름으로 (코드도 작게 같이 보여 준다 - 관리자는 로그와 대조해야 하므로)
 SIGNAL_LABELS = {
     "threat_intel_match": "위험 IP 접속", "waf_sqli": "SQL 삽입 공격", "waf_attack": "웹 공격(XSS 등)",
+    "resource_owner_mismatch": "남의 자료 반복 요청(IDOR)",
 }
 ACTION_LABELS = {
     "allow": ("허용", "chip-ok"), "step_up_mfa_verified": ("재인증 후 허용", "chip-ok"),

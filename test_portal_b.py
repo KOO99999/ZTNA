@@ -519,6 +519,35 @@ ra = open("risk_admin.tf", encoding="utf-8").read()
 check("risk_admin.tf: 앱 역할은 색인 Query만(테이블 Query 아님)",
       '"${aws_dynamodb_table.risk_score_log.arn}/index/identity-timestamp-index"' in ra and "QueryMyActivityIndex" in ra)
 
+# ---------- 4c. 내 급여명세서 + IDOR(주인 확인) ----------
+def pay(path, email="employee01@xmcda.store", host="xmcda.store"):
+    return client.get(path, headers={**hdr(email=email), "Host": host})
+
+r = pay("/payslip")
+t = r.get_data(as_text=True)
+check("명세서 목록: 본인 것 3개만(다른 사람 번호 없음)", r.status_code == 200 and all(f'/payslip/{i}"' in t for i in (108, 109, 110))
+      and "/payslip/2" not in t, t[-1500:])
+r = pay("/payslip/110")
+t = r.get_data(as_text=True)
+check("본인 명세서: 200, 실수령액 표시, 거부 표시 헤더 없음", r.status_code == 200 and "실수령액" in t and "김하나" in t
+      and "X-ZT-Authz" not in r.headers)
+r = pay("/payslip/210")
+t = r.get_data(as_text=True)
+check("남의 명세서(employee02의 210): 404 + 내용 없음 + X-ZT-Authz: owner_mismatch(nginx가 기록하고 지움)",
+      r.status_code == 404 and r.headers.get("X-ZT-Authz") == "owner_mismatch" and "이도윤" not in t and "실수령액" not in t, (r.status_code, dict(r.headers)))
+r2 = pay("/payslip/999")
+check("없는 명세서: 같은 404 화면(존재 여부를 알려 주지 않음), 거부 표시 헤더 없음",
+      r2.status_code == 404 and "X-ZT-Authz" not in r2.headers and r2.get_data(as_text=True) == t)
+check("엔진을 끈 것과 무관하게 앱이 직접 막음(포털은 엔진을 부르지 않음)", "check_risk" not in open("portal_app.py", encoding="utf-8").read())
+r = pay("/payslip/110", email="EMPLOYEE01@xmcda.store")
+check("이메일 대소문자가 달라도 본인으로 인정", r.status_code == 200)
+r = pay("/payslip/110", email="hana@test.com")
+check("관리자라도 남의 명세서는 거부", r.status_code == 404 and r.headers.get("X-ZT-Authz") == "owner_mismatch")
+for h in ("dev.xmcda.store", "admin.xmcda.store"):
+    check(f"명세서는 포털에서만({h} -> 404, 거부 표시 없음)", pay("/payslip/110", host=h).status_code == 404
+          and "X-ZT-Authz" not in pay("/payslip/110", host=h).headers)
+check("포털 홈에 '내 급여명세서' 바로가기", 'href="/payslip"' in home("kim@test.com"))
+
 # ---------- 5. 디버그 라우트는 기본으로 꺼져 있음 ----------
 reset()
 r = client.get("/debug-headers", headers=H)

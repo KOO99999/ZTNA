@@ -163,17 +163,20 @@ mt = read("main.tf")
 ok("Kibana를 켜면 로그인 서버가 Kibana를 알게 함: 복귀 주소/로그아웃 목록 + 관리자만(소속 안내 화면)",
    'var.enable_elk ? ["kibana.${var.domain_name}"] : []' in mt and 'var.enable_elk ? { "kibana.${var.domain_name}" = ["admin"] } : {}' in mt)
 
-# ---------- 5. Kibana 저장 객체(표 6개) ----------
+# ---------- 5. Kibana 저장 객체(표 7개) ----------
 objs = [json.loads(l) for l in read("kibana/zt_saved_searches.ndjson").splitlines() if l.strip()]
 searches = [o for o in objs if o["type"] == "search"]
 dv = [o for o in objs if o["type"] == "index-pattern"]
-ok("Kibana: 데이터 보기 1개(zt-logs-*, 시간 필드 @timestamp) + 표(저장된 검색) 6개",
-   len(dv) == 1 and dv[0]["attributes"]["title"] == "zt-logs-*" and dv[0]["attributes"]["timeFieldName"] == "@timestamp" and len(searches) == 6)
+ok("Kibana: 데이터 보기 1개(zt-logs-*, 시간 필드 @timestamp) + 표(저장된 검색) 7개(⑦ IDOR)",
+   len(dv) == 1 and dv[0]["attributes"]["title"] == "zt-logs-*" and dv[0]["attributes"]["timeFieldName"] == "@timestamp" and len(searches) == 7
+   and len({o["id"] for o in searches}) == 7)
 ok("표는 모두 같은 데이터 보기를 참조하고, 최신순·KQL 검색", all(o["references"] == [{"name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern", "id": dv[0]["id"]}]
    and o["attributes"]["sort"] == [["@timestamp", "desc"]] and json.loads(o["attributes"]["kibanaSavedObjectMeta"]["searchSourceJSON"])["query"]["language"] == "kuery"
    for o in searches))
 all_events = set(re.findall(r'"([a-z_]+)"', " ".join(json.loads(o["attributes"]["kibanaSavedObjectMeta"]["searchSourceJSON"])["query"]["query"] for o in searches)))
-code_events = set(re.findall(r'log_event\("([a-z_]+)"', eng + auth + gate + waf)) | {"risk_release"}
+authz_src, risk_src = read("zt_authz.py"), read("zt_risk.py")
+code_events = (set(re.findall(r'log_event\("([a-z_]+)"', eng + auth + gate + waf + authz_src + risk_src))
+               | {"risk_release", "pdp_degraded_allow", "pdp_degraded_deny"})
 ok("표가 시스템이 남기는 이벤트 종류를 모두 덮음(빠진 이벤트 없음)", not (code_events - all_events), code_events - all_events)
 ok("관제 서버: kibana/*.ndjson을 S3에서 받아 가져오기(같은 ID 덮어씀), 읽기 권한은 elk/kibana/*만",
    'fileset("${path.module}/kibana", "*.ndjson")' in tf and '"${aws_s3_bucket.app_code.arn}/elk/kibana/*"' in tf
@@ -228,3 +231,10 @@ if shutil.which("bash"):
     new = demo('set -e; set +e; ( set -e; false; echo CONTINUED ); rc=$?; set -e; [ "$rc" -eq 0 ] || echo FAILED; echo NEXT')
     ok("bash 동작 확인: 옛 방식은 실패를 못 잡고 계속 진행, 새 방식은 실패를 잡고 다음 단계로", "CONTINUED" in old and "FAILED" not in old
        and "CONTINUED" not in new and "FAILED" in new and "NEXT" in new, (old, new))
+
+# ---------- IDOR / 장애 모드 알림 ----------
+ok("Discord 즉시 대응 규칙: IDOR 알림(idor_reported)과 resource_owner_mismatch 판정 포함",
+   "idor_reported" in tpl and "resource_owner_mismatch" in tpl.split("zt_high_severity.yaml")[1].split("EARULE")[1])
+r3 = tpl.split("zt_pdp_unavailable.yaml")[1].split("EARULE")[1] if "zt_pdp_unavailable.yaml" in tpl else ""
+ok("Discord 장애 규칙: 차단(pdp_unavailable)뿐 아니라 장애 모드 통과/차단(pdp_degraded_*)도 알림",
+   "pdp_degraded_allow" in tpl and "pdp_degraded_deny" in tpl and "zt.mode" in tpl)

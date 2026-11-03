@@ -48,6 +48,9 @@ def reset(r=None, status=200, error=False):
     global next_response, next_status, raise_error
     calls.clear()
     zr._cache.clear()
+    zr._last_allow.clear()      # 장애 모드 상태도 매 시험마다 비움(앞 시험의 '마지막 통과'가 섞이지 않게)
+    zr._known_tier.clear()
+    zr._outage["since"] = None
     next_response = r or resp()
     next_status = status
     raise_error = error
@@ -108,11 +111,11 @@ with patch.object(zr.time, "time", return_value=at(14)):
     reset(error=True)
     r = zr.check_risk("hana@test.com", "KR", "/dev")
     zr.check_risk("hana@test.com", "KR", "/dev")
-    check("Lambda 호출 실패 -> fail-closed, 실패는 캐시하지 않음", r["allow"] is False and r["error"] is True and len(calls) == 2, f"calls={len(calls)} result={r}")
+    check("Lambda 호출 실패(등급을 아직 모름) -> fail-closed, 실패는 캐시하지 않음", r["allow"] is False and r["error"] is True and len(calls) == 2, f"calls={len(calls)} result={r}")
 
     reset(status=500)
     r = zr.check_risk("hana@test.com", "KR", "/dev")
-    check("Lambda가 200이 아니면 fail-closed", r["allow"] is False and r["error"] is True)
+    check("Lambda가 200이 아니면(등급을 아직 모름) fail-closed", r["allow"] is False and r["error"] is True)
 
     reset(resp(tier=None, ttl=0))
     zr.check_risk("hana@test.com", "KR", "/mystery")
@@ -203,6 +206,81 @@ with patch.object(zr.time, "time", return_value=at(14)):
     check("[세션] 토큰의 로그인 나라가 다르면 캐시를 쓰지 않고 다시 물음", len(calls) == 2, len(calls))
     zr.invalidate_identity("HANA@test.com")
     check("[WAF] invalidate_identity: 대소문자 무관하게 그 사람 캐시 삭제", not zr._cache, zr._cache)
+
+# ---------- 장애 모드(엔진에 닿지 못할 때, 세션 중 재확인만) ----------
+import io as _io, contextlib as _cl
+def outage_case(tier, last_allow_min_ago, outage_min, resource="dev.xmcda.store/"):
+    """정상 응답으로 등급과 마지막 통과를 배운 뒤, 장애를 만들어 판단 결과를 본다."""
+    t0 = at(14)
+    reset(resp(tier=tier, ttl=0))
+    if last_allow_min_ago is not None:
+        with patch.object(zr.time, "time", return_value=t0 - last_allow_min_ago * 60):
+            zr.check_risk("hana@test.com", "KR", resource)
+    else:   # 다른 사람 응답으로 등급만 배움
+        with patch.object(zr.time, "time", return_value=t0 - 3600):
+            zr.check_risk("kim@test.com", "KR", resource)
+    global raise_error
+    raise_error = True
+    with patch.object(zr.time, "time", return_value=t0 - outage_min * 60):
+        zr.check_risk("other@test.com", "KR", "x.xmcda.store/")       # 장애 시작 시점 기록
+    buf = _io.StringIO()
+    with _cl.redirect_stdout(buf), patch.object(zr.time, "time", return_value=t0):
+        r = zr.check_risk("hana@test.com", "KR", resource)
+    raise_error = False
+    return r, buf.getvalue()
+
+r, out = outage_case("top_secret", 1, 0, "admin.xmcda.store/")
+check("[장애] 최고기밀: 1분 전 통과했어도 차단", r["allow"] is False and r["error"] is True and "pdp_degraded_deny" in out, r)
+r, out = outage_case("confidential", 5, 1)
+check("[장애] 기밀: 마지막 통과 5분 전 -> 재사용(degraded_reuse), 기록 남김",
+      r["allow"] is True and r["action"] == "degraded_reuse" and r["degraded"] is True and '"event": "pdp_degraded_allow"' in out, (r, out))
+r, _ = outage_case("confidential", 11, 1)
+check("[장애] 기밀: 마지막 통과 11분 전 -> 차단(10분 초과)", r["allow"] is False, r)
+r, _ = outage_case("confidential", None, 1)
+check("[장애] 기밀: 이 사람 통과 기록이 없으면 차단(통과 허용 없음)", r["allow"] is False, r)
+r, _ = outage_case("internal", 14, 1, "xmcda.store/")
+check("[장애] 내부: 마지막 통과 14분 전 -> 재사용", r["allow"] is True and r["action"] == "degraded_reuse", r)
+r, _ = outage_case("internal", None, 10, "xmcda.store/")
+check("[장애] 내부: 통과 기록이 없어도 장애 시작 10분 째 -> 통과(degraded_open, 위험 수용)", r["allow"] is True and r["action"] == "degraded_open", r)
+r, _ = outage_case("internal", None, 16, "xmcda.store/")
+check("[장애] 내부: 장애 16분 째 -> 차단(15분 초과)", r["allow"] is False, r)
+reset()
+global_err = True
+raise_error = True
+with patch.object(zr.time, "time", return_value=at(14)):
+    r = zr.check_risk("hana@test.com", "KR", "new.xmcda.store/")
+raise_error = False
+check("[장애] 등급을 모르는 자원 -> 차단", r["allow"] is False, r)
+r, _ = outage_case("confidential", 5, 1)
+reset(resp(tier="confidential", ttl=0))
+with patch.object(zr.time, "time", return_value=at(14) - 300):
+    zr.check_risk("hana@test.com", "KR", "dev.xmcda.store/")
+zr.invalidate_identity("hana@test.com")
+raise_error = True
+with patch.object(zr.time, "time", return_value=at(14)):
+    r = zr.check_risk("hana@test.com", "KR", "dev.xmcda.store/")
+raise_error = False
+check("[장애] WAF/IDOR로 막힌 사람(invalidate_identity)은 장애 중에도 재사용 안 함", r["allow"] is False, r)
+reset(resp(tier="confidential", ttl=0))
+with patch.object(zr.time, "time", return_value=at(14) - 300):
+    zr.check_risk("hana@test.com", "KR", "dev.xmcda.store/")
+next_response = resp(tier="confidential", ttl=0, allow=False, action="step_up_mfa_required")
+with patch.object(zr.time, "time", return_value=at(14) - 120):
+    zr.check_risk("hana@test.com", "KR", "dev.xmcda.store/")
+raise_error = True
+with patch.object(zr.time, "time", return_value=at(14)):
+    r = zr.check_risk("hana@test.com", "KR", "dev.xmcda.store/")
+raise_error = False
+check("[장애] 통과 뒤에 추가 인증/차단 판정을 받았으면 그 전 통과는 재사용 안 함", r["allow"] is False, r)
+reset(resp(tier="confidential", ttl=0))
+with patch.object(zr.time, "time", return_value=at(14) - 300):
+    zr.check_risk("hana@test.com", "KR", "dev.xmcda.store/")
+raise_error = True
+with patch.object(zr.time, "time", return_value=at(14)):
+    zr.check_risk("hana@test.com", "KR", "dev.xmcda.store/")
+    r2 = zr.check_risk("hana@test.com", "KR", "dev.xmcda.store/")
+raise_error = False
+check("[장애] 장애 중 통과는 캐시하지 않음(매번 엔진에 다시 시도)", len(calls) == 3 and r2["from_cache"] is False, len(calls))
 
 print()
 print("실패 수:", fails)

@@ -67,6 +67,11 @@ RISK_MATRIX = {
     # WAF(ModSecurity+CRS)가 막은 SQL 삽입 외 공격(XSS/RCE/LFI/RFI 등). 로그인한 사람이 앱 안에서 공격한 증거라
     # SQL 삽입과 같은 무게로 둔다. MFA로 풀리지 않고 관리자가 해제해야 한다(waf_sqli와 같은 이유).
     "waf_attack": {"risk": 94, "group": "security", "resettable": False},
+    # [IDOR] 앱이 "남의 자료" 요청을 거부한 기록이 짧은 시간에 반복됨(웹 서버 앞단 zt_authz.py가 10분에 3번이면 알림).
+    #   앱이 이미 막았으므로 자료는 새지 않았지만, 계정이 남의 자료를 노리고 있다는 증거라 그 계정 전체를 막는다.
+    #   진짜 주인(내부자)이 한 행동일 수 있어 MFA/비밀번호 변경으로는 의심이 풀리지 않는다 -> 관리자 해제(Entra의 '관리자 조사' 경로).
+    #   배점: 위협 IP(86)와 웹 공격(94) 사이 - 공격 의도는 분명하지만 자료 유출은 앱이 막은 상태.
+    "resource_owner_mismatch": {"risk": 90, "group": "security", "resettable": False},
     # [삭제] device_fingerprint_mismatch(76, 해제 불가): 처음 계획은 "서명된 기기 쿠키/브라우저 지문"을 직접 만드는 것이었으나
     #   WARP 기기 검사(device_unmanaged/device_owner_mismatch/device_posture_failed)로 대체했다. 이 신호를 보내는 곳이
     #   한 군데도 없어 판단에 쓰인 적이 없었고, 이름만 남아 있으면 "기기 지문을 구현했다"로 오해되므로 지웠다.
@@ -922,16 +927,23 @@ def compute_cache_ttl(tier, allow_access, now_ts, mfa_expires_at=None, hourly=Fa
     return max(0, int(ttl))
 
 
-# 장애 시 정책 참고표 (Lambda/DynamoDB에 닿지 못해 판단 자체를 할 수 없을 때).
-# [현재 동작] 전부 차단(fail_closed). Worker(A 계층, index.js)와 portal_app.py(B 계층) 모두
-# 자원 등급과 무관하게, 판단을 못 하면 접근을 막는다. 이 표는 코드가 읽어서 쓰는 값이 아니라
-# 현재 정책을 기록해 둔 참고용이다.
-# [향후 과제] 등급별 차등(예: 낮은 등급은 fail_open)은 아직 적용하지 않았다. 도입하려면
-# Worker와 portal_app.py 양쪽을 함께 바꿔야 하고, 입구(A)가 새 로그인을 막는 이상 효과는
-# 이미 로그인된 세션(최대 15분)에 한정된다.
+# 장애 시 정책 참고표 (엔진(Lambda/DynamoDB)에 닿지 못해 판단 자체를 할 수 없을 때). 이 표는 기록용이고,
+# 실제 동작은 엔진이 아니라 호출한 쪽이 한다(엔진이 죽은 상황이므로).
+#   - 새 로그인(A 계층, Worker): 등급과 상관없이 차단. Worker는 등급표를 갖지 않고(판단은 엔진 한 곳),
+#     판정 없이 새 세션을 열어 주는 위험이 크다.
+#   - 이미 로그인한 세션 중 재확인(B 계층, 웹 서버 앞단 zt_risk.py): 등급별 "장애 모드"
+#       top_secret   : 차단
+#       confidential : 이 사람이 이 자원에서 받은 마지막 '통과'가 10분 안이면 그 판정을 재사용, 아니면 차단
+#       internal     : 마지막 '통과' 15분 재사용 + 장애 시작 후 15분까지는 통과(위험 수용), Discord 알림
+#     등급은 zt_risk.py가 엔진의 지난 응답(resource_tier)에서 배운 값만 쓴다(등급을 모르면 차단).
+#     10/15분: 표준 수치가 없어 재인증 유효 시간(10분)과 Access 세션 길이(15분)에 맞춘 팀 판단.
+#     참고: Envoy 외부 인가(ext_authz)의 failure_mode_allow처럼 '판정 서버 장애 시 통과'를 고르는 것은
+#     흔한 위험 수용 선택이고, 최고 등급은 닫아 두는 것이 일반적이다.
 FAIL_POLICY = {
-    "general": "fail_closed",
-    "admin": "fail_closed",
+    "top_secret": "fail_closed",
+    "confidential": "reuse_last_allow_600s",
+    "internal": "reuse_last_allow_900s+fail_open_900s",
+    "new_login": "fail_closed",
 }
 
 # ==========================================================================

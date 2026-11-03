@@ -201,7 +201,7 @@ index: zt-logs-*
 filter:
   - query:
       query_string:
-        query: 'zt.event:(waf_reported OR login_locked OR pwned_password_detected OR mtls_client_rejected OR risk_release) OR (zt.event:device_sweep AND zt.action:device_session_revoked) OR (zt.event:decision AND zt.signals:(threat_intel_match OR geo_velocity OR session_country_change OR waf_sqli OR waf_attack))'
+        query: 'zt.event:(waf_reported OR idor_reported OR login_locked OR pwned_password_detected OR mtls_client_rejected OR risk_release) OR (zt.event:device_sweep AND zt.action:device_session_revoked) OR (zt.event:decision AND zt.signals:(threat_intel_match OR geo_velocity OR session_country_change OR waf_sqli OR waf_attack OR resource_owner_mismatch))'
 query_key: zt.identity
 realert:
   minutes: 5
@@ -242,7 +242,8 @@ alert_missing_value: "-"
 alert_text: "10분 안에 5번 이상 차단/재인증 요구됨\n사용자: {0}\n마지막 판단: {1} (점수 {2})\n신호: {3}\n대응 절차: docs/runbook.md"
 alert_text_args: ["zt.identity", "zt.action", "zt.score", "zt.signals"]
 EARULE
-# 규칙 3: 판단 엔진 장애(웹 서버가 엔진에 물어보지 못해 막은 요청이 5분에 3건 이상) - 전 직원이 막히는 상황
+# 규칙 3: 판단 엔진 장애(웹 서버가 엔진에 묻지 못한 요청이 5분에 3건 이상) - 막았든(차단) 장애 모드로 통과시켰든 알린다
+#   (장애 모드 통과 = 위험 수용 중이라 관리자가 반드시 알아야 함)
 cat > /opt/elastalert/rules/zt_pdp_unavailable.yaml << EARULE
 name: "ZT 판단 엔진 장애"
 type: frequency
@@ -253,7 +254,7 @@ timeframe:
 filter:
   - query:
       query_string:
-        query: 'zt.event:gate_deny AND zt.action:pdp_unavailable'
+        query: '(zt.event:gate_deny AND zt.action:pdp_unavailable) OR zt.event:(pdp_degraded_allow OR pdp_degraded_deny)'
 realert:
   minutes: 15
 alert:
@@ -263,8 +264,8 @@ discord_embed_color: 0x8e44ad
 alert_subject: "[ZT 장애] 판단 엔진 응답 없음"
 alert_text_type: alert_text_only
 alert_missing_value: "-"
-alert_text: "웹 서버가 판단 엔진(Lambda)에 묻지 못해 요청을 막고 있습니다(fail-closed).\n마지막 사용자: {0}\n대응 절차: docs/runbook.md"
-alert_text_args: ["zt.identity"]
+alert_text: "웹 서버가 판단 엔진(Lambda)에 묻지 못하고 있습니다. 새 로그인과 최고기밀은 차단, 기밀/내부는 등급별 장애 모드(재사용/한시 통과)로 처리 중입니다.\n마지막 사용자: {0}\n처리: {1} / 등급: {2}\n대응 절차: docs/runbook.md"
+alert_text_args: ["zt.identity", "zt.mode", "zt.tier"]
 EARULE
 chown -R elastalert:elastalert /opt/elastalert && chmod 600 /opt/elastalert/config.yaml /opt/elastalert/rules/*.yaml
 sudo -u elastalert /opt/elastalert/venv/bin/elastalert-create-index --config /opt/elastalert/config.yaml || true

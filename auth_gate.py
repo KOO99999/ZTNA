@@ -26,6 +26,9 @@ AUTH_DOMAIN = os.environ.get("AUTH_DOMAIN", "auth.xmcda.store")
 if os.environ.get("ZT_WAF_ENABLED") == "1":
     import zt_waf
     zt_waf.start()
+    # [IDOR] 앱이 남의 자료 요청을 거부한 기록을 같은 방식으로 따라 읽어, 반복되면 엔진에 알린다(zt_authz.py)
+    import zt_authz
+    zt_authz.start()
 
 app = Flask(__name__)
 

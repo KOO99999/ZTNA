@@ -1,0 +1,497 @@
+{
+ "dataset": "Wiefling et al. RBA dataset (ACM TOPS 2022), github.com/das-group/rba-dataset, CC BY 4.0",
+ "rows_read": 31269264,
+ "successful_logins_judged": 12541442,
+ "unsorted_rows": 0,
+ "label_counts": {
+  "legit": 11736887,
+  "attack_ip": 804415,
+  "ato": 140
+ },
+ "home_country": "NO",
+ "local_tz": "Europe/Oslo",
+ "runtime_seconds": 312,
+ "assumptions": [
+  "실패한 로그인은 판정하지 않음(엔진은 비밀번호 통과 뒤 판단)",
+  "계정 탈취 로그인도 이력에 들어감(탈취를 못 막았다는 보수적 가정)",
+  "공통 규칙의 '회사 나라'는 데이터에서 가장 많은 나라",
+  "시각은 데이터셋 시각을 UTC로 보고 현지 시각(Europe/Oslo)으로 변환"
+ ],
+ "fixed": {
+  "signal_night": {
+   "legit": 0.1344,
+   "ato": 0.2286,
+   "attack_ip": 0.1716
+  },
+  "signal_country": {
+   "legit": 0.2711,
+   "ato": 0.9286,
+   "attack_ip": 0.874
+  },
+  "signal_any": {
+   "legit": 0.3562,
+   "ato": 0.95,
+   "attack_ip": 0.8914
+  },
+  "decision": {
+   "top_secret(20)": {
+    "legit": 0.2711,
+    "ato": 0.9286,
+    "attack_ip": 0.874
+   },
+   "confidential(40)": {
+    "legit": 0.0493,
+    "ato": 0.2071,
+    "attack_ip": 0.1542
+   },
+   "internal(60)": {
+    "legit": 0.0493,
+    "ato": 0.2071,
+    "attack_ip": 0.1542
+   }
+  }
+ },
+ "personal_default": {
+  "params": {
+   "min_logins": 10,
+   "min_share": 0.05,
+   "hour_window": 1
+  },
+  "learned_share": {
+   "legit": 0.0661,
+   "ato": 0.0214,
+   "attack_ip": 0.0149
+  },
+  "signal_night": {
+   "legit": 0.1329,
+   "ato": 0.2286,
+   "attack_ip": 0.172
+  },
+  "signal_country": {
+   "legit": 0.2569,
+   "ato": 0.9357,
+   "attack_ip": 0.866
+  },
+  "signal_any": {
+   "legit": 0.3429,
+   "ato": 0.9571,
+   "attack_ip": 0.8853
+  },
+  "decision": {
+   "top_secret(20)": {
+    "legit": 0.2569,
+    "ato": 0.9357,
+    "attack_ip": 0.866
+   },
+   "confidential(40)": {
+    "legit": 0.0469,
+    "ato": 0.2071,
+    "attack_ip": 0.1528
+   },
+   "internal(60)": {
+    "legit": 0.0469,
+    "ato": 0.2071,
+    "attack_ip": 0.1528
+   }
+  }
+ },
+ "grid": [
+  {
+   "min_logins": 5,
+   "min_share": 0.02,
+   "hour_window": 0,
+   "ato_detect": 0.9429,
+   "attack_ip_detect": 0.887,
+   "legit_flag": 0.3639,
+   "night_legit": 0.1678,
+   "country_legit": 0.2399
+  },
+  {
+   "min_logins": 5,
+   "min_share": 0.02,
+   "hour_window": 1,
+   "ato_detect": 0.9357,
+   "attack_ip_detect": 0.8798,
+   "legit_flag": 0.335,
+   "night_legit": 0.1388,
+   "country_legit": 0.2399
+  },
+  {
+   "min_logins": 5,
+   "min_share": 0.02,
+   "hour_window": 2,
+   "ato_detect": 0.9286,
+   "attack_ip_detect": 0.8764,
+   "legit_flag": 0.3255,
+   "night_legit": 0.1292,
+   "country_legit": 0.2399
+  },
+  {
+   "min_logins": 5,
+   "min_share": 0.05,
+   "hour_window": 0,
+   "ato_detect": 0.9429,
+   "attack_ip_detect": 0.8896,
+   "legit_flag": 0.3692,
+   "night_legit": 0.173,
+   "country_legit": 0.24
+  },
+  {
+   "min_logins": 5,
+   "min_share": 0.05,
+   "hour_window": 1,
+   "ato_detect": 0.9357,
+   "attack_ip_detect": 0.8801,
+   "legit_flag": 0.3363,
+   "night_legit": 0.14,
+   "country_legit": 0.24
+  },
+  {
+   "min_logins": 5,
+   "min_share": 0.05,
+   "hour_window": 2,
+   "ato_detect": 0.9286,
+   "attack_ip_detect": 0.8765,
+   "legit_flag": 0.326,
+   "night_legit": 0.1297,
+   "country_legit": 0.24
+  },
+  {
+   "min_logins": 5,
+   "min_share": 0.1,
+   "hour_window": 0,
+   "ato_detect": 0.9429,
+   "attack_ip_detect": 0.892,
+   "legit_flag": 0.3829,
+   "night_legit": 0.1868,
+   "country_legit": 0.24
+  },
+  {
+   "min_logins": 5,
+   "min_share": 0.1,
+   "hour_window": 1,
+   "ato_detect": 0.9357,
+   "attack_ip_detect": 0.8817,
+   "legit_flag": 0.3422,
+   "night_legit": 0.1459,
+   "country_legit": 0.24
+  },
+  {
+   "min_logins": 5,
+   "min_share": 0.1,
+   "hour_window": 2,
+   "ato_detect": 0.9286,
+   "attack_ip_detect": 0.8773,
+   "legit_flag": 0.3288,
+   "night_legit": 0.1325,
+   "country_legit": 0.24
+  },
+  {
+   "min_logins": 10,
+   "min_share": 0.02,
+   "hour_window": 0,
+   "ato_detect": 0.9571,
+   "attack_ip_detect": 0.8879,
+   "legit_flag": 0.3525,
+   "night_legit": 0.1425,
+   "country_legit": 0.2569
+  },
+  {
+   "min_logins": 10,
+   "min_share": 0.02,
+   "hour_window": 1,
+   "ato_detect": 0.9571,
+   "attack_ip_detect": 0.885,
+   "legit_flag": 0.3417,
+   "night_legit": 0.1317,
+   "country_legit": 0.2569
+  },
+  {
+   "min_logins": 10,
+   "min_share": 0.02,
+   "hour_window": 2,
+   "ato_detect": 0.9571,
+   "attack_ip_detect": 0.8839,
+   "legit_flag": 0.3393,
+   "night_legit": 0.1293,
+   "country_legit": 0.2569
+  },
+  {
+   "min_logins": 10,
+   "min_share": 0.05,
+   "hour_window": 0,
+   "ato_detect": 0.9571,
+   "attack_ip_detect": 0.8906,
+   "legit_flag": 0.3578,
+   "night_legit": 0.1477,
+   "country_legit": 0.2569
+  },
+  {
+   "min_logins": 10,
+   "min_share": 0.05,
+   "hour_window": 1,
+   "ato_detect": 0.9571,
+   "attack_ip_detect": 0.8853,
+   "legit_flag": 0.3429,
+   "night_legit": 0.1329,
+   "country_legit": 0.2569
+  },
+  {
+   "min_logins": 10,
+   "min_share": 0.05,
+   "hour_window": 2,
+   "ato_detect": 0.9571,
+   "attack_ip_detect": 0.8841,
+   "legit_flag": 0.3399,
+   "night_legit": 0.1298,
+   "country_legit": 0.2569
+  },
+  {
+   "min_logins": 10,
+   "min_share": 0.1,
+   "hour_window": 0,
+   "ato_detect": 0.9571,
+   "attack_ip_detect": 0.8929,
+   "legit_flag": 0.3715,
+   "night_legit": 0.1615,
+   "country_legit": 0.257
+  },
+  {
+   "min_logins": 10,
+   "min_share": 0.1,
+   "hour_window": 1,
+   "ato_detect": 0.9571,
+   "attack_ip_detect": 0.8869,
+   "legit_flag": 0.3488,
+   "night_legit": 0.1387,
+   "country_legit": 0.257
+  },
+  {
+   "min_logins": 10,
+   "min_share": 0.1,
+   "hour_window": 2,
+   "ato_detect": 0.9571,
+   "attack_ip_detect": 0.8848,
+   "legit_flag": 0.3427,
+   "night_legit": 0.1326,
+   "country_legit": 0.257
+  },
+  {
+   "min_logins": 20,
+   "min_share": 0.02,
+   "hour_window": 0,
+   "ato_detect": 0.95,
+   "attack_ip_detect": 0.8893,
+   "legit_flag": 0.3527,
+   "night_legit": 0.1355,
+   "country_legit": 0.2655
+  },
+  {
+   "min_logins": 20,
+   "min_share": 0.02,
+   "hour_window": 1,
+   "ato_detect": 0.95,
+   "attack_ip_detect": 0.8883,
+   "legit_flag": 0.3493,
+   "night_legit": 0.1321,
+   "country_legit": 0.2655
+  },
+  {
+   "min_logins": 20,
+   "min_share": 0.02,
+   "hour_window": 2,
+   "ato_detect": 0.95,
+   "attack_ip_detect": 0.8879,
+   "legit_flag": 0.3487,
+   "night_legit": 0.1316,
+   "country_legit": 0.2655
+  },
+  {
+   "min_logins": 20,
+   "min_share": 0.05,
+   "hour_window": 0,
+   "ato_detect": 0.95,
+   "attack_ip_detect": 0.892,
+   "legit_flag": 0.358,
+   "night_legit": 0.1408,
+   "country_legit": 0.2655
+  },
+  {
+   "min_logins": 20,
+   "min_share": 0.05,
+   "hour_window": 1,
+   "ato_detect": 0.95,
+   "attack_ip_detect": 0.8885,
+   "legit_flag": 0.3505,
+   "night_legit": 0.1333,
+   "country_legit": 0.2655
+  },
+  {
+   "min_logins": 20,
+   "min_share": 0.05,
+   "hour_window": 2,
+   "ato_detect": 0.95,
+   "attack_ip_detect": 0.8881,
+   "legit_flag": 0.3493,
+   "night_legit": 0.1321,
+   "country_legit": 0.2655
+  },
+  {
+   "min_logins": 20,
+   "min_share": 0.1,
+   "hour_window": 0,
+   "ato_detect": 0.95,
+   "attack_ip_detect": 0.8935,
+   "legit_flag": 0.3649,
+   "night_legit": 0.1477,
+   "country_legit": 0.2656
+  },
+  {
+   "min_logins": 20,
+   "min_share": 0.1,
+   "hour_window": 1,
+   "ato_detect": 0.95,
+   "attack_ip_detect": 0.8894,
+   "legit_flag": 0.3528,
+   "night_legit": 0.1356,
+   "country_legit": 0.2656
+  },
+  {
+   "min_logins": 20,
+   "min_share": 0.1,
+   "hour_window": 2,
+   "ato_detect": 0.95,
+   "attack_ip_detect": 0.8883,
+   "legit_flag": 0.3503,
+   "night_legit": 0.133,
+   "country_legit": 0.2656
+  }
+ ],
+ "learned_subset": {
+  "history>=5": {
+   "count": {
+    "legit": 1620707,
+    "ato": 16,
+    "attack_ip": 26639
+   },
+   "fixed_any": {
+    "legit": 0.3086,
+    "ato": 0.9375,
+    "attack_ip": 0.7474
+   },
+   "personal_any": {
+    "legit": 0.1642,
+    "ato": 0.8125,
+    "attack_ip": 0.4044
+   },
+   "fixed_night": {
+    "legit": 0.1215,
+    "ato": 0.375,
+    "attack_ip": 0.1905
+   },
+   "personal_night": {
+    "legit": 0.1623,
+    "ato": 0.3125,
+    "attack_ip": 0.3699
+   },
+   "fixed_country": {
+    "legit": 0.2281,
+    "ato": 0.875,
+    "attack_ip": 0.6855
+   },
+   "personal_country": {
+    "legit": 0.0027,
+    "ato": 0.6875,
+    "attack_ip": 0.0461
+   }
+  },
+  "history>=10": {
+   "count": {
+    "legit": 776331,
+    "ato": 3,
+    "attack_ip": 11950
+   },
+   "fixed_any": {
+    "legit": 0.2898,
+    "ato": 0.6667,
+    "attack_ip": 0.6887
+   },
+   "personal_any": {
+    "legit": 0.0886,
+    "ato": 1.0,
+    "attack_ip": 0.2755
+   },
+   "fixed_night": {
+    "legit": 0.11,
+    "ato": 0.0,
+    "attack_ip": 0.2057
+   },
+   "personal_night": {
+    "legit": 0.0869,
+    "ato": 0.0,
+    "attack_ip": 0.2372
+   },
+   "fixed_country": {
+    "legit": 0.2164,
+    "ato": 0.6667,
+    "attack_ip": 0.5859
+   },
+   "personal_country": {
+    "legit": 0.0021,
+    "ato": 1.0,
+    "attack_ip": 0.0458
+   }
+  },
+  "history>=20": {
+   "count": {
+    "legit": 351437,
+    "ato": 1,
+    "attack_ip": 6036
+   },
+   "fixed_any": {
+    "legit": 0.2651,
+    "ato": 1.0,
+    "attack_ip": 0.5678
+   },
+   "personal_any": {
+    "legit": 0.0737,
+    "ato": 1.0,
+    "attack_ip": 0.1841
+   },
+   "fixed_night": {
+    "legit": 0.1087,
+    "ato": 0.0,
+    "attack_ip": 0.2331
+   },
+   "personal_night": {
+    "legit": 0.0718,
+    "ato": 0.0,
+    "attack_ip": 0.1481
+   },
+   "fixed_country": {
+    "legit": 0.1879,
+    "ato": 1.0,
+    "attack_ip": 0.3968
+   },
+   "personal_country": {
+    "legit": 0.0023,
+    "ato": 1.0,
+    "attack_ip": 0.0416
+   }
+  }
+ },
+ "base_rates_legit": {
+  "night_local_22_06": 0.1344,
+  "new_country_ever": 0.0071,
+  "new_country_30d": 0.0073,
+  "surprisal_night": 2.9,
+  "surprisal_new_country_ever": 7.14,
+  "ratio_country_to_night_ever": 2.47,
+  "ratio_country_to_night_30d": 2.45,
+  "current_score_ratio": 2.0
+ },
+ "base_rates_ato": {
+  "night_local_22_06": 0.2286,
+  "new_country_ever": 0.8023
+ }
+}

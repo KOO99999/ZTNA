@@ -26,6 +26,8 @@ mock_ip_geo.get_item.return_value = {}
 mock_user_loc = MagicMock()        # [이동 속도] user_location, 기본은 기록 없음
 mock_user_loc.get_item.return_value = {}
 mock_device_state.query.return_value = {"Items": []}
+mock_history = MagicMock()         # [개인별 기준] login_history, 기본은 이력 없음(공통 규칙)
+mock_history.query.return_value = {"Items": []}
 
 def _table_side_effect(name):
     if name == 'user_risk':
@@ -40,6 +42,8 @@ def _table_side_effect(name):
         return mock_ip_geo
     if name == 'user_location':
         return mock_user_loc
+    if name == 'login_history':
+        return mock_history
     return mock_mfa_table if name == 'mfa_verified' else mock_table
 
 boto3.resource.return_value.Table.side_effect = _table_side_effect
@@ -233,8 +237,28 @@ run_case(
 )
 
 run_case(
-    "[v12] /marketing(내부, 임계값60): night_access+unknown_location(60점) -> 통과",
+    "[행동 최소 조치] /marketing(내부, 임계값60): night_access+unknown_location(60점) -> 점수는 통과선이지만 최소 추가 인증",
     {"session_id": "r5c", "identity": "hana@test.com", "night_access": True, "unknown_location": True, "resource_path": "marketing.xmcda.store/"},
+    expect_allow=False, expect_action="step_up_mfa_required"
+)
+run_case(
+    "[행동 최소 조치] 같은 상황 + 최근 재인증 기록 -> 통과(step_up_mfa_verified)",
+    {"session_id": "r5c2", "identity": "hana@test.com", "night_access": True, "unknown_location": True, "resource_path": "marketing.xmcda.store/"},
+    expect_allow=True, expect_action="step_up_mfa_verified", mfa_record={"identity": "hana@test.com", "expires_at": int(time.time()) + 600}
+)
+run_case(
+    "[행동 최소 조치] /dev(기밀, 40): 같은 60점 -> 예전과 같이 추가 인증(차단으로 올라가지 않음)",
+    {"session_id": "r5c3", "identity": "hana@test.com", "night_access": True, "unknown_location": True, "resource_path": "dev.xmcda.store/"},
+    expect_allow=False, expect_action="step_up_mfa_required"
+)
+run_case(
+    "[행동 최소 조치] /admin(최고기밀, 20): 같은 60점 -> 예전과 같이 차단",
+    {"session_id": "r5c4", "identity": "hana@test.com", "night_access": True, "unknown_location": True, "resource_path": "admin.xmcda.store/"},
+    expect_allow=False, expect_action="block"
+)
+run_case(
+    "[행동 최소 조치] /marketing: 한 가지만(해외 40점) -> 예전과 같이 통과",
+    {"session_id": "r5c5", "identity": "hana@test.com", "unknown_location": True, "resource_path": "marketing.xmcda.store/"},
     expect_allow=True, expect_action="allow"
 )
 print(">>> 내부 등급만 가장 관대해야 정상")
@@ -1286,3 +1310,111 @@ t("[관제] 판단마다 ZT_EVENT decision 한 줄(JSON): 사람/행동/점수/�
 t("[관제] 비밀키(공유 비밀) 같은 값은 이벤트에 없음", "test-secret" not in _buf.getvalue())
 engine.MAXMIND_ACCOUNT_ID, engine.MAXMIND_LICENSE_KEY = "", ""
 mock_user_loc.get_item.return_value = {}
+
+# ======================================================================
+# [개인별 기준] login_history(시드+실제)와 비교해 night_access / unknown_location 판정
+# ======================================================================
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+_KST = _tz(_td(hours=9))
+_NOW = int(time.time())
+
+def _hist(hour_counts, country_counts=None, days=20):
+    """KST 시각별 건수 -> login_history Items(최근 days일에 고르게 흩뿌림)."""
+    items, base = [], _dt.fromtimestamp(_NOW, _KST).replace(minute=10, second=0, microsecond=0)
+    countries = []
+    for c, n in (country_counts or {"KR": sum(hour_counts.values())}).items():
+        countries += [c] * n
+    i = 0
+    for h, n in hour_counts.items():
+        for k in range(n):
+            d = base.replace(hour=h) - _td(days=1 + (k % days))
+            items.append({"ts": int(d.timestamp()), "country": countries[i % len(countries)]}); i += 1
+    return {"Items": items}
+
+def _ts_at_kst(hour):
+    d = _dt.fromtimestamp(_NOW, _KST).replace(hour=hour, minute=5, second=0, microsecond=0)
+    return d.astimezone(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _has(r, name):
+    return any(str(x).split(' ')[0] == name for x in r.get("reasons", []))
+
+def _eval(identity, hour, country, source="A", resource="xmcda.store"):
+    mock_table.reset_mock(); mock_history.put_item.reset_mock()
+    r = json.loads(engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps({
+        "session_id": "bl", "identity": identity, "request_timestamp": _ts_at_kst(hour), "geo_country": country,
+        "resource_path": resource, "source": source})}, None)["body"])
+    return r
+
+# 야간 배포가 잦은 개발자: 22~23시에도 자주 접속
+DEV = {9: 20, 10: 20, 14: 20, 16: 20, 19: 10, 22: 12, 23: 10}
+mock_history.query.return_value = _hist(DEV)
+r = _eval("dev@test.com", 23, "KR")
+t("[기준] 야간 배포가 잦은 개발자의 23시 접속: 평소 시간 -> night_access 없음(공통 규칙이면 걸렸을 것)",
+  not _has(r, "night_access") and r["allow"] is True, r)
+qk = mock_history.query.call_args.kwargs
+t("[기준] 이력 조회: 본인 identity + 최근 30일 범위만 Query",
+  qk["ExpressionAttributeValues"][":id"] == "dev@test.com"
+  and abs(qk["ExpressionAttributeValues"][":since"] - (_NOW - 30 * 86400)) < 120, qk)
+r = _eval("dev@test.com", 3, "KR")
+t("[기준] 같은 개발자의 03시 접속: 이력에 없는 시간 -> night_access", _has(r, "night_access"), r)
+
+# 낮 근무만 하는 인사팀: 21시는 공통 규칙(22~06)으로는 정상이지만 개인 기준으로는 처음 보는 시간
+HR = {8: 25, 9: 25, 11: 25, 13: 25, 15: 25, 17: 20}
+mock_history.query.return_value = _hist(HR)
+r = _eval("hr@test.com", 21, "KR")
+t("[기준] 낮 근무 인사팀의 21시 접속: 공통 규칙으로는 통과였지만 개인 기준으로 night_access", _has(r, "night_access"), r)
+r = _eval("hr@test.com", 9, "KR")
+t("[기준] 같은 사람 09시 한국 접속: 신호 없음", not _has(r, "night_access") and not _has(r, "unknown_location"), r)
+
+# 출장이 잦은 마케팅: 일본 비율 20% -> 일본 접속은 평소 나라
+MK = {10: 40, 14: 40, 16: 20}
+mock_history.query.return_value = _hist(MK, {"KR": 80, "JP": 20})
+r = _eval("mk@test.com", 10, "JP")
+t("[기준] 일본 출장이 잦은 직원의 일본 접속: 평소 나라 -> unknown_location 없음(공통 규칙이면 걸렸을 것)",
+  not _has(r, "unknown_location"), r)
+r = _eval("mk@test.com", 10, "US")
+t("[기준] 같은 직원의 처음 보는 나라(US) 접속: unknown_location", _has(r, "unknown_location"), r)
+
+# 이력이 적은 사람(학습 중): 공통 규칙 그대로
+mock_history.query.return_value = _hist({9: 5})
+r = _eval("new@test.com", 23, "KR")
+t("[기준] 이력 10건 미만(학습 중): 공통 규칙(22~06시 야간)으로 판정", _has(r, "night_access"), r)
+r = _eval("new@test.com", 21, "JP")
+t("[기준] 학습 중 + 21시 일본: 공통 규칙(야간 아님, 한국 외 -> 위치 이상)",
+  not _has(r, "night_access") and _has(r, "unknown_location"), r)
+
+# 이력 조회 실패: 공통 규칙으로 판정(점수 계산은 계속, 실패를 통과로 바꾸지 않음)
+mock_history.query.side_effect = RuntimeError("ddb down")
+r = _eval("dev@test.com", 23, "KR")
+t("[기준] 이력 조회 실패: 공통 규칙으로 판정(23시 -> night_access)", _has(r, "night_access"), r)
+mock_history.query.side_effect = None
+
+# 실제 이력 기록: 정문/로그인 서버 통과만, 재확인(B)과 막힌 시도는 기록 안 함
+mock_history.query.return_value = _hist(DEV)
+_eval("dev@test.com", 10, "KR", source="A")
+_put = mock_history.put_item.call_args.kwargs["Item"] if mock_history.put_item.called else {}
+t("[기준] 정문(A) 통과: 실제 이력 저장(source=real, 나라, 31일 뒤 자동 삭제)",
+  _put.get("identity") == "dev@test.com" and _put.get("source") == "real" and _put.get("country") == "KR"
+  and _put.get("expires_at", 0) - _put.get("ts", 0) == 31 * 86400, _put)
+_eval("dev@test.com", 10, "KR", source="B")
+t("[기준] 세션 중 재확인(B): 이력 저장 안 함", not mock_history.put_item.called)
+_eval("dev@test.com", 10, "KR", source="login")
+t("[기준] 로그인 서버(login) 통과: 이력 저장", mock_history.put_item.called)
+mock_history.query.return_value = _hist(HR)
+r = _eval("hr@test.com", 3, "US", resource="admin.xmcda.store")
+t("[기준] 막힌 시도(최고기밀, 새벽+처음 보는 나라): 이력 저장 안 함(공격자가 '평소'를 오염시키지 못하게)",
+  r["allow"] is False and not mock_history.put_item.called, r)
+
+# 캐시: 개인 기준이면 다음 정각을 넘겨 통과를 재사용하지 않음
+t("[기준] 캐시 유효 시간: 개인 기준이면 다음 정각까지로 제한",
+  engine.compute_cache_ttl("internal", True, 3600 * 1000 + 3500, hourly=True) <= 100
+  and engine.compute_cache_ttl("internal", True, 3600 * 1000 + 3500, hourly=False) >= 100)
+
+# BASELINE_MODE=fixed: 이력을 보지 않고 공통 규칙만(비교 실험용)
+engine.BASELINE_MODE = "fixed"
+mock_history.query.reset_mock(); mock_history.query.return_value = _hist(DEV)
+r = _eval("dev@test.com", 23, "KR")
+t("[기준] BASELINE_MODE=fixed: 이력 조회 없이 공통 규칙(23시 -> night_access), 이력 저장도 안 함",
+  _has(r, "night_access") and not mock_history.query.called and not mock_history.put_item.called, r)
+engine.BASELINE_MODE = "personal"
+mock_history.query.return_value = {"Items": []}

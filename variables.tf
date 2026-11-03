@@ -232,3 +232,16 @@ variable "discord_webhook_url" {
     error_message = "discord_webhook_url은 https://discord.com/api/webhooks/... 형식이어야 합니다."
   }
 }
+
+# [개인별 기준] night_access / unknown_location 판정 방식.
+#   personal: 사람별 지난 30일 접속 이력(시드 + 실제)과 비교(이력 10건 미만이면 공통 규칙)
+#   fixed   : 전 직원 공통 규칙(22~06시 야간, 한국 외 위치 이상) - 개인 기준 도입 전과 같은 동작(비교 실험용)
+variable "baseline_mode" {
+  type        = string
+  default     = "personal"
+  description = "개인별 기준 판정 방식(personal / fixed)"
+  validation {
+    condition     = contains(["personal", "fixed"], var.baseline_mode)
+    error_message = "baseline_mode는 personal 또는 fixed여야 합니다."
+  }
+}

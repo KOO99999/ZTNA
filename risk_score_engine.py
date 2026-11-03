@@ -22,6 +22,7 @@ device_state_table = dynamodb.Table('device_state')   # 기기 순찰(device_swe
 user_risk_table = dynamodb.Table('user_risk')   # 관리자가 풀어줄 때까지 유지되는 누적 위험 상태(mfa_verified와 별개)
 ip_geolocation_table = dynamodb.Table('ip_geolocation')   # MaxMind 위치 조회 결과 캐시(IP별 24시간)
 user_location_table = dynamodb.Table('user_location')     # 사용자별 마지막으로 '통과된' 접속 위치(이동 속도 비교용)
+login_history_table = dynamodb.Table('login_history')     # 사용자별 접속 이력(시드 + 실제) - 개인별 평소 시간/나라 기준
 
 
 def log_event(event, **fields):
@@ -119,6 +120,9 @@ COMBINATION_RULES = [
     (("night_access", "geo_velocity"), 20, "interaction_night_geo_velocity"),
 ]
 
+# [행동 신호 최소 조치] 이 두 신호가 함께 걸리면 점수와 상관없이 최소한 추가 인증(아래 판정 5단계 참고)
+BEHAVIORAL_PAIR_MFA = ("night_access", "unknown_location")
+
 # [v11] 자원 민감도별 임계값(RESOURCE_THRESHOLDS)
 #   그동안 RISK_THRESHOLD(40) 하나를 모든 자원(/admin, /dev 등)에 동일하게 적용해왔음.
 #   NIST SP 800-207의 "자원 민감도에 따라 판정 기준선을 차등화해야 한다"는 원칙에 따라,
@@ -134,6 +138,100 @@ COMBINATION_RULES = [
 # 야간 접속 판정 기준(KST 22시~06시). night_access 판정과 아래 캐시 만료 계산이 같은 값을 쓴다.
 NIGHT_START_HOUR_KST = 22
 NIGHT_END_HOUR_KST = 6
+
+# ---------------------------------------------------------------------------
+# [개인별 기준(baseline)] night_access / unknown_location을 "전 직원 공통 규칙"이 아니라
+# "그 사람의 지난 30일 접속 이력과 비교"해서 판정한다(night_access 3단계).
+#   - 실무 예: Microsoft Entra ID Protection "익숙하지 않은 로그인 속성"은 사용자별 과거 로그인(IP, 위치, 기기 등)과
+#     비교하고, 새 사용자는 최소 5일 학습 기간 동안 이 탐지를 끈다. 여기서는 이력이 적으면 공통 규칙으로 판정한다.
+#   - 이력: login_history 테이블. 시드(source=seed, 공개 RBA 데이터셋에서 뽑은 패턴 또는 가정 패턴)와
+#     실제 접속(source=real, 정문 판단 통과 시 저장)을 같은 표에 두되 구분한다(보고서/실측에서 섞이지 않게).
+#   - 판정: 지금 시각(KST)의 앞뒤 BASELINE_HOUR_WINDOW시간 안에 들어간 이력 비율이 BASELINE_MIN_HOUR_SHARE 미만이면
+#     "평소 아닌 시간" -> night_access. 지금 나라가 이력에서 차지하는 비율이 BASELINE_MIN_COUNTRY_SHARE 미만이면
+#     "평소 아닌 나라" -> unknown_location. (신호 이름은 기존 대시보드/조합 규칙과 맞추려고 그대로 둔다)
+#   - 숫자(30일/10건/1시간/5%)는 팀이 정한 시작값이며, RBA 데이터셋 오프라인 평가로 조정한다.
+#   - BASELINE_MODE=fixed면 예전처럼 전 직원 공통 규칙(22~06시, 한국 외)만 쓴다(비교 실험용 스위치).
+# ---------------------------------------------------------------------------
+BASELINE_MODE = os.environ.get("BASELINE_MODE", "personal").strip().lower()
+if BASELINE_MODE not in ("personal", "fixed"):
+    BASELINE_MODE = "personal"
+BASELINE_WINDOW_DAYS = 30
+BASELINE_MIN_LOGINS = 10          # 이보다 적으면 학습 중으로 보고 공통 규칙
+BASELINE_HOUR_WINDOW = 1          # 지금 시각 앞뒤 몇 시간을 "같은 시간대"로 볼지
+BASELINE_MIN_HOUR_SHARE = 0.05
+BASELINE_MIN_COUNTRY_SHARE = 0.05
+BASELINE_MAX_ITEMS = 2000         # 한 사람 이력 조회 상한(30일치)
+HISTORY_RECORD_SOURCES = ("A", "login")   # 실제 이력으로 남기는 판단: 정문(Access)과 로그인 서버. 세션 중 재확인(B)은 제외
+HISTORY_TTL_SECONDS = (BASELINE_WINDOW_DAYS + 1) * 86400
+_KST = timezone(timedelta(hours=9))
+
+
+def load_login_history(identity, now_ts):
+    """지난 30일 이력 [(ts, country)]. 조회 실패면 None(호출한 쪽이 공통 규칙으로 판정)."""
+    if not identity or identity == "unknown":
+        return []
+    items, kwargs = [], {}
+    try:
+        while True:
+            resp = login_history_table.query(
+                KeyConditionExpression="#id = :id AND #ts >= :since",
+                ExpressionAttributeNames={"#id": "identity", "#ts": "ts"},
+                ExpressionAttributeValues={":id": identity, ":since": int(now_ts) - BASELINE_WINDOW_DAYS * 86400},
+                ProjectionExpression="#ts, country", **kwargs)
+            items.extend(resp.get("Items", []) or [])
+            last = resp.get("LastEvaluatedKey")
+            if not last or len(items) >= BASELINE_MAX_ITEMS:
+                break
+            kwargs["ExclusiveStartKey"] = last
+    except Exception as e:
+        print("[BASELINE_HISTORY_FAILED]", identity, str(e))
+        return None
+    out = []
+    for it in items[:BASELINE_MAX_ITEMS]:
+        try:
+            out.append((int(it["ts"]), str(it.get("country") or "")))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _hour_distance(a, b):
+    d = abs(a - b) % 24
+    return min(d, 24 - d)
+
+
+def baseline_judgement(history, kst_hour, country):
+    """이력과 지금(KST 시, 나라)을 비교. 반환: dict(mode, logins, unusual_time, unusual_country, hour_share, country_share).
+    이력이 없거나 적으면(학습 중) mode="fixed"로 공통 규칙 결과를 돌려준다."""
+    fixed_time = kst_hour is not None and (kst_hour >= NIGHT_START_HOUR_KST or kst_hour < NIGHT_END_HOUR_KST)
+    fixed_country = country is not None and country != HOME_COUNTRY
+    n = len(history or [])
+    if BASELINE_MODE != "personal" or history is None or n < BASELINE_MIN_LOGINS:
+        return {"mode": "fixed", "logins": n, "unusual_time": fixed_time, "unusual_country": fixed_country,
+                "reason": "baseline_off" if BASELINE_MODE != "personal" else ("history_unavailable" if history is None else "learning")}
+    result = {"mode": "personal", "logins": n, "unusual_time": False, "unusual_country": False}
+    if kst_hour is not None:
+        hours = [datetime.fromtimestamp(ts, _KST).hour for ts, _ in history]
+        share = sum(1 for h in hours if _hour_distance(h, kst_hour) <= BASELINE_HOUR_WINDOW) / n
+        result["hour_share"] = round(share, 3)
+        result["unusual_time"] = share < BASELINE_MIN_HOUR_SHARE
+    if country is not None:
+        share = sum(1 for _, c in history if c == country) / n
+        result["country_share"] = round(share, 3)
+        result["unusual_country"] = share < BASELINE_MIN_COUNTRY_SHARE
+    return result
+
+
+def record_login_history(identity, ts, country):
+    """정문 판단을 통과한 실제 접속을 이력으로 남긴다(막힌 시도는 남기지 않음 - 공격자가 '평소'를 오염시키지 못하게)."""
+    if not identity or identity == "unknown":
+        return
+    try:
+        login_history_table.put_item(Item={
+            "identity": identity, "ts": int(ts), "country": country or "", "source": "real", "origin": "real",
+            "expires_at": int(ts) + HISTORY_TTL_SECONDS})
+    except Exception as e:
+        print("[BASELINE_RECORD_FAILED]", identity, str(e))
 
 TIER_THRESHOLDS = {
     "top_secret": 20,    # 최고기밀: 관리자 콘솔, 감사 로그 API
@@ -806,7 +904,7 @@ def seconds_until_night_boundary(now_ts):
     return (min(boundaries) - now_kst).total_seconds()
 
 
-def compute_cache_ttl(tier, allow_access, now_ts, mfa_expires_at=None):
+def compute_cache_ttl(tier, allow_access, now_ts, mfa_expires_at=None, hourly=False):
     """허용 판정을 몇 초간 재사용해도 되는지(초). 허용이 아니면 0.
     min(등급별 캐시 시간, 다음 야간 경계까지 남은 시간, 재인증(MFA) 유효 시간이 남은 만큼)."""
     if not allow_access:
@@ -815,6 +913,9 @@ def compute_cache_ttl(tier, allow_access, now_ts, mfa_expires_at=None):
     if ttl <= 0:
         return 0
     ttl = min(ttl, seconds_until_night_boundary(now_ts))
+    if hourly:
+        # 개인별 기준은 시간대(정각 단위)마다 판정이 달라질 수 있어, 다음 정각을 넘겨 '통과'를 재사용하지 않는다
+        ttl = min(ttl, 3600 - (int(now_ts) % 3600))
     if mfa_expires_at is not None:
         # step-up 재인증 덕에 통과한 경우, 그 재인증 기록이 만료된 뒤까지 통과가 재사용되면 안 됨
         ttl = min(ttl, mfa_expires_at - now_ts)
@@ -948,25 +1049,27 @@ def lambda_handler(event, context):
     # body에 boolean으로 채워넣으면, 아래 §1의 RISK_MATRIX 루프가
     # body.get(factor) 형태로 그대로 읽어간다.
 
-    # night_access: 요청 시각(KST) 기준 22시~06시 사이면 야간 접속으로 판단.
-    # 1단계 구현: 전 직원 공통 고정 기준(전 직원 동일 적용).
-    # 추후 role별 가정값 -> 실측 이력 기반 개인화로 단계적 고도화 예정.
+    # night_access / unknown_location: 개인별 기준(지난 30일 이력) 우선, 이력이 적거나 조회 실패면 공통 규칙
+    #   공통 규칙: 22시~06시(KST)면 야간, Cloudflare가 준 나라가 HOME_COUNTRY(KR)가 아니면 위치 이상.
+    #   나라가 없으면(누락/알 수 없음) 오탐 방지를 위해 위치는 판정하지 않는다.
+    kst_hour = None
     request_timestamp = body.get("request_timestamp")
     if request_timestamp:
         try:
             dt_utc = datetime.fromisoformat(request_timestamp.replace("Z", "+00:00"))
             kst_hour = (dt_utc + timedelta(hours=9)).hour
-            if kst_hour >= NIGHT_START_HOUR_KST or kst_hour < NIGHT_END_HOUR_KST:
-                body["night_access"] = True
         except Exception as e:
             print("night_access 판정 중 시각 파싱 오류:", str(e))
-
-    # unknown_location: Cloudflare Access가 제공하는 geo.country가 HOME_COUNTRY(KR)와
-    # 다르면 위치 이상으로 판단. geo_country가 없는 경우(누락/알 수 없음)는 오탐 방지를
-    # 위해 위험으로 간주하지 않음.
     geo_country = body.get("geo_country")
-    if geo_country is not None and geo_country != HOME_COUNTRY:
-        body["unknown_location"] = True
+    geo_country = geo_country.strip().upper() if isinstance(geo_country, str) and geo_country.strip() else None
+    baseline = {"mode": "fixed", "logins": 0}
+    if kst_hour is not None or geo_country is not None:
+        history = load_login_history(body.get("identity"), int(time.time())) if BASELINE_MODE == "personal" else []
+        baseline = baseline_judgement(history, kst_hour, geo_country)
+        if baseline["unusual_time"]:
+            body["night_access"] = True
+        if baseline["unusual_country"]:
+            body["unknown_location"] = True
 
     # 엔진이 직접 계산하고 모드 스위치(enforce/report/off)가 있는 신호는 호출자가 body에 넣어 보내도 버린다.
     # (그대로 두면 report/off 모드에서도 호출자가 보낸 값이 점수에 들어가 스위치가 무력해진다)
@@ -1068,7 +1171,14 @@ def lambda_handler(event, context):
     # 5. 경계구간(자원별 임계값 ~ +STEP_UP_MARGIN)은 즉시 차단 대신 Adaptive MFA 요구.
     #    단, 최근 MFA_FRESHNESS_SECONDS 이내에 /stepup에서 재인증한 기록이 있으면
     #    이미 최근성이 증명된 것으로 보고 통과시킨다.
-    elif resource_threshold < risk_score <= resource_threshold + STEP_UP_MARGIN:
+    #    [행동 신호 최소 조치] 평소 아닌 시간 + 평소 아닌 나라가 동시에 걸리면, 점수가 기준선 이하인 자원(내부 등급)이라도
+    #    최소한 추가 인증을 요구한다. 점수(20+40=60)가 내부 기준선(60)과 같아 '통과'되던 빈틈 보완(RBA 평가에서 발견).
+    #    가산점(조합 규칙)으로 풀면 기밀 등급이 재인증 -> 차단으로 함께 올라가므로, 점수는 그대로 두고 '최소 조치'만 정한다
+    #    (Entra 조건부 액세스의 "위험 수준 중간 이상이면 MFA 요구"와 같은 방식). 기밀/최고기밀 판정은 바뀌지 않는다.
+    elif (resource_threshold < risk_score <= resource_threshold + STEP_UP_MARGIN) or (
+            risk_score <= resource_threshold and all(sig in penalized_signals for sig in BEHAVIORAL_PAIR_MFA)):
+        if risk_score <= resource_threshold:
+            reasons.append("behavioral_pair_requires_mfa")
         identity = body.get("identity", "unknown")
         mfa_fresh = False
         if identity != "unknown":
@@ -1110,13 +1220,18 @@ def lambda_handler(event, context):
         mfa_expires_at = None
         reasons.append("session_reauth_required")
 
-    cache_ttl_seconds = compute_cache_ttl(resource_tier, allow_access, current_time, mfa_expires_at)
+    cache_ttl_seconds = compute_cache_ttl(resource_tier, allow_access, current_time, mfa_expires_at,
+                                          hourly=baseline.get("mode") == "personal")
 
     # 마지막 판단 기록: Access가 막으면 사용자는 로그인 서버의 /stepup으로 오는데, 그 페이지는 왜 막혔는지 모른다.
     # 판단은 여기서 했으니, /stepup은 이 기록을 물어보고(decision_lookup) 재인증 화면과 차단 화면 중 하나를 고른다.
     # (예전에는 무조건 재인증 화면이라, 재인증으로 풀리지 않는 차단이면 재인증 -> 다시 차단이 반복됐다)
     if has_identity and body.get("source") != "login":
         save_decision(risk_identity, resource_path, action, device_reasons, current_time)
+
+    # 개인별 기준 이력: 정문(Access)/로그인 서버 판단이 통과한 실제 접속만 남긴다(세션 중 재확인 B와 막힌 시도는 제외)
+    if allow_access and has_identity and body.get("source", "A") in HISTORY_RECORD_SOURCES and BASELINE_MODE == "personal":
+        record_login_history(risk_identity, current_time, geo_country)
 
     # 이동 속도 기준점: 통과된 판단의 위치만 "마지막 위치"로 남긴다(막힌 시도의 위치는 남기지 않음 - 위 geo_velocity 설명)
     if allow_access and has_identity and ip_geo:
@@ -1151,7 +1266,8 @@ def lambda_handler(event, context):
 
     log_event("decision", identity=body.get("identity", "unknown"), action=action, allow=allow_access, score=risk_score,
               signals=penalized_signals, reasons=reasons, resource=resource_path or "unknown", tier=resource_tier,
-              threshold=resource_threshold, source=body.get("source", "A"),
+              threshold=resource_threshold, source=body.get("source", "A"), baseline=baseline.get("mode"),
+              baseline_logins=baseline.get("logins"), hour_share=baseline.get("hour_share"), country_share=baseline.get("country_share"),
               client_ip=normalize_public_ip(body.get("client_ip")), country=body.get("geo_country"), session_id=session_id)
 
     return {

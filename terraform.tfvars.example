@@ -33,3 +33,5 @@ enable_elk          = false
 discord_webhook_url = "https://discord.com/api/webhooks/REPLACE_ME"
 # Kibana 로그인 비밀번호(사용자 elastic). 15~64자. 비워 두면 apply마다 무작위(terraform output -raw kibana_elastic_password)
 kibana_password     = ""
+# [개인별 기준] personal(사람별 지난 30일 이력과 비교, 기본) / fixed(전 직원 공통 규칙, 비교 실험용)
+baseline_mode = "personal"

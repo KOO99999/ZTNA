@@ -409,6 +409,8 @@ resource "aws_lambda_function" "pdp_engine" {
       MAXMIND_ACCOUNT_ID  = var.maxmind_account_id
       MAXMIND_LICENSE_KEY = var.maxmind_license_key
       GEO_VELOCITY_MODE   = var.geo_velocity_mode
+      # [개인별 기준] personal(지난 30일 이력과 비교, 기본) / fixed(전 직원 공통 규칙 22~06시·한국 외, 비교 실험용)
+      BASELINE_MODE = var.baseline_mode
     }
   }
 }

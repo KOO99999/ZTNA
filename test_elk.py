@@ -212,3 +212,19 @@ if m:
                   '127.0.0.1 - - "GET /REPORT RequestId: " 200']
     ok("버리는 줄: START/END/REPORT/INIT_START, 할 일 없던 순찰 요약", all(dropped(l) for l in drop_lines), [l for l in drop_lines if not dropped(l)])
     ok("남기는 줄: 보안 기록(ZT_EVENT), 실제로 기기를 본 순찰 요약, 오류, 사람이 읽는 태그 줄", not any(dropped(l) for l in keep_lines), [l for l in keep_lines if dropped(l)])
+
+# ---------- 설치 순서: 터널은 Kibana 직후, 부가 단계 실패는 설치를 멈추지 않음 ----------
+i_kb, i_cf = tpl.index("systemctl enable --now kibana"), tpl.index("cloudflared service install")
+i_ea, i_imp = tpl.index("# ---------- ElastAlert2"), tpl.index("/api/saved_objects/_import")
+ok("관제 서버: cloudflared(터널)를 Kibana 시작 직후, 알림/표 가져오기보다 먼저 설치", i_kb < i_cf < i_ea and i_cf < i_imp)
+ea_block = tpl[i_ea:tpl.index("# ---------- Kibana 저장 객체")]
+ok("관제 서버: ElastAlert2는 set +e + 하위 셸(set -e) + 종료 코드 판정(실패해도 다음 단계 진행)",
+   "set +e\n(\nset -e\n" in ea_block and "rc=$?" in ea_block and "elastalert setup FAILED" in ea_block and not re.search(r"^\) \|\|", ea_block, re.M))
+ok("Filebeat 설치: '( ... ) ||' 대신 종료 코드 판정 + 원래 set -e 상태 복원",
+   not re.search(r"^\) \|\|", fb, re.M) and "zt_fb_rc=$?" in fb and "zt_fb_opts=$-" in fb)
+if shutil.which("bash"):
+    demo = lambda wrapper: subprocess.run(["bash", "-c", wrapper], capture_output=True, text=True).stdout
+    old = demo('set -e; ( set -e; false; echo CONTINUED ) || echo FAILED')
+    new = demo('set -e; set +e; ( set -e; false; echo CONTINUED ); rc=$?; set -e; [ "$rc" -eq 0 ] || echo FAILED; echo NEXT')
+    ok("bash 동작 확인: 옛 방식은 실패를 못 잡고 계속 진행, 새 방식은 실패를 잡고 다음 단계로", "CONTINUED" in old and "FAILED" not in old
+       and "CONTINUED" not in new and "FAILED" in new and "NEXT" in new, (old, new))

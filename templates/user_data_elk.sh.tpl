@@ -70,6 +70,21 @@ telemetry.allowChangingOptInStatus: false
 KBCONF
 systemctl enable --now kibana
 
+# ---------- cloudflared: Kibana 전용 터널(이 서버 -> Cloudflare 바깥 방향 연결만, 열린 포트 없음) ----------
+#   Kibana를 켠 직후에 연결한다. 뒤의 부가 단계(알림, 표 가져오기)가 실패해도 Kibana 접속은 되게 하기 위함
+#   (예전에는 맨 끝이라 앞 단계 하나만 실패해도 Error 1033으로 접속 자체가 막혔다).
+curl -L --output /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+dpkg -i /tmp/cloudflared.deb
+mkdir -p /etc/cloudflared
+cat > /etc/cloudflared/config.yml << CFCONFIG
+ingress:
+  - hostname: ${kibana_host}
+    service: http://127.0.0.1:5601
+  - service: http_status:404
+CFCONFIG
+cloudflared service install ${tunnel_token}
+systemctl restart cloudflared
+
 # ---------- Logstash: 5044(다른 서버 Filebeat, 상호 TLS) + 127.0.0.1:5045(이 서버 Filebeat, CloudWatch) ----------
 install -d -m 0750 -o root -g logstash /etc/logstash/zt
 cp /root/zt/ca.crt /etc/logstash/zt/ca.crt
@@ -150,6 +165,11 @@ chmod 600 /etc/filebeat/filebeat.yml
 systemctl enable --now filebeat
 
 # ---------- ElastAlert2 -> Discord (Kibana 무료 등급은 외부 웹훅 알림이 유료) ----------
+#   부가 기능이라 실패해도 설치 전체를 멈추지 않는다. '( ... ) || echo' 형태는 bash가 하위 셸 안의 set -e를 무시해
+#   실패해도 끝까지 진행하므로, set +e로 바깥만 잠시 풀고 하위 셸 종료 코드로 성공/실패를 남긴다.
+set +e
+(
+set -e
 python3 -m venv /opt/elastalert/venv
 /opt/elastalert/venv/bin/pip install --no-cache-dir "elastalert2==2.31.0"
 useradd --system --home /opt/elastalert --shell /usr/sbin/nologin elastalert || true
@@ -264,6 +284,11 @@ WantedBy=multi-user.target
 EASVC
 systemctl daemon-reload
 systemctl enable --now elastalert
+echo "elastalert setup ok"
+)
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || echo "elastalert setup FAILED rc=$rc (Kibana는 계속 사용 가능, Discord 알림만 없음)"
 
 # ---------- Kibana 저장 객체 가져오기: 데이터 보기 + 표(저장된 검색) 6개 + (있으면) 대시보드 ----------
 #   매일 destroy해도 다시 생기게 프로젝트의 kibana/*.ndjson을 S3에서 받아 Kibana 가져오기 API로 불러온다(같은 ID면 덮어씀).
@@ -281,17 +306,5 @@ for f in /root/zt/kibana/*.ndjson; do
   curl -s -u "elastic:$(pw elastic)" -H 'kbn-xsrf: true' -X POST     "http://127.0.0.1:5601/api/saved_objects/_import?overwrite=true" -F "file=@$f" | grep -q '"success":true'     && echo "kibana import ok: $(basename "$f")" || echo "kibana import FAILED: $(basename "$f")"
 done
 
-# ---------- cloudflared: Kibana 전용 터널(이 서버 -> Cloudflare 바깥 방향 연결만, 열린 포트 없음) ----------
-curl -L --output /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-dpkg -i /tmp/cloudflared.deb
-mkdir -p /etc/cloudflared
-cat > /etc/cloudflared/config.yml << CFCONFIG
-ingress:
-  - hostname: ${kibana_host}
-    service: http://127.0.0.1:5601
-  - service: http_status:404
-CFCONFIG
-cloudflared service install ${tunnel_token}
-systemctl restart cloudflared
 rm -rf /root/zt
 echo "ELK setup done"

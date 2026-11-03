@@ -3,7 +3,11 @@
 # [관제] Filebeat: 이 서버(${role})의 서비스 로그와 WAF 로그를 관제 서버 Logstash로 보낸다(elk.tf, enable_elk=true일 때만 들어감).
 #   - 전송 구간은 내부 CA 인증서로 상호 TLS(Logstash 서버 인증서 ${logs_name} 확인 + 이 서버의 클라이언트 인증서 제출)
 #   - 실패해도 서비스 동작에는 영향이 없게 하위 셸에서 실행하고 결과만 남긴다.
+#     ('( ... ) || echo' 형태는 bash가 하위 셸 안의 set -e를 무시해 실패해도 끝까지 가고 ok를 찍으므로,
+#      바깥만 set +e로 잠시 풀고 하위 셸의 종료 코드로 판정한다)
 # ==========================================================================
+zt_fb_opts=$-
+set +e
 (
 set -e
 apt-get install -y gnupg curl
@@ -61,4 +65,7 @@ FBCONF
 chmod 600 /etc/filebeat/filebeat.yml
 systemctl enable --now filebeat
 echo "filebeat setup ok"
-) || echo "filebeat setup FAILED (service continues without log shipping)"
+)
+zt_fb_rc=$?
+case "$zt_fb_opts" in *e*) set -e ;; esac   # 원래 스크립트의 set -e 여부를 그대로 되돌린다
+[ "$zt_fb_rc" -eq 0 ] || echo "filebeat setup FAILED rc=$zt_fb_rc (service continues without log shipping)"

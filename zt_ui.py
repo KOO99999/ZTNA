@@ -108,6 +108,19 @@ p{margin:0}
 .btn-primary{background:var(--brand);color:#fff}.btn-primary:hover{background:var(--brand-hover)}
 .btn-secondary{background:var(--line-2);color:var(--ink-3)}.btn-secondary:hover{background:#e5e8eb}
 .btn-soft{background:var(--brand-soft);color:var(--brand-ink)}.btn-soft:hover{background:#d6e8ff}.btn-danger-soft{background:var(--danger-bg);color:var(--danger)}.btn-danger-soft:hover{background:#ffdede}form.ack{display:flex;gap:6px;margin:0}
+/* 내 보안 기록: 결과는 색 점+글자(버튼과 구분), 확인할 활동은 표 위 질문 카드 */
+.res{display:inline-flex;align-items:center;gap:7px;font-weight:600;color:var(--ink-2);white-space:nowrap}
+.res i{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--faint)}
+.res.ok i{background:var(--ok)}.res.warn i{background:var(--warn)}.res.danger i{background:var(--danger)}.res.brand i{background:var(--brand)}
+.res.danger{color:var(--danger)}
+.ack-note{color:var(--faint);font-size:12.5px;margin-left:6px;font-weight:500}.ack-note.rep{color:var(--danger)}
+.ask{border:1.5px solid #ffd59e;background:#fffaf2;border-radius:16px;padding:16px 18px;margin-bottom:16px}
+.ask h3{margin:0 0 10px;font-size:15px;color:#a35a0b;display:flex;gap:8px;align-items:center}
+.ask .item{display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:#fff;border-radius:12px;padding:12px 14px}
+.ask .item+.item{margin-top:8px}
+.ask .what b{display:block;font-size:15px}.ask .what span{color:var(--faint);font-size:13px}
+.ask form.ack{margin-left:auto}
+.ask p{margin:10px 2px 0;color:#a35a0b;font-size:12.5px}
 .btn-danger{background:var(--danger-bg);color:var(--danger)}.btn-danger:hover{background:#ffe0e0}
 .btn-ghost{background:transparent;color:var(--ink-3)}.btn-ghost:hover{background:var(--line-2)}
 .btn-block{width:100%}

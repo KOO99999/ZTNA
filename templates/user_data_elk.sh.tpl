@@ -201,7 +201,7 @@ index: zt-logs-*
 filter:
   - query:
       query_string:
-        query: 'zt.event:(waf_reported OR idor_reported OR user_reported_not_me OR login_locked OR pwned_password_detected OR mtls_client_rejected OR risk_release) OR (zt.event:device_sweep AND zt.action:device_session_revoked) OR (zt.event:decision AND zt.signals:(threat_intel_match OR geo_velocity OR session_country_change OR waf_sqli OR waf_attack OR resource_owner_mismatch))'
+        query: 'zt.event:(waf_reported OR idor_reported OR login_locked OR pwned_password_detected OR mtls_client_rejected OR risk_release) OR (zt.event:device_sweep AND zt.action:device_session_revoked) OR (zt.event:decision AND zt.signals:(threat_intel_match OR geo_velocity OR session_country_change OR waf_sqli OR waf_attack OR resource_owner_mismatch))'
 query_key: zt.identity
 realert:
   minutes: 5
@@ -266,6 +266,30 @@ alert_text_type: alert_text_only
 alert_missing_value: "-"
 alert_text: "웹 서버가 판단 엔진(Lambda)에 묻지 못하고 있습니다. 새 로그인과 최고기밀은 차단, 기밀/내부는 등급별 장애 모드(재사용/한시 통과)로 처리 중입니다.\n마지막 사용자: {0}\n처리: {1} / 등급: {2}\n대응 절차: docs/runbook.md"
 alert_text_args: ["zt.identity", "zt.mode", "zt.tier"]
+EARULE
+# 규칙 4: 직원의 "본인 아님" 신고. 규칙 1과 따로 둔다: 규칙 1은 사람마다 5분에 한 번이라, 같은 사람에게 방금 다른 알림
+#   (IDOR, 관리자 해제 등)이 갔으면 신고가 묻힌다(실측에서 확인). 신고는 직원이 직접 확인한 사고라 따로 바로 알린다.
+cat > /opt/elastalert/rules/zt_user_report.yaml << EARULE
+name: "ZT 직원 신고"
+type: any
+index: zt-logs-*
+filter:
+  - query:
+      query_string:
+        query: 'zt.event:user_reported_not_me'
+query_key: zt.identity
+realert:
+  minutes: 1
+alert:
+  - discord
+discord_webhook_url: "$HOOK"
+discord_embed_color: 0xe74c3c
+alert_subject: "[ZT 직원 신고] 본인 아님 / {0}"
+alert_subject_args: ["zt.identity"]
+alert_text_type: alert_text_only
+alert_missing_value: "-"
+alert_text: "직원이 본인이 아닌 접속이라고 신고했습니다. 계정은 엔진이 바로 차단합니다(관리자 해제).\n사용자: {0}\n신고한 접속: {1} / 나라 {2} / 결과 {3}\n신고한 곳 IP: {4}\n시각: {5}\n대응 절차: docs/runbook.md"
+alert_text_args: ["zt.identity", "zt.app", "zt.country", "zt.action", "zt.client_ip", "@timestamp"]
 EARULE
 chown -R elastalert:elastalert /opt/elastalert && chmod 600 /opt/elastalert/config.yaml /opt/elastalert/rules/*.yaml
 sudo -u elastalert /opt/elastalert/venv/bin/elastalert-create-index --config /opt/elastalert/config.yaml || true

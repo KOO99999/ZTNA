@@ -502,8 +502,8 @@ t("[보안] 틀린 비밀키로 거부된 호출의 로그에도 입력값이 �
 def _flag(identity, signal, status="active"):
     return {"identity": identity, "signal": signal, "status": status, "set_at": now}
 
-t("[UserRisk] STICKY_SIGNALS는 resettable=False인 security 신호 4개(IDOR 포함)",
-  sorted(engine.STICKY_SIGNALS) == ["resource_owner_mismatch", "threat_intel_match", "waf_attack", "waf_sqli"], engine.STICKY_SIGNALS)
+t("[UserRisk] STICKY_SIGNALS는 resettable=False인 security 신호 5개(IDOR, 본인 아님 신고 포함)",
+  sorted(engine.STICKY_SIGNALS) == ["resource_owner_mismatch", "threat_intel_match", "user_reported_suspicious", "waf_attack", "waf_sqli"], engine.STICKY_SIGNALS)
 
 # 1) persist_risk=true + 감지 -> 저장
 r = _call({"session_id": "u1", "identity": "kim@test.com", "waf_sqli": True, "persist_risk": True, "source": "B"})
@@ -1440,6 +1440,20 @@ r = json.loads(engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dump
     "session_id": "idor3", "identity": "kim@xmcda.store", "resource_path": "xmcda.store/", "source": "B",
     "security_mfa_passed": True})}, None)["body"])
 t("[IDOR] MFA를 통과해도 풀리지 않음(관리자 해제 대상)", r["allow"] is False, r)
+# [본인 아님 신고] user_reported_suspicious: 한 번 알리면 저장 -> 모든 등급 차단, MFA로 안 풀림
+mock_user_risk.reset_mock(); mock_user_risk.query.return_value = {"Items": []}
+r = json.loads(engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps({
+    "session_id": "rep1", "identity": "kim@xmcda.store", "source": "app_authz", "persist_risk": True,
+    "user_reported_suspicious": True, "resource_path": "xmcda.store/security/ack"})}, None)["body"])
+upd = [c.kwargs for c in mock_user_risk.update_item.call_args_list]
+t("[신고] 알림 받은 판단: 차단 + user_risk에 user_reported_suspicious 저장",
+  r["allow"] is False and any(u.get("Key", {}).get("signal") == "user_reported_suspicious" for u in upd), (r, upd))
+mock_user_risk.query.return_value = {"Items": [{"identity": "kim@xmcda.store", "signal": "user_reported_suspicious", "status": "active"}]}
+for path in ("xmcda.store/", "marketing.xmcda.store/", "dev.xmcda.store/"):
+    r = json.loads(engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps({
+        "session_id": "rep2", "identity": "kim@xmcda.store", "resource_path": path, "source": "B",
+        "security_mfa_passed": True})}, None)["body"])
+    t(f"[신고] 딱지가 있으면 {path} 도 차단(내부 등급 포함), MFA로 안 풀림", r["allow"] is False, r)
 mock_user_risk.query.return_value = {"Items": []}
 t("[장애 정책] 기록표: 최고기밀 차단, 새 로그인 차단, 기밀 10분/내부 15분",
   engine.FAIL_POLICY["top_secret"] == "fail_closed" and engine.FAIL_POLICY["new_login"] == "fail_closed"

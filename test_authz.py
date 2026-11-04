@@ -112,6 +112,21 @@ with patch.object(zt_authz.requests, "post", failing_post), contextlib.redirect_
         zt_authz.handle_line(line(), now=t)
 ok("엔진 알림 실패 -> 다음 거부 때 바로 다시 알리도록 기록 삭제", "kim@xmcda.store" not in zt_authz._reported_at)
 
+# ---------- 3b. 본인 아님 신고: 한 번에 바로 알림, IDOR 카운트와 따로 ----------
+reset()
+posted.clear()
+buf = io.StringIO()
+with patch.object(zt_authz.requests, "post", fake_post), contextlib.redirect_stdout(buf):
+    zt_authz.handle_line(line(uri="/security/ack", authz="user_reported_not_me"), now=5000)
+    zt_authz.handle_line(line(uri="/security/ack", authz="user_reported_not_me"), now=5010)
+    zt_authz.handle_line(line(), now=5020)   # 같은 사람의 IDOR 1번은 따로 셈(신고 때문에 IDOR가 바로 알려지지 않음)
+ok("신고 1번이면 바로 엔진에 user_reported_suspicious(persist_risk), 10분 안 반복은 한 번만",
+   len(posted) == 1 and posted[0]["json"].get("user_reported_suspicious") is True and posted[0]["json"].get("persist_risk") is True
+   and "resource_owner_mismatch" not in posted[0]["json"], [p["json"] for p in posted])
+evs = [json.loads(l[len("ZT_EVENT "):])["event"] for l in buf.getvalue().splitlines() if l.startswith("ZT_EVENT ")]
+ok("관제 기록: 신고 전달은 user_report_escalated(IDOR 기록과 섞이지 않음)",
+   evs.count("user_report_escalated") == 1 and "idor_reported" not in evs and evs.count("authz_denied") == 1, evs)
+
 # ---------- 4. nginx / 배포 설정 ----------
 tpl = open(os.path.join(HERE, "templates/user_data_web.sh.tpl"), encoding="utf-8").read()
 ok("nginx: X-ZT-Authz가 붙은 응답만 기록(map + access_log if=)",

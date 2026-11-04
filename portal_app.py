@@ -308,7 +308,7 @@ def _my_activity(identity, limit=ACTIVITY_SHOW):
 
 
 ACK_TTL_SECONDS = (ACTIVITY_HOME_DAYS + 1) * 86400   # 경고를 띄우는 기간(7일)보다 하루 길게 보관 후 자동 삭제
-ACK_VERDICTS = {"mine": ("본인 확인", "chip-ok"), "not_mine": ("신고함", "chip-danger")}
+ACK_VERDICTS = {"mine": ("본인 확인함", "chip-ok"), "not_mine": ("신고함", "chip-danger")}
 
 
 def log_event(event, **fields):
@@ -332,30 +332,43 @@ def _load_acks(identity):
         return {}
 
 
+ACTIVITY_TONE = {"chip-ok": "ok", "chip-warn": "warn", "chip-danger": "danger", "chip-brand": "brand"}
+
+
+def _activity_result(row):
+    """결과 칸: 배지 대신 색 점 + 글자(누르는 버튼과 헷갈리지 않게). 초록=정상/추가 인증 완료, 주황=요청, 빨강=차단, 파랑=관리자 확인."""
+    label, cls = ACTIVITY_LABELS[row["action"]]
+    return f'<span class="res {ACTIVITY_TONE.get(cls, "")}"><i></i>{esc(label)}</span>'
+
+
 def _activity_table(rows, acks=None, csrf=None):
+    """위: 확인할 활동만 모은 질문 카드("본인이 한 접속이 맞나요?" + 네/아니요). 아래: 기록 표(읽기 전용).
+    누르는 것(질문)과 기록(표)을 나눠 Google/Microsoft '최근 보안 활동'처럼 무엇을 해야 하는지 한눈에 보이게 한다."""
     if rows is None:
         return '<div class="empty">지금은 보안 기록을 불러올 수 없습니다. 잠시 후 다시 확인해 주세요.</div>'
     if not rows:
         return '<div class="empty">아직 기록된 보안 활동이 없습니다.</div>'
     acks = acks or {}
     now = int(time.time())
-    trs = ""
+    items = trs = ""
     for r in rows:
-        label, cls = ACTIVITY_LABELS[r["action"]]
         when = datetime.fromtimestamp(r["ts"], KST).strftime("%m.%d %H:%M")
-        check = ""
+        note = ""
         if r["ts"] in acks:
-            text, ccls = ACK_VERDICTS.get(acks[r["ts"]], ("확인함", ""))
-            check = f'<span class="chip {ccls}">{esc(text)}</span>'
+            text, _ = ACK_VERDICTS.get(acks[r["ts"]], ("확인함", ""))
+            note = f'<span class="ack-note{" rep" if acks[r["ts"]] == "not_mine" else ""}">· {esc(text)}</span>'
         elif csrf and _needs_attention(r, now):
-            # 확인이 필요한 활동: 본인 맞음(경고 닫기) / 본인 아님(보안 관리자에게 신고)
-            check = (f'<form method="POST" action="/security/ack" class="ack">'
-                     f'<input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="ts" value="{r["ts"]}">'
-                     f'<button class="btn btn-sm btn-soft" name="verdict" value="mine">본인 맞음</button>'
-                     f'<button class="btn btn-sm btn-danger-soft" name="verdict" value="not_mine">본인 아님</button></form>')
+            items += (f'<div class="item"><div class="what"><b>{esc(_place(r["country"]))}에서 {esc(r["app"])} 접속</b>'
+                      f'<span>{esc(when)} · {esc(ACTIVITY_LABELS[r["action"]][0])}</span></div>'
+                      f'<form method="POST" action="/security/ack" class="ack">'
+                      f'<input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="ts" value="{r["ts"]}">'
+                      f'<button class="btn btn-sm btn-soft" name="verdict" value="mine">네, 제가 했어요</button>'
+                      f'<button class="btn btn-sm btn-danger-soft" name="verdict" value="not_mine">아니요, 신고할게요</button></form></div>')
         trs += (f'<tr><td class="mono">{esc(when)}</td><td>{esc(r["app"])}</td><td>{esc(_place(r["country"]))}</td>'
-                f'<td><span class="chip {cls}">{esc(label)}</span></td><td>{check}</td></tr>')
-    return (f'<div class="table-wrap"><table class="table compact"><tr><th>시각</th><th>서비스</th><th>접속 나라</th><th>결과</th><th>확인</th></tr>'
+                f'<td>{_activity_result(r)}{note}</td></tr>')
+    ask = (f'<div class="ask"><h3>{icon("alert", 18)}본인이 한 접속이 맞나요?</h3>{items}'
+           f'<p>아니요를 누르면 보안을 위해 이 계정의 접속이 바로 막히고, 보안 관리자가 확인한 뒤 풀어 드립니다.</p></div>') if items else ""
+    return (f'{ask}<div class="table-wrap"><table class="table compact"><tr><th>시각</th><th>서비스</th><th>접속 나라</th><th>결과</th></tr>'
             f'{trs}</table></div>')
 
 
@@ -475,9 +488,7 @@ def my_security():
           f'<div class="sec-item"><span class="bx">{icon("device", 20)}</span><div><b class="mono" style="font-size:14px">{esc(ip)}</b><span>현재 접속 IP</span></div></div>'
           f'</section>')
     act = (f'<section class="card"><h2 class="card-title">최근 보안 활동</h2>'
-           f'{_activity_table(_my_activity(identity), _load_acks(identity), _csrf_token(identity))}'
-           f'<p class="small faint" style="margin-top:10px">확인이 필요한 활동은 <b>본인 맞음</b>을 누르면 홈 경고가 사라지고, '
-           f'<b>본인 아님</b>을 누르면 보안 관리자에게 바로 신고됩니다.</p></section>')
+           f'{_activity_table(_my_activity(identity), _load_acks(identity), _csrf_token(identity))}</section>')
     msg = SECURITY_MESSAGES.get(request.args.get("msg", ""))
     banner = alert(msg[0], msg[1]) if msg else ""
     html = f'{banner}<div class="grid grid-sec">{me}{act}</div>'
@@ -487,7 +498,7 @@ def my_security():
 
 SECURITY_MESSAGES = {
     "ack_mine": ("ok", "본인 활동으로 확인했습니다. 홈의 경고가 사라집니다."),
-    "ack_report": ("warn", "보안 관리자에게 신고했습니다. 관리자 안내가 오기 전까지 비밀번호를 다른 곳에 쓰지 말고, 필요하면 비밀번호를 바꿔 주세요."),
+    "ack_report": ("warn", "보안 관리자에게 신고했습니다. 보안을 위해 이 계정의 접속을 곧 막습니다. 관리자가 확인한 뒤 풀어 드리며, 그 전에 같은 비밀번호를 쓰는 다른 곳은 비밀번호를 바꿔 주세요."),
     "ack_invalid": ("error", "확인할 수 없는 요청입니다. 페이지를 새로고침한 뒤 다시 시도하세요."),
     "ack_failed": ("error", "저장하지 못했습니다. 잠시 후 다시 시도하세요."),
 }
@@ -497,7 +508,8 @@ SECURITY_MESSAGES = {
 def security_ack():
     """직원이 '확인이 필요한 활동'을 본인 맞음/아님으로 확인. 기록은 서버(activity_ack)에 저장해 어느 기기에서든 같은 상태가 된다.
     - 대상 활동은 로그인한 본인의 최근 기록 중 '확인이 필요한' 줄만(남의 기록이나 임의 시각은 받지 않음)
-    - 본인 아님: 관제에 user_reported_not_me 기록 -> Discord 즉시 알림(관리자가 조사)"""
+    - 본인 아님: 관제에 user_reported_not_me 기록 -> Discord 알림, 그리고 엔진에 알려 계정 전체 차단(관리자 해제)
+      (Microsoft Entra: '의심 활동 신고'를 한 사용자는 높은 사용자 위험으로 올리고 위험 정책으로 차단/비밀번호 변경)"""
     host = request.host.split(':')[0].lower()
     if host != PORTAL_DOMAIN:
         return _status_page("찾을 수 없음", "잘못된 경로입니다.", 404)
@@ -520,11 +532,15 @@ def security_ack():
     except Exception as e:
         print("보안 활동 확인 저장 실패:", str(e))
         return redirect("/security?msg=ack_failed", code=303)
+    resp = redirect(f"/security?msg={'ack_mine' if verdict == 'mine' else 'ack_report'}", code=303)
     if verdict == "not_mine":
         log_event("user_reported_not_me", identity=identity, activity_ts=ts, app=target["app"],
                   country=target["country"], action=target["action"],
                   client_ip=request.headers.get("Cf-Connecting-Ip"))
-    return redirect(f"/security?msg={'ack_mine' if verdict == 'mine' else 'ack_report'}", code=303)
+        # 엔진 알림(계정 차단)은 IDOR와 같은 경로: 웹 서버 nginx가 이 헤더를 지우고 검증된 신원과 함께 기록 ->
+        # 판단 서비스 zt_authz.py가 바로 엔진에 user_reported_suspicious로 알린다(앱 서버에는 엔진 비밀키를 두지 않음).
+        resp.headers["X-ZT-Authz"] = "user_reported_not_me"
+    return resp
 
 
 @app.route('/')
@@ -575,6 +591,7 @@ def general():
 SIGNAL_LABELS = {
     "threat_intel_match": "위험 IP 접속", "waf_sqli": "SQL 삽입 공격", "waf_attack": "웹 공격(XSS 등)",
     "resource_owner_mismatch": "남의 자료 반복 요청(IDOR)",
+    "user_reported_suspicious": "직원 본인 아님 신고",
 }
 ACTION_LABELS = {
     "allow": ("허용", "chip-ok"), "step_up_mfa_verified": ("재인증 후 허용", "chip-ok"),

@@ -461,7 +461,10 @@ check("조회 키는 로그인한 본인 이메일(요청 값으로 바꿀 수 �
 sec_page(path="/security?identity=lee@test.com&user=lee@test.com")
 check("주소에 다른 사람 이메일을 넣어도 본인 기록만 조회",
       pa.table.query.call_args.kwargs.get("ExpressionAttributeValues") == {":me": "kim@test.com"})
-check("내 보안 기록: 접속 정보 + 최근 활동 + 안내 문장", all(x in t for x in ("내 접속 정보", "최근 보안 활동", "본인 아님", "kim@test.com")))
+check("내 보안 기록: 접속 정보 + 최근 활동 + 확인 질문 카드", all(x in t for x in ("내 접속 정보", "최근 보안 활동", "본인이 한 접속이 맞나요?", "아니요, 신고할게요", "kim@test.com")))
+check("결과는 색 점+글자(버튼과 구분): 추가 인증 완료는 초록, 차단은 빨강, 표에는 확인 칸 없음",
+      '<span class="res ok"><i></i>추가 인증 완료</span>' in t and '<span class="res danger"><i></i>접속 차단</span>' in t
+      and "<th>확인</th>" not in t)
 check("서비스/나라/결과가 사람이 읽는 말로", all(x in t for x in ("개발팀", "일본", "추가 인증 완료", "사내 포털", "대한민국", "정상 접속", "인사팀", "접속 차단", "보안 관리자 확인 완료")))
 check("점수/신호/임계값 코드가 없음", not any(x in t for x in ("risk_score", "reasons", "임계", "step_up_mfa_verified", "night_access", "점수")))
 check("이상한 나라 값은 이스케이프", "<b>X</b>" not in t and "&lt;b&gt;X&lt;/b&gt;" in t)
@@ -560,8 +563,9 @@ pa.ack_table.query.return_value = {"Items": []}
 t = home("kim@test.com")
 check("확인 전: 홈에 주황 카드(확인이 필요한 보안 활동 1건)", "확인이 필요한 보안 활동 1건" in t and "sec-card wn" in t)
 t = sec_page().get_data(as_text=True)
-check("내 보안 기록: 확인이 필요한 줄에만 [본인 맞음][본인 아님] 버튼(평범한 한국 접속 줄에는 없음)",
-      t.count('action="/security/ack"') == 1 and f'name="ts" value="{NOW2 - 30}"' in t and "본인 맞음" in t, t.count('action="/security/ack"'))
+check("내 보안 기록: 확인이 필요한 활동만 위 질문 카드에 [네, 제가 했어요][아니요, 신고할게요](평범한 한국 접속은 없음)",
+      t.count('action="/security/ack"') == 1 and f'name="ts" value="{NOW2 - 30}"' in t and "네, 제가 했어요" in t
+      and "중국에서 사내 포털 접속" in t and t.index('class="ask"') < t.index('class="table compact"'), t.count('action="/security/ack"'))
 
 def ack_post(form, email="kim@test.com", origin="https://xmcda.store", with_origin=True):
     h = {**hdr(email=email), "Host": "xmcda.store"}
@@ -581,7 +585,8 @@ t = home("kim@test.com")
 check("확인 후: 홈 경고가 사라지고 초록 '보안 상태 정상'(서버 기록 기준이라 어느 기기에서든 같음)",
       "확인이 필요한" not in t and "sec-card ok" in t)
 t = sec_page().get_data(as_text=True)
-check("확인 후: 그 줄에는 버튼 대신 '본인 확인' 표시", 'action="/security/ack"' not in t and "본인 확인" in t)
+check("확인 후: 질문 카드가 사라지고 표의 그 줄 결과 옆에 '· 본인 확인함'", 'action="/security/ack"' not in t and 'class="ask"' not in t
+      and '<span class="ack-note">· 본인 확인함</span>' in t)
 
 pa.ack_table.query.return_value = {"Items": []}
 pa.ack_table.put_item.reset_mock()
@@ -592,6 +597,10 @@ ev = [l for l in buf.getvalue().splitlines() if l.startswith("ZT_EVENT ")]
 check("본인 아님: 저장 + 관제에 user_reported_not_me(관리자 Discord 알림 대상)",
       r.status_code == 303 and "msg=ack_report" in r.headers["Location"] and pa.ack_table.put_item.called
       and ev and '"event": "user_reported_not_me"' in ev[-1] and '"country": "CN"' in ev[-1], buf.getvalue())
+check("본인 아님: 응답에 X-ZT-Authz: user_reported_not_me(웹 서버가 지우고 기록 -> 판단 서비스가 엔진에 알림)",
+      r.headers.get("X-ZT-Authz") == "user_reported_not_me")
+r = ack_post({"csrf": tokk, "ts": str(NOW2 - 30), "verdict": "mine"})
+check("본인 맞음: 엔진 알림 헤더 없음", "X-ZT-Authz" not in r.headers)
 for name, form, kw in [
     ("CSRF 토큰 없음", {"ts": str(NOW2 - 30), "verdict": "mine"}, {}),
     ("다른 사람 토큰", {"csrf": pa._csrf_token("lee@test.com"), "ts": str(NOW2 - 30), "verdict": "mine"}, {}),

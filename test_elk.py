@@ -89,8 +89,9 @@ ok("Elasticsearch 계정 최소 권한: Logstash는 쓰기만, ElastAlert2는 �
    '"names":["zt-logs-*"],"privileges":["create_index","create_doc","write"]' in tpl
    and '"names":["zt-logs-*"],"privileges":["read","view_index_metadata"]' in tpl)
 ok("IMDSv2 강제 + 디스크 암호화", 'http_tokens                 = "required"' in tf and "encrypted   = true" in tf)
-ok("ElastAlert2 버전 고정 + 규칙 3개(즉시 대응/반복 차단/엔진 장애) + Discord",
-   '"elastalert2==2.31.0"' in tpl and tpl.count("alert:\n  - discord") == 3 and "zt_pdp_unavailable.yaml" in tpl)
+ok("ElastAlert2 버전 고정 + 규칙 4개(즉시 대응/반복 차단/엔진 장애/직원 신고) + Discord",
+   '"elastalert2==2.31.0"' in tpl and tpl.count("alert:\n  - discord") == 4 and "zt_pdp_unavailable.yaml" in tpl
+   and "zt_user_report.yaml" in tpl)
 ok("알림 조건에 쓰는 필드가 실제 이벤트 이름과 같음",
    all(n in eng + auth + gate + waf + adm for n in ("waf_reported", "login_locked", "device_session_revoked", "pdp_unavailable", "risk_release")))
 ok("Logstash 날짜/인덱스: Terraform 이스케이프(%%{, $${) 사용", "zt-logs-%%{+YYYY.MM.dd}" in tpl and 'password => "$${LS_ES_PW}"' in tpl)
@@ -155,7 +156,7 @@ try:
     t = rendered["관제 서버"]
     rules = re.findall(r"<< EARULE\n(.*?)\nEARULE", t, re.S)
     parsed = [yaml.safe_load(x.replace('"$HOOK"', '"h"')) for x in rules]
-    ok("ElastAlert2 규칙 YAML 3개 파싱 + Discord 주소 자리", len(parsed) == 3 and all(p["discord_webhook_url"] == "h" for p in parsed))
+    ok("ElastAlert2 규칙 YAML 4개 파싱 + Discord 주소 자리", len(parsed) == 4 and all(p["discord_webhook_url"] == "h" for p in parsed))
 except ImportError:
     print("[SKIP] YAML 파싱(pyyaml 없음)")
 
@@ -238,5 +239,9 @@ ok("Discord 즉시 대응 규칙: IDOR 알림(idor_reported)과 resource_owner_m
 r3 = tpl.split("zt_pdp_unavailable.yaml")[1].split("EARULE")[1] if "zt_pdp_unavailable.yaml" in tpl else ""
 ok("Discord 장애 규칙: 차단(pdp_unavailable)뿐 아니라 장애 모드 통과/차단(pdp_degraded_*)도 알림",
    "pdp_degraded_allow" in tpl and "pdp_degraded_deny" in tpl and "zt.mode" in tpl)
-ok("Discord 즉시 대응: 직원의 '본인 아님' 신고(user_reported_not_me), IDOR 경로/횟수/나라 표시",
-   "user_reported_not_me" in tpl and '"zt.path", "zt.count", "zt.country"' in tpl)
+r1 = tpl.split("zt_high_severity.yaml")[1].split("EARULE")[1]
+r4 = tpl.split("zt_user_report.yaml")[1].split("EARULE")[1] if "zt_user_report.yaml" in tpl else ""
+ok("Discord 직원 신고: user_reported_not_me는 따로 규칙(규칙 1의 사람별 5분 억제에 묻히지 않게), 즉시 대응에는 없음",
+   "zt.event:user_reported_not_me" in r4 and "user_reported_not_me" not in r1 and "realert:\n  minutes: 1" in r4
+   and '"zt.app", "zt.country", "zt.action"' in r4)
+ok("Discord 즉시 대응: IDOR 경로/횟수/나라 표시", '"zt.path", "zt.count", "zt.country"' in r1)

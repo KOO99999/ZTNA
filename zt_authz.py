@@ -13,6 +13,10 @@
 로그 한 줄(nginx log_format zt_authz, JSON):
     {"time":"...","identity":"kim@x","host":"xmcda.store","uri":"/payslip/210","authz":"owner_mismatch","status":"404"}
 환경변수: ZT_AUTHZ_LOG(기본 /var/log/modsec/zt_authz_app.log), ZT_AUTHZ_THRESHOLD(3), ZT_AUTHZ_WINDOW_SECONDS(600)
+
+[본인 아님 신고] 직원이 포털 '내 보안 기록'에서 "아니요, 신고할게요"를 누르면 포털이 같은 헤더로
+    X-ZT-Authz: user_reported_not_me를 붙인다. 이건 본인이 직접 확인한 사건이라 세지 않고 한 번에 바로 엔진에
+    user_reported_suspicious로 알린다(Microsoft Entra: 의심 활동을 신고한 사용자는 '높은 사용자 위험' -> 차단/비밀번호 변경).
 """
 import json
 import os
@@ -31,12 +35,17 @@ import zt_waf
 AUTHZ_LOG = os.environ.get("ZT_AUTHZ_LOG", "/var/log/modsec/zt_authz_app.log")
 THRESHOLD = int(os.environ.get("ZT_AUTHZ_THRESHOLD", "3"))
 WINDOW_SECONDS = int(os.environ.get("ZT_AUTHZ_WINDOW_SECONDS", "600"))
-KNOWN_REASONS = {"owner_mismatch"}
+# 사유 -> (엔진 신호, 알릴 횟수). 신원+사유별로 따로 센다.
+REASONS = {
+    "owner_mismatch": ("resource_owner_mismatch", THRESHOLD),     # 주소 실수일 수 있어 10분에 3번
+    "user_reported_not_me": ("user_reported_suspicious", 1),      # 본인이 직접 신고 -> 바로
+}
+KNOWN_REASONS = set(REASONS)
 _EMAIL_RE = re.compile(r"^[^@\s\"]{1,64}@[A-Za-z0-9.-]{1,190}$")
 _HOST_RE = re.compile(r"^[A-Za-z0-9.-]{1,253}(:\d{1,5})?$")
 
-_hits = defaultdict(deque)          # identity -> 최근 거부 시각들
-_reported_at = {}                   # identity -> 마지막으로 엔진에 알린 시각
+_hits = defaultdict(deque)          # (identity, reason) -> 최근 시각들
+_reported_at = {}                   # (identity, reason) -> 마지막으로 엔진에 알린 시각
 _lock = threading.Lock()
 
 
@@ -58,16 +67,17 @@ def parse_line(line):
 
 
 def record(event, now=None):
-    """거부 1건을 세고, 이번에 엔진에 알려야 하면 True. 알린 뒤 같은 창(10분) 안에서는 다시 알리지 않는다."""
+    """1건을 세고, 이번에 엔진에 알려야 하면 True. 알린 뒤 같은 창(10분) 안에서는 다시 알리지 않는다."""
     now = now or time.time()
-    who = event["identity"]
+    who = (event["identity"], event["reason"])
+    threshold = REASONS[event["reason"]][1]
     with _lock:
         q = _hits[who]
         q.append(now)
         while q and now - q[0] > WINDOW_SECONDS:
             q.popleft()
         count = len(q)
-        if count < THRESHOLD or now - _reported_at.get(who, 0) < WINDOW_SECONDS:
+        if count < threshold or now - _reported_at.get(who, 0) < WINDOW_SECONDS:
             return False, count
         _reported_at[who] = now
         if len(_hits) > 5000:      # 오래된 사람 정리(메모리 상한)
@@ -78,8 +88,9 @@ def record(event, now=None):
 
 def report(event, count):
     """엔진에 알린다(해제 불가 위험을 거는 판단은 엔진이 한다). 성공하면 True."""
+    signal = REASONS[event["reason"]][0]
     body = {"identity": event["identity"], "session_id": str(uuid.uuid4()), "source": "app_authz",
-            "persist_risk": True, "resource_owner_mismatch": True,
+            "persist_risk": True, signal: True,
             "request_timestamp": datetime.now(timezone.utc).isoformat(),
             "resource_path": zt_risk.resource_path_for(event["host"], event["path"])}
     try:
@@ -90,13 +101,17 @@ def report(event, count):
         print(f"[AUTHZ_REPORT_FAILED] identity={event['identity']} error={type(e).__name__}", flush=True)
         ok = False
     zt_risk.invalidate_identity(event["identity"])     # 다음 요청은 반드시 엔진에 다시 묻게
-    print(f"[IDOR_REPORTED] identity={event['identity']} count={count} window={WINDOW_SECONDS}s "
-          f"host={event['host']} path={event['path']} ok={ok}", flush=True)
-    zt_risk.log_event("idor_reported", service="gate", identity=event["identity"], count=count,
-                      window_seconds=WINDOW_SECONDS, host=event["host"], path=event["path"], reported=ok)
+    if event["reason"] == "owner_mismatch":
+        print(f"[IDOR_REPORTED] identity={event['identity']} count={count} window={WINDOW_SECONDS}s "
+              f"host={event['host']} path={event['path']} ok={ok}", flush=True)
+        zt_risk.log_event("idor_reported", service="gate", identity=event["identity"], count=count,
+                          window_seconds=WINDOW_SECONDS, host=event["host"], path=event["path"], reported=ok)
+    else:
+        print(f"[USER_REPORT_ESCALATED] identity={event['identity']} ok={ok}", flush=True)
+        zt_risk.log_event("user_report_escalated", service="gate", identity=event["identity"], signal=signal, reported=ok)
     if not ok:
         with _lock:   # 실패했으면 다음 거부 때 바로 다시 알리도록
-            _reported_at.pop(event["identity"], None)
+            _reported_at.pop((event["identity"], event["reason"]), None)
     return ok
 
 
@@ -105,8 +120,9 @@ def handle_line(line, now=None):
     if not event:
         return
     should, count = record(event, now)
-    zt_risk.log_event("authz_denied", service="gate", identity=event["identity"], reason=event["reason"],
-                      host=event["host"], path=event["path"], count=count)
+    if event["reason"] == "owner_mismatch":
+        zt_risk.log_event("authz_denied", service="gate", identity=event["identity"], reason=event["reason"],
+                          host=event["host"], path=event["path"], count=count)
     if should:
         report(event, count)
 

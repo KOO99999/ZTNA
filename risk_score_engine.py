@@ -72,6 +72,11 @@ RISK_MATRIX = {
     #   진짜 주인(내부자)이 한 행동일 수 있어 MFA/비밀번호 변경으로는 의심이 풀리지 않는다 -> 관리자 해제(Entra의 '관리자 조사' 경로).
     #   배점: 위협 IP(86)와 웹 공격(94) 사이 - 공격 의도는 분명하지만 자료 유출은 앱이 막은 상태.
     "resource_owner_mismatch": {"risk": 90, "group": "security", "resettable": False},
+    # [본인 아님 신고] 직원이 포털 '내 보안 기록'에서 확인 필요 활동을 "본인 아님"으로 신고(zt_authz.py가 바로 알림).
+    #   Microsoft Entra는 의심 활동을 신고한 사용자를 '높은 사용자 위험'으로 올리고, 위험 정책으로 차단하거나 비밀번호를 바꾸게 한다.
+    #   계정 주인이 직접 "내가 아니다"라고 확인한 것이라 의심이 아니라 사고로 보고, 모든 등급(내부 60+경계 20=80 초과)에서 차단한다.
+    #   MFA로 풀면 공격자가 MFA까지 가진 경우를 못 막으므로 관리자 해제(비밀번호 변경 안내 후). 배점은 IDOR와 같은 90.
+    "user_reported_suspicious": {"risk": 90, "group": "security", "resettable": False},
     # [삭제] device_fingerprint_mismatch(76, 해제 불가): 처음 계획은 "서명된 기기 쿠키/브라우저 지문"을 직접 만드는 것이었으나
     #   WARP 기기 검사(device_unmanaged/device_owner_mismatch/device_posture_failed)로 대체했다. 이 신호를 보내는 곳이
     #   한 군데도 없어 판단에 쓰인 적이 없었고, 이름만 남아 있으면 "기기 지문을 구현했다"로 오해되므로 지웠다.

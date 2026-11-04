@@ -411,6 +411,8 @@ resource "aws_lambda_function" "pdp_engine" {
       GEO_VELOCITY_MODE   = var.geo_velocity_mode
       # [개인별 기준] personal(지난 30일 이력과 비교, 기본) / fixed(전 직원 공통 규칙 22~06시·한국 외, 비교 실험용)
       BASELINE_MODE = var.baseline_mode
+      # [관찰 모드] enforce(판정대로 막음) / observe(계산·기록만 하고 통과, 실측 3방식 비교용)
+      DECISION_MODE = var.decision_mode
     }
   }
 }

@@ -1458,3 +1458,55 @@ mock_user_risk.query.return_value = {"Items": []}
 t("[장애 정책] 기록표: 최고기밀 차단, 새 로그인 차단, 기밀 10분/내부 15분",
   engine.FAIL_POLICY["top_secret"] == "fail_closed" and engine.FAIL_POLICY["new_login"] == "fail_closed"
   and "600" in engine.FAIL_POLICY["confidential"] and "900" in engine.FAIL_POLICY["internal"])
+
+# ======================================================================
+# [관찰 모드] DECISION_MODE=observe: 계산·기록은 같고 응답만 통과, 딱지 저장·세션 끊기 없음
+# ======================================================================
+
+import io as _io_obs, contextlib as _cl_obs
+engine.DECISION_MODE = "observe"
+mock_user_risk.reset_mock(); mock_user_risk.query.return_value = {"Items": []}
+mock_table.reset_mock()
+_buf = _io_obs.StringIO()
+with _cl_obs.redirect_stdout(_buf):
+    r = json.loads(engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps({
+        "session_id": "obs1", "identity": "kim@xmcda.store", "source": "app_authz", "persist_risk": True,
+        "waf_sqli": True, "resource_path": "xmcda.store/"})}, None)["body"])
+t("[관찰] 웹 공격 신호가 있어도 응답은 통과, 원래 판정은 would_*로(차단)",
+  r["allow"] is True and r["action"] == "allow" and r["mode"] == "observe" and r["would_allow"] is False
+  and r["would_action"] == "block_until_mfa", r)
+t("[관찰] 해제 불가 위험(user_risk)은 저장하지 않음(enforce로 돌아갔을 때 관찰 중 딱지로 막히지 않게)",
+  not mock_user_risk.update_item.called and not mock_user_risk.put_item.called)
+t("[관찰] 막혔어야 할 판정은 캐시하지 않음(다음 요청도 다시 판단·기록)", r["cache_ttl_seconds"] == 0, r)
+_item = mock_table.put_item.call_args.kwargs["Item"] if mock_table.put_item.called else {}
+t("[관찰] 판정 기록(DynamoDB)에 원래 판정(would_action) 남김", _item.get("would_action") == "block_until_mfa" and _item.get("allow") is True, _item)
+_ev = [json.loads(l[len("ZT_EVENT "):]) for l in _buf.getvalue().splitlines() if l.startswith("ZT_EVENT ")]
+_d = [e for e in _ev if e.get("event") == "decision"]
+t("[관찰] 관제 기록(decision)에 mode/would_allow/would_action/엔진 처리 시간(duration_ms)",
+  _d and _d[-1].get("mode") == "observe" and _d[-1].get("would_action") == "block_until_mfa" and _d[-1].get("would_allow") is False
+  and isinstance(_d[-1].get("duration_ms"), (int, float)), _d)
+_old_dev = engine.DEVICE_SIGNAL_MODE
+_old_cf = (engine.CF_ACCOUNT_ID, engine.CF_DEVICE_API_TOKEN, engine.CF_ACCESS_REVOKE_TOKEN)
+engine.DEVICE_SIGNAL_MODE = "enforce"
+engine.CF_ACCOUNT_ID, engine.CF_DEVICE_API_TOKEN, engine.CF_ACCESS_REVOKE_TOKEN = "acct", "tok", "revoke-tok"
+summary, calls, ups, logs = sweep([rec()], {D1: FW_OFF})
+t("[관찰] 기기 순찰: 나쁜 기기를 찾아도 세션을 끊지 않고 '끊었을 것'만 기록",
+  not revokes(calls) and logs and logs[0]["action"] == "device_session_revoke_report_only"
+  and summary.get("decision_mode") == "observe", (calls, logs, summary))
+engine.DECISION_MODE = "enforce"
+summary, calls, ups, logs = sweep([rec()], {D1: FW_OFF})
+t("[관찰] enforce로 돌아오면 순찰이 다시 세션을 끊음", len(revokes(calls)) == 1, calls)
+engine.DEVICE_SIGNAL_MODE = _old_dev
+engine.CF_ACCOUNT_ID, engine.CF_DEVICE_API_TOKEN, engine.CF_ACCESS_REVOKE_TOKEN = _old_cf
+mock_table.reset_mock()
+with _cl_obs.redirect_stdout(_io_obs.StringIO()):
+    r = json.loads(engine.lambda_handler({"headers": TEST_HEADERS, "body": json.dumps({
+        "session_id": "obs2", "identity": "kim@xmcda.store", "source": "B", "waf_sqli": True,
+        "resource_path": "xmcda.store/"})}, None)["body"])
+t("[관찰] enforce(기본): would_*는 실제 판정과 같음", r["allow"] is False and r["mode"] == "enforce"
+  and r["would_action"] == r["action"], r)
+t("[관찰] 모르는 DECISION_MODE 값은 enforce로(안전한 쪽)", 'DECISION_MODE = "enforce"     # 모르는 값이면' in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "risk_score_engine.py"), encoding="utf-8").read())
+_mt = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.tf"), encoding="utf-8").read()
+_vt = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "variables.tf"), encoding="utf-8").read()
+t("[관찰] Terraform: decision_mode 변수(enforce/observe, 기본 enforce) -> Lambda DECISION_MODE",
+  "DECISION_MODE = var.decision_mode" in _mt and 'variable "decision_mode"' in _vt and 'contains(["enforce", "observe"], var.decision_mode)' in _vt)

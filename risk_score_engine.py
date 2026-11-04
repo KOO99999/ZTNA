@@ -171,6 +171,19 @@ BASELINE_HOUR_WINDOW = 1          # 지금 시각 앞뒤 몇 시간을 "같은 �
 BASELINE_MIN_HOUR_SHARE = 0.05
 BASELINE_MIN_COUNTRY_SHARE = 0.05
 BASELINE_MAX_ITEMS = 2000         # 한 사람 이력 조회 상한(30일치)
+# ---------------------------------------------------------------------------
+# [관찰 모드] DECISION_MODE: enforce(판정대로 막음, 기본) / observe(점수·판정은 똑같이 계산해 기록만 하고 통과시킴)
+#   실측의 3방식 비교(기본 / WAF만 / 우리 방식)에서 "엔진이 없었다면"을 같은 공격으로 재기 위한 스위치.
+#   Microsoft Entra 조건부 액세스의 '보고 전용(Report-only)' 모드, Cloudflare WAF의 'Log' 동작과 같은 방식이다.
+#   observe에서는: 응답은 통과, 기록에는 would_allow/would_action(엔진이 원래 내렸을 판정), 해제 불가 위험(user_risk)은
+#   저장하지 않음(다시 enforce로 바꿨을 때 관찰 중 생긴 딱지로 막히지 않게), 기기 순찰도 세션을 끊지 않음.
+#   이력/마지막 위치/캐시는 "원래 판정" 기준으로 둔다(관찰 중에 막혔어야 할 접속이 개인 기준에 섞이지 않게,
+#   막혔어야 할 결과는 캐시하지 않아 다음 요청도 매번 다시 판단·기록되게).
+# ---------------------------------------------------------------------------
+DECISION_MODE = os.environ.get("DECISION_MODE", "enforce").strip().lower()
+if DECISION_MODE not in ("enforce", "observe"):
+    DECISION_MODE = "enforce"     # 모르는 값이면 안전한 쪽(차단 모드)
+
 HISTORY_RECORD_SOURCES = ("A", "login")   # 실제 이력으로 남기는 판단: 정문(Access)과 로그인 서버. 세션 중 재확인(B)은 제외
 HISTORY_TTL_SECONDS = (BASELINE_WINDOW_DAYS + 1) * 86400
 _KST = timezone(timedelta(hours=9))
@@ -548,7 +561,8 @@ def sweep_signal_for(device_id):
 def device_sweep(now=None):
     """기기 순찰 1회. 확인한 기기 수/끊은 사용자 등을 돌려준다(로그·테스트용)."""
     now = int(now or time.time())
-    summary = {"active": 0, "checked": 0, "bad": 0, "revoked": [], "unknown": 0, "mode": DEVICE_SIGNAL_MODE}
+    summary = {"active": 0, "checked": 0, "bad": 0, "revoked": [], "unknown": 0, "mode": DEVICE_SIGNAL_MODE,
+               "decision_mode": DECISION_MODE}
     if DEVICE_SIGNAL_MODE == "off" or not (CF_ACCOUNT_ID and CF_DEVICE_API_TOKEN):
         return summary
     try:
@@ -581,7 +595,7 @@ def device_sweep(now=None):
             summary["bad"] += 1
             # 정상 -> 나쁨으로 바뀌었거나, 지난번 끊기에 실패했으면 이번에 끊는다(나쁜 동안 반복해서 끊지 않음)
             if not revoked:
-                if DEVICE_SIGNAL_MODE == "enforce":
+                if DEVICE_SIGNAL_MODE == "enforce" and DECISION_MODE == "enforce":
                     revoked = revoke_access_sessions(email)
                     action = "device_session_revoked" if revoked else "device_session_revoke_failed"
                     if revoked:
@@ -1011,6 +1025,7 @@ def lambda_handler(event, context):
     # (판정 결과는 아래에서 DynamoDB와 [SOC_ALERT] 한 줄 로그로 남기며, 거기에는 비밀키가 없다.)
 
     # API Gateway(HTTP API v2)는 헤더 키를 소문자로 정규화해서 넘겨줌
+    started = time.time()          # 엔진 처리 시간(실측 지표: 판단 단계가 더하는 지연의 엔진 몫)
     headers = event.get("headers", {}) or {}
     provided_secret = headers.get("x-evaluate-secret")
     if not SHARED_SECRET or provided_secret != SHARED_SECRET:
@@ -1237,7 +1252,13 @@ def lambda_handler(event, context):
         mfa_expires_at = None
         reasons.append("session_reauth_required")
 
-    cache_ttl_seconds = compute_cache_ttl(resource_tier, allow_access, current_time, mfa_expires_at,
+    # [관찰 모드] 원래 판정은 would_*로 남기고 응답만 통과로 바꾼다. 캐시/이력/위치/user_risk는 원래 판정 기준.
+    would_allow, would_action = allow_access, action
+    if DECISION_MODE == "observe":
+        allow_access, action = True, "allow"
+        reasons.append(f"observe_mode(would:{would_action})")
+
+    cache_ttl_seconds = compute_cache_ttl(resource_tier, would_allow, current_time, mfa_expires_at,
                                           hourly=baseline.get("mode") == "personal")
 
     # 마지막 판단 기록: Access가 막으면 사용자는 로그인 서버의 /stepup으로 오는데, 그 페이지는 왜 막혔는지 모른다.
@@ -1247,15 +1268,15 @@ def lambda_handler(event, context):
         save_decision(risk_identity, resource_path, action, device_reasons, current_time)
 
     # 개인별 기준 이력: 정문(Access)/로그인 서버 판단이 통과한 실제 접속만 남긴다(세션 중 재확인 B와 막힌 시도는 제외)
-    if allow_access and has_identity and body.get("source", "A") in HISTORY_RECORD_SOURCES and BASELINE_MODE == "personal":
+    if would_allow and has_identity and body.get("source", "A") in HISTORY_RECORD_SOURCES and BASELINE_MODE == "personal":
         record_login_history(risk_identity, current_time, geo_country)
 
     # 이동 속도 기준점: 통과된 판단의 위치만 "마지막 위치"로 남긴다(막힌 시도의 위치는 남기지 않음 - 위 geo_velocity 설명)
-    if allow_access and has_identity and ip_geo:
+    if would_allow and has_identity and ip_geo:
         save_last_location(risk_identity, ip_geo, normalize_public_ip(body.get("client_ip")), current_time)
 
     # 새로 감지된 해제 불가 신호는 (인증된 신원이고 호출자가 허용한 경우에만) User Risk에 남긴다.
-    if has_identity and detected_sticky and body.get("persist_risk") is True:
+    if has_identity and detected_sticky and body.get("persist_risk") is True and DECISION_MODE == "enforce":
         persist_user_risk(risk_identity, detected_sticky, body.get("source", "A"), current_time)
 
     # 접속 나라(CF 국가 코드)는 직원 포털의 "내 최근 보안 활동" 카드에 쓴다. 형식이 이상하면 저장하지 않는다.
@@ -1277,6 +1298,8 @@ def lambda_handler(event, context):
         }
         if _COUNTRY_RE.match(log_country):
             item['country'] = log_country
+        if DECISION_MODE == "observe":
+            item['would_action'] = would_action     # 관찰 모드: 엔진이 원래 내렸을 판정(실측 비교용)
         table.put_item(Item=item)
     except Exception as e:
         print("DynamoDB logging failed:", str(e))
@@ -1285,7 +1308,9 @@ def lambda_handler(event, context):
               signals=penalized_signals, reasons=reasons, resource=resource_path or "unknown", tier=resource_tier,
               threshold=resource_threshold, source=body.get("source", "A"), baseline=baseline.get("mode"),
               baseline_logins=baseline.get("logins"), hour_share=baseline.get("hour_share"), country_share=baseline.get("country_share"),
-              client_ip=normalize_public_ip(body.get("client_ip")), country=body.get("geo_country"), session_id=session_id)
+              client_ip=normalize_public_ip(body.get("client_ip")), country=body.get("geo_country"), session_id=session_id,
+              mode=DECISION_MODE, would_allow=would_allow, would_action=would_action,
+              duration_ms=round((time.time() - started) * 1000, 1))
 
     return {
         "statusCode": 200,
@@ -1301,6 +1326,9 @@ def lambda_handler(event, context):
             "resource_path": resource_path,
             "resource_threshold": resource_threshold,
             "resource_tier": resource_tier,
-            "cache_ttl_seconds": cache_ttl_seconds
+            "cache_ttl_seconds": cache_ttl_seconds,
+            "mode": DECISION_MODE,
+            "would_allow": would_allow,
+            "would_action": would_action
         })
     }

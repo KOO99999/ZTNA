@@ -107,6 +107,7 @@ def _call_pdp(identity, country, resource_path, client_ip=None, session_country=
     if not PDP_EVALUATE_URL or not EVALUATE_SHARED_SECRET:
         print("[B_PDP_CONFIG_MISSING] PDP_EVALUATE_URL/EVALUATE_SHARED_SECRET 환경변수 없음", flush=True)
         return {"allow": False, "action": "pdp_unavailable", "error": True}
+    started = time.time()
     try:
         resp = requests.post(
             PDP_EVALUATE_URL,
@@ -128,6 +129,10 @@ def _call_pdp(identity, country, resource_path, client_ip=None, session_country=
             },
             timeout=PDP_TIMEOUT_SECONDS,
         )
+        # [실측 지표] 엔진 왕복 시간(이 웹 서버 -> API Gateway -> Lambda -> 응답). 캐시에 있으면 엔진을 부르지 않으므로
+        #   요청마다 더해지는 지연은 "캐시 안 맞은 요청의 이 값"이다. 판정 내용은 엔진 기록(decision)에 있으므로 여기는 시간만 남긴다.
+        log_event("pdp_call", identity=identity, resource=resource_path, status=resp.status_code,
+                  ms=round((time.time() - started) * 1000, 1))
         if resp.status_code != 200:
             print(f"[B_PDP_HTTP_ERROR] status={resp.status_code}", flush=True)
             return {"allow": False, "action": "pdp_unavailable", "error": True}
@@ -143,6 +148,8 @@ def _call_pdp(identity, country, resource_path, client_ip=None, session_country=
         }
     except Exception as e:
         print(f"[B_PDP_CALL_FAILED] {e}", flush=True)
+        log_event("pdp_call", identity=identity, resource=resource_path, status="error",
+                  ms=round((time.time() - started) * 1000, 1))
         return {"allow": False, "action": "pdp_unavailable", "error": True}
 
 

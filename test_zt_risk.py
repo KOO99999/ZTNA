@@ -208,7 +208,7 @@ with patch.object(zr.time, "time", return_value=at(14)):
     check("[WAF] invalidate_identity: 대소문자 무관하게 그 사람 캐시 삭제", not zr._cache, zr._cache)
 
 # ---------- 장애 모드(엔진에 닿지 못할 때, 세션 중 재확인만) ----------
-import io as _io, contextlib as _cl
+import io as _io, contextlib as _cl, json as _json
 def outage_case(tier, last_allow_min_ago, outage_min, resource="dev.xmcda.store/"):
     """정상 응답으로 등급과 마지막 통과를 배운 뒤, 장애를 만들어 판단 결과를 본다."""
     t0 = at(14)
@@ -281,6 +281,20 @@ with patch.object(zr.time, "time", return_value=at(14)):
     r2 = zr.check_risk("hana@test.com", "KR", "dev.xmcda.store/")
 raise_error = False
 check("[장애] 장애 중 통과는 캐시하지 않음(매번 엔진에 다시 시도)", len(calls) == 3 and r2["from_cache"] is False, len(calls))
+
+# ---------- [실측] 엔진 왕복 시간 기록(pdp_call) ----------
+import io as _io, contextlib as _cl, json as _json
+for _err, _label in ((False, "성공"), (True, "실패")):
+    reset(error=_err)
+    _b = _io.StringIO()
+    with _cl.redirect_stdout(_b):
+        zr.check_risk("hana@test.com", "KR", "dev.xmcda.store/")
+        zr.check_risk("hana@test.com", "KR", "dev.xmcda.store/")   # 성공이면 두 번째는 캐시(엔진 안 부름)
+    _ev = [_json.loads(l[len("ZT_EVENT "):]) for l in _b.getvalue().splitlines() if l.startswith("ZT_EVENT ")]
+    _pc = [e for e in _ev if e["event"] == "pdp_call"]
+    check(f"[실측] 엔진 호출 {_label}: pdp_call(ms, 상태) 기록, 캐시로 답한 요청은 기록 없음, 비밀키 없음",
+          len(_pc) == (1 if not _err else 2) and all(isinstance(e.get("ms"), (int, float)) for e in _pc)
+          and _pc[0]["status"] == (200 if not _err else "error") and "test-secret-local-only" not in _b.getvalue(), _pc)
 
 print()
 print("실패 수:", fails)

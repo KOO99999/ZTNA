@@ -164,13 +164,16 @@ mt = read("main.tf")
 ok("Kibana를 켜면 로그인 서버가 Kibana를 알게 함: 복귀 주소/로그아웃 목록 + 관리자만(소속 안내 화면)",
    'var.enable_elk ? ["kibana.${var.domain_name}"] : []' in mt and 'var.enable_elk ? { "kibana.${var.domain_name}" = ["admin"] } : {}' in mt)
 
-# ---------- 5. Kibana 저장 객체(표 7개) ----------
+# ---------- 5. Kibana 저장 객체(표 9개) ----------
 objs = [json.loads(l) for l in read("kibana/zt_saved_searches.ndjson").splitlines() if l.strip()]
 searches = [o for o in objs if o["type"] == "search"]
 dv = [o for o in objs if o["type"] == "index-pattern"]
-ok("Kibana: 데이터 보기 1개(zt-logs-*, 시간 필드 @timestamp) + 표(저장된 검색) 7개(⑦ IDOR)",
-   len(dv) == 1 and dv[0]["attributes"]["title"] == "zt-logs-*" and dv[0]["attributes"]["timeFieldName"] == "@timestamp" and len(searches) == 7
-   and len({o["id"] for o in searches}) == 7)
+ok("Kibana: 데이터 보기 1개(zt-logs-*, 시간 필드 @timestamp) + 표(저장된 검색) 9개(⑦ IDOR, ⑧ 실측 결과, ⑨ 엔진 응답 시간)",
+   len(dv) == 1 and dv[0]["attributes"]["title"] == "zt-logs-*" and dv[0]["attributes"]["timeFieldName"] == "@timestamp" and len(searches) == 9
+   and len({o["id"] for o in searches}) == 9)
+m8 = next((o for o in searches if o["id"] == "zt-search-measure"), None)
+ok("⑧ 실측 결과: 관찰 모드 칸(zt.mode, zt.would_action)과 엔진 처리 시간(zt.duration_ms)을 보여 줌",
+   m8 is not None and all(c in m8["attributes"]["columns"] for c in ("zt.mode", "zt.would_action", "zt.duration_ms")))
 ok("표는 모두 같은 데이터 보기를 참조하고, 최신순·KQL 검색", all(o["references"] == [{"name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern", "id": dv[0]["id"]}]
    and o["attributes"]["sort"] == [["@timestamp", "desc"]] and json.loads(o["attributes"]["kibanaSavedObjectMeta"]["searchSourceJSON"])["query"]["language"] == "kuery"
    for o in searches))

@@ -315,7 +315,7 @@ rc=$?
 set -e
 [ "$rc" -eq 0 ] || echo "elastalert setup FAILED rc=$rc (Kibana는 계속 사용 가능, Discord 알림만 없음)"
 
-# ---------- Kibana 저장 객체 가져오기: 데이터 보기 + 표(저장된 검색) 6개 + (있으면) 대시보드 ----------
+# ---------- Kibana 저장 객체 가져오기: 데이터 보기 + 표(저장된 검색) 9개 + (있으면) 대시보드 ----------
 #   매일 destroy해도 다시 생기게 프로젝트의 kibana/*.ndjson을 S3에서 받아 Kibana 가져오기 API로 불러온다(같은 ID면 덮어씀).
 for i in $(seq 1 60); do curl -s -u "elastic:$(pw elastic)" http://127.0.0.1:5601/api/status | grep -q '"level":"available"' && break; sleep 5; done
 # 저장 객체 파일 버전(파일이 바뀌면 이 줄이 바뀌어 관제 서버가 새로 만들어진다): ${kibana_version}

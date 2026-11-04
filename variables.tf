@@ -245,3 +245,17 @@ variable "baseline_mode" {
     error_message = "baseline_mode는 personal 또는 fixed여야 합니다."
   }
 }
+
+# [관찰 모드] 위험도 엔진의 판정 적용 방식(실측 3방식 비교용).
+#   enforce: 판정대로 통과/추가 인증/차단(기본)
+#   observe: 점수·판정은 똑같이 계산해 기록(would_action)만 하고 모두 통과. 해제 불가 위험 저장·기기 세션 끊기도 하지 않음
+#   (Microsoft Entra 조건부 액세스의 '보고 전용' 모드와 같은 개념). 실측이 끝나면 반드시 enforce로 되돌린다.
+variable "decision_mode" {
+  type        = string
+  default     = "enforce"
+  description = "위험도 엔진 판정 적용 방식(enforce / observe)"
+  validation {
+    condition     = contains(["enforce", "observe"], var.decision_mode)
+    error_message = "decision_mode는 enforce 또는 observe여야 합니다."
+  }
+}

@@ -35,3 +35,5 @@ discord_webhook_url = "https://discord.com/api/webhooks/REPLACE_ME"
 kibana_password     = ""
 # [개인별 기준] personal(사람별 지난 30일 이력과 비교, 기본) / fixed(전 직원 공통 규칙, 비교 실험용)
 baseline_mode = "personal"
+# 관찰 모드(실측 3방식 비교용): enforce(기본) / observe(기록만 하고 통과). 실측이 끝나면 enforce로 되돌릴 것
+decision_mode = "enforce"

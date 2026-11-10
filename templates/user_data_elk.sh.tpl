@@ -119,6 +119,8 @@ filter {
     grok { match => { "message" => "ZT_EVENT %%{GREEDYDATA:[@metadata][zt_json]}" } }
     json { source => "[@metadata][zt_json]" target => "zt" }
     date { match => ["[zt][ts]", "UNIX"] }
+    # 알림(Discord)에 보여줄 한국 시각. @timestamp는 UTC라 알림에 9시간 늦은 시각으로 보였다(영구 반영)
+    ruby { code => "t = event.get('@timestamp'); event.set('[zt][kst_time]', (t.time.utc + 9 * 3600).strftime('%Y-%m-%d %H:%M:%S KST')) if t" }
     mutate { add_tag => ["zt_event"] }
     if [zt][client_ip] {
       # Logstash에 들어 있는 GeoLite2(Elastic이 자동 갱신)로 지도용 위치를 붙인다
@@ -214,7 +216,7 @@ alert_subject_args: ["zt.event", "zt.identity"]
 alert_text_type: alert_text_only
 alert_missing_value: "-"
 alert_text: "사용자: {0}\n판단/행동: {1}\n점수: {2}\n신호: {3}\n자원: {4}\n요청 경로: {8}\n횟수(10분): {9}\n나라: {10}\n접속 IP: {5}\n서비스: {6}\n시각: {7}\n대응 절차: docs/runbook.md"
-alert_text_args: ["zt.identity", "zt.action", "zt.score", "zt.signals", "zt.resource", "zt.client_ip", "zt.service", "@timestamp", "zt.path", "zt.count", "zt.country"]
+alert_text_args: ["zt.identity", "zt.action", "zt.score", "zt.signals", "zt.resource", "zt.client_ip", "zt.service", "zt.kst_time", "zt.path", "zt.count", "zt.country"]
 EARULE
 # 규칙 2: 같은 사람이 10분에 5번 이상 막힘(반복 시도)
 cat > /opt/elastalert/rules/zt_repeated_denials.yaml << EARULE
@@ -289,7 +291,7 @@ alert_subject_args: ["zt.identity"]
 alert_text_type: alert_text_only
 alert_missing_value: "-"
 alert_text: "직원이 본인이 아닌 접속이라고 신고했습니다. 계정은 엔진이 바로 차단합니다(관리자 해제).\n사용자: {0}\n신고한 접속: {1} / 나라 {2} / 결과 {3}\n신고한 곳 IP: {4}\n시각: {5}\n대응 절차: docs/runbook.md"
-alert_text_args: ["zt.identity", "zt.app", "zt.country", "zt.action", "zt.client_ip", "@timestamp"]
+alert_text_args: ["zt.identity", "zt.app", "zt.country", "zt.action", "zt.client_ip", "zt.kst_time"]
 EARULE
 chown -R elastalert:elastalert /opt/elastalert && chmod 600 /opt/elastalert/config.yaml /opt/elastalert/rules/*.yaml
 sudo -u elastalert /opt/elastalert/venv/bin/elastalert-create-index --config /opt/elastalert/config.yaml || true

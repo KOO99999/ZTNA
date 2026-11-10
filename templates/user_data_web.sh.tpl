@@ -184,7 +184,7 @@ map $upstream_http_x_zt_authz $zt_authz_event {
     ""       0;
     default  1;
 }
-log_format zt_authz escape=json '{"time":"$time_iso8601","identity":"$http_x_zt_identity","host":"$host","uri":"$request_uri","authz":"$upstream_http_x_zt_authz","status":"$status"}';
+log_format zt_authz escape=json '{"time":"$time_iso8601","identity":"$http_x_zt_identity","host":"$host","uri":"$request_uri","authz":"$upstream_http_x_zt_authz","status":"$status","country":"$http_cf_ipcountry","client_ip":"$http_cf_connecting_ip"}';
 
 map $request_uri $zt_unavailable_target {
     ~^/api/  @zt_unavailable_api;

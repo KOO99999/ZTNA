@@ -371,6 +371,46 @@ def lookup_device_owner(device_id):
         return None
 
 
+# [device_unmanaged 간헐 오탐 보완] WARP가 켜져 있어도 Access 신원 정보에 기기 ID가 가끔 빠져 들어온다(재연결/갱신 순간).
+# 그 한 번 때문에 정상 직원이 기기 미등록으로 걸리지 않게, 같은 사람이 최근 N초 안에 기기 ID가 있는 판단을 받은 기록(device_state)이
+# 있으면 그 기기로 본다. 기기 순찰(sweep) 결과가 나쁘면 그대로 반영하고, 기록이 없거나 오래됐으면 지금처럼 device_unmanaged.
+DEVICE_RECENT_GRACE_SECONDS = int(os.environ.get("DEVICE_RECENT_GRACE_SECONDS", "300"))
+
+
+def recent_device_for(identity, now):
+    """이 사람이 최근 DEVICE_RECENT_GRACE_SECONDS 안에 기기 ID로 판단받은 기기(없으면 None). 조회 실패는 None(오탐 쪽으로 안전하게)."""
+    identity = str(identity or "").strip().lower()
+    if not identity or identity == "unknown":
+        return None
+    items, kwargs = [], {"FilterExpression": "#i = :i AND #a > :n",
+                         "ExpressionAttributeNames": {"#i": "identity", "#a": "active_until"},
+                         "ExpressionAttributeValues": {":i": identity, ":n": now}}
+    try:
+        for _ in range(20):                       # 페이지 수 상한(무한 반복 방지)
+            resp = device_state_table.scan(**kwargs)
+            items.extend(resp.get("Items") or [])
+            last = resp.get("LastEvaluatedKey")
+            if not isinstance(last, dict) or not last:
+                break
+            kwargs["ExclusiveStartKey"] = last
+    except Exception as e:
+        print("[DEVICE_RECENT_LOOKUP_FAILED]", type(e).__name__)
+        return None
+    if not isinstance(items, list):
+        return None
+    best = None
+    for it in items or []:
+        try:
+            if str(it.get("identity", "")).strip().lower() != identity:
+                continue
+            last_seen = int(it.get("active_until", 0)) - DEVICE_ACTIVE_SECONDS      # active_until = 마지막 사용 + 순찰 유효시간
+            if 0 <= now - last_seen <= DEVICE_RECENT_GRACE_SECONDS and (best is None or last_seen > best[0]):
+                best = (last_seen, str(it.get("device_id", "")))
+        except (TypeError, ValueError):
+            continue
+    return best[1] if best and _DEVICE_ID_RE.match(best[1]) else None
+
+
 def derive_device_signals(body):
     """Worker가 넘긴 기기 정보로 device_unmanaged / device_posture_failed / device_owner_mismatch를 정한다.
     감지한 신호 이름 목록을 돌려준다. enforce 모드일 때만 body에 신호를 넣어 점수에 반영한다."""
@@ -378,7 +418,13 @@ def derive_device_signals(body):
         return []
     detected = []
     device_id = body.get("device_id")
-    if not device_id:
+    remembered = None if device_id else recent_device_for(body.get("identity"), int(time.time()))
+    if remembered:
+        # 이번 요청에는 기기 ID가 빠졌지만 방금 전 같은 사람의 기기 기록이 있다: 미등록으로 보지 않는다(순찰이 본 나쁜 상태는 반영)
+        swept = sweep_signal_for(remembered)
+        if swept:
+            detected.append(swept)
+    elif not device_id:
         detected.append("device_unmanaged")
     else:
         posture = body.get("device_posture") or []

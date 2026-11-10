@@ -18,6 +18,7 @@
     X-ZT-Authz: user_reported_not_me를 붙인다. 이건 본인이 직접 확인한 사건이라 세지 않고 한 번에 바로 엔진에
     user_reported_suspicious로 알린다(Microsoft Entra: 의심 활동을 신고한 사용자는 '높은 사용자 위험' -> 차단/비밀번호 변경).
 """
+import ipaddress
 import json
 import os
 import re
@@ -42,6 +43,7 @@ REASONS = {
 }
 KNOWN_REASONS = set(REASONS)
 _EMAIL_RE = re.compile(r"^[^@\s\"]{1,64}@[A-Za-z0-9.-]{1,190}$")
+_COUNTRY_RE = re.compile(r"^[A-Z][A-Z0-9]$")
 _HOST_RE = re.compile(r"^[A-Za-z0-9.-]{1,253}(:\d{1,5})?$")
 
 _hits = defaultdict(deque)          # (identity, reason) -> 최근 시각들
@@ -63,7 +65,16 @@ def parse_line(line):
     if not _EMAIL_RE.match(identity) or not _HOST_RE.match(host) or reason not in KNOWN_REASONS:
         return None
     uri = str(rec.get("uri", "/"))[:300]
-    return {"identity": identity, "host": host.split(":")[0], "path": uri.split("?")[0] or "/", "reason": reason}
+    event = {"identity": identity, "host": host.split(":")[0], "path": uri.split("?")[0] or "/", "reason": reason}
+    # 알림에 보여줄 접속 나라/IP(앞단 로그에서). 형식이 이상하면 넣지 않는다(빈 값으로 보임)
+    country = str(rec.get("country", "")).strip().upper()
+    if _COUNTRY_RE.match(country):
+        event["country"] = country
+    try:
+        event["client_ip"] = ipaddress.ip_address(str(rec.get("client_ip", "")).split(",")[0].strip()).compressed
+    except ValueError:
+        pass
+    return event
 
 
 def record(event, now=None):
@@ -97,18 +108,26 @@ def report(event, count):
         resp = requests.post(zt_risk.PDP_EVALUATE_URL, timeout=3, json=body,
                              headers={"Content-Type": "application/json", "X-Evaluate-Secret": zt_risk.EVALUATE_SHARED_SECRET})
         ok = resp.status_code == 200
+        try:
+            result = resp.json() if ok else {}
+        except Exception:
+            result = {}
     except Exception as e:
         print(f"[AUTHZ_REPORT_FAILED] identity={event['identity']} error={type(e).__name__}", flush=True)
         ok = False
+        result = {}
     zt_risk.invalidate_identity(event["identity"])     # 다음 요청은 반드시 엔진에 다시 묻게
+    result = result if isinstance(result, dict) else {}
+    extra = {"action": result.get("action") or "user_risk_set", "score": result.get("score"), "signals": [signal],
+             "country": event.get("country"), "client_ip": event.get("client_ip"), "resource": body["resource_path"]}
     if event["reason"] == "owner_mismatch":
         print(f"[IDOR_REPORTED] identity={event['identity']} count={count} window={WINDOW_SECONDS}s "
               f"host={event['host']} path={event['path']} ok={ok}", flush=True)
         zt_risk.log_event("idor_reported", service="gate", identity=event["identity"], count=count,
-                          window_seconds=WINDOW_SECONDS, host=event["host"], path=event["path"], reported=ok)
+                          window_seconds=WINDOW_SECONDS, host=event["host"], path=event["path"], reported=ok, **extra)
     else:
         print(f"[USER_REPORT_ESCALATED] identity={event['identity']} ok={ok}", flush=True)
-        zt_risk.log_event("user_report_escalated", service="gate", identity=event["identity"], signal=signal, reported=ok)
+        zt_risk.log_event("user_report_escalated", service="gate", identity=event["identity"], signal=signal, reported=ok, **extra)
     if not ok:
         with _lock:   # 실패했으면 다음 거부 때 바로 다시 알리도록
             _reported_at.pop((event["identity"], event["reason"]), None)

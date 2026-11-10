@@ -383,14 +383,30 @@ BRUTE_FORCE_THRESHOLD = 5
 BRUTE_FORCE_LOCKOUT_MINUTES = BRUTE_FORCE_WINDOW_MINUTES  # 안내 문구용
 
 
-def check_brute_force(email):
+# [신호 창] 잠금(위)은 5분이 지나면 풀리지만, "최근에 무차별 대입을 당했다"는 사실은 더 오래 본다.
+# 예전에는 엔진에 보내는 brute_force 신호도 잠금 여부(check_brute_force)를 그대로 썼다. 잠긴 동안은 로그인이 막혀 엔진까지
+# 오지 못하고, 5분이 지나 잠금이 풀리면 실패 기록도 창 밖으로 밀려나 신호가 꺼져서, 공격 직후 맞는 비밀번호로 들어와도
+# 신호가 한 번도 켜지지 않았다(구조적 버그). 그래서 잠금(5분)과 신호(60분)를 따로 센다.
+BRUTE_FORCE_SIGNAL_WINDOW_MINUTES = 60
+
+
+def recent_failure_count(email, minutes):
     from datetime import datetime, timedelta
-    window_start = datetime.utcnow() - timedelta(minutes=BRUTE_FORCE_WINDOW_MINUTES)
-    recent_failures = LoginFailure.query.filter(
+    window_start = datetime.utcnow() - timedelta(minutes=minutes)
+    return LoginFailure.query.filter(
         LoginFailure.email == email,
         LoginFailure.attempted_at >= window_start,
     ).count()
-    return recent_failures >= BRUTE_FORCE_THRESHOLD
+
+
+def check_brute_force(email):
+    """잠금 여부: 5분 안에 5번 실패. 로그인/TOTP/재인증 화면을 막는 데만 쓴다."""
+    return recent_failure_count(email, BRUTE_FORCE_WINDOW_MINUTES) >= BRUTE_FORCE_THRESHOLD
+
+
+def has_recent_brute_force(email):
+    """엔진에 보내는 brute_force 신호: 지금 잠겼거나, 최근 60분 안에 5번 이상 실패한 이력이 있음."""
+    return check_brute_force(email) or recent_failure_count(email, BRUTE_FORCE_SIGNAL_WINDOW_MINUTES) >= BRUTE_FORCE_THRESHOLD
 
 
 # [pwned_password] 유출 비밀번호 검사 (NIST SP 800-63B 5.1.1.2: 설정/변경 시 유출 목록 대조).
@@ -416,7 +432,7 @@ def pwned_count(pw):
 
 
 def finalize_login(email, client_id, redirect_uri, state, response_type, scope, totp_ok):
-    brute_force_flag = check_brute_force(email)
+    brute_force_flag = has_recent_brute_force(email)
     # [정리] 예전에는 여기서 night_access를 직접 계산(UTC 0~4시 = 한국 낮 9~14시라 반대로
     # 동작하는 오류가 있었음)했으나, 야간 판정은 Lambda가 요청 시각(KST 22~06시)으로
     # 전담하는 구조(PDP 일원화)이므로 로그인 서버는 자기만 아는 신호(brute_force)만 보낸다.
@@ -533,7 +549,7 @@ def authorize():
             # 페이지 접속만으로 위험도가 리셋되는 구멍이 있었음. brute_force는 "진짜 주인이
             # TOTP로 증명해야만 풀리는" 신호이므로, 이 경우엔 SSO 재사용을 막고
             # 비밀번호+TOTP를 처음부터 다시 입력하게 한다.
-            if check_brute_force(sso_email):
+            if has_recent_brute_force(sso_email):
                 clear_sso_session(sso_token)
                 response = make_response(render_credentials_form(
                     client_id, redirect_uri, state, response_type, scope,

@@ -30,6 +30,7 @@ TESTS = [
     ("IDOR 신호 (zt_authz.py)", "test_authz.py"),
     ("JWT 위변조 신호 (zt_jwt_signal.py)", "test_jwt_tamper.py"),
     ("네트워크 SG 구조 (network.tf)", "test_network_sg.py"),
+    ("후속 수정 4건 (KST·기기·brute_force·IDOR)", "test_followups.py"),
 ]
 
 env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")

@@ -85,6 +85,7 @@ with patch.object(aa, "Account", SimpleNamespace(query=FQ())), \
      patch.object(aa, "db", SimpleNamespace(session=FAKE_SESSION)), \
      patch.object(aa, "evaluate_login_risk", fake_risk), \
      patch.object(aa, "BackupCode", SimpleNamespace(query=SimpleNamespace(filter_by=lambda **k: SimpleNamespace(all=lambda: [])))), \
+     patch.object(aa, "has_recent_brute_force", lambda e: False), \
      patch.object(aa, "check_brute_force", lambda e: False):
     acct = ACC["u@xmcda.store"]
 

@@ -28,6 +28,8 @@ TESTS = [
     ("관제 콘솔 (elk.tf, ZT_EVENT)", "test_elk.py"),
     ("개인별 기준 (시드·이력)", "test_baseline.py"),
     ("IDOR 신호 (zt_authz.py)", "test_authz.py"),
+    ("JWT 위변조 신호 (zt_jwt_signal.py)", "test_jwt_tamper.py"),
+    ("네트워크 SG 구조 (network.tf)", "test_network_sg.py"),
 ]
 
 env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")

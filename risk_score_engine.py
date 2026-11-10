@@ -77,6 +77,11 @@ RISK_MATRIX = {
     #   계정 주인이 직접 "내가 아니다"라고 확인한 것이라 의심이 아니라 사고로 보고, 모든 등급(내부 60+경계 20=80 초과)에서 차단한다.
     #   MFA로 풀면 공격자가 MFA까지 가진 경우를 못 막으므로 관리자 해제(비밀번호 변경 안내 후). 배점은 IDOR와 같은 90.
     "user_reported_suspicious": {"risk": 90, "group": "security", "resettable": False},
+    # [JWT 위변조] 검증에 실패한 토큰(서명 위조/aud·iss 바꿔치기/alg 조작 등)이 한 IP에서 반복됨(zt_jwt_signal.py가 10분에 5번이면 알림).
+    #   auth_gate가 각 요청을 이미 403으로 막았으므로 접근은 열리지 않았다. 이 신호는 "지금 위조 시도 중인 곳이 있다"는 관제용 증거다.
+    #   위조 토큰의 email은 믿을 수 없어 계정에 걸지 않는다(남의 이메일로 위조해 그 사람을 잠그는 공격 방지) -> ip_based:
+    #   신원 없이 IP로만 기록하고 User Risk(sticky)에 저장하지 않는다. 배점은 IDOR/본인 아님 신고와 같은 90(공격 의도가 분명함).
+    "jwt_tamper": {"risk": 90, "group": "security", "resettable": False, "ip_based": True},
     # [삭제] device_fingerprint_mismatch(76, 해제 불가): 처음 계획은 "서명된 기기 쿠키/브라우저 지문"을 직접 만드는 것이었으나
     #   WARP 기기 검사(device_unmanaged/device_owner_mismatch/device_posture_failed)로 대체했다. 이 신호를 보내는 곳이
     #   한 군데도 없어 판단에 쓰인 적이 없었고, 이름만 남아 있으면 "기기 지문을 구현했다"로 오해되므로 지웠다.
@@ -975,7 +980,7 @@ FAIL_POLICY = {
 # ==========================================================================
 STICKY_SIGNALS = tuple(
     name for name, rule in RISK_MATRIX.items()
-    if rule["group"] == "security" and rule.get("resettable") is False
+    if rule["group"] == "security" and rule.get("resettable") is False and not rule.get("ip_based")
 )
 
 

@@ -84,6 +84,7 @@ locals {
     "web/zt_risk.py"   = "${path.module}/zt_risk.py"
     "web/zt_waf.py"    = "${path.module}/zt_waf.py"
     "web/zt_authz.py"  = "${path.module}/zt_authz.py"
+    "web/zt_jwt_signal.py" = "${path.module}/zt_jwt_signal.py"
     "web/zt_ui.py"     = "${path.module}/zt_ui.py"
     # 화면 글꼴(Pretendard, SIL OFL 1.1 - assets/Pretendard-OFL.txt). nginx가 /_zt/assets/로 직접 내려준다
     "web/assets/PretendardVariable.woff2" = "${path.module}/assets/PretendardVariable.woff2"

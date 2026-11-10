@@ -201,7 +201,7 @@ index: zt-logs-*
 filter:
   - query:
       query_string:
-        query: 'zt.event:(waf_reported OR idor_reported OR login_locked OR pwned_password_detected OR mtls_client_rejected OR risk_release) OR (zt.event:device_sweep AND zt.action:device_session_revoked) OR (zt.event:decision AND zt.signals:(threat_intel_match OR geo_velocity OR session_country_change OR waf_sqli OR waf_attack OR resource_owner_mismatch))'
+        query: 'zt.event:(waf_reported OR idor_reported OR jwt_tamper_reported OR login_locked OR pwned_password_detected OR mtls_client_rejected OR risk_release) OR (zt.event:device_sweep AND zt.action:device_session_revoked) OR (zt.event:decision AND zt.signals:(threat_intel_match OR geo_velocity OR session_country_change OR waf_sqli OR waf_attack OR resource_owner_mismatch))'
 query_key: zt.identity
 realert:
   minutes: 5

@@ -60,6 +60,8 @@ resource "aws_db_instance" "login_db" {
   vpc_security_group_ids = [aws_security_group.db_sg.id]
   parameter_group_name   = aws_db_parameter_group.login_db_params.name
   publicly_accessible    = false
+  # 다중 AZ(대기 복제본을 다른 AZ에 두고 장애 시 자동 전환). 기본 꺼짐 - 켜면 RDS 비용이 약 2배. variables.tf 참고
+  multi_az = var.db_multi_az
 
   skip_final_snapshot = true # 8주 프로젝트 범위: 운영환경이라면 false + 스냅샷 정책 필요
 

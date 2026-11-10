@@ -192,6 +192,12 @@ variable "geo_velocity_mode" {
 }
 
 # [관제] ELK 관제 서버를 만들지(기본 false: 큰 서버라 시험/데모 날만 켬). 켜고 끄면 웹/인증/앱 서버도 다시 만들어진다(Filebeat 설치 여부).
+variable "db_multi_az" {
+  type        = bool
+  default     = false
+  description = "RDS 다중 AZ(대기 복제본) 사용 여부. true면 RDS 비용이 약 2배(db.t3.micro 기준). 서브넷 그룹은 이미 2a/2c 두 AZ를 갖고 있어 다른 변경 없이 켜진다."
+}
+
 variable "enable_elk" {
   type        = bool
   default     = false

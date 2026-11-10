@@ -19,7 +19,7 @@ resource "aws_instance" "auth_server" {
     http_put_response_hop_limit = 1
   }
 
-  vpc_security_group_ids = [aws_security_group.app_sg.id]
+  vpc_security_group_ids = [aws_security_group.auth_sg.id]
 
   user_data_replace_on_change = true
 
@@ -69,7 +69,11 @@ resource "aws_instance" "auth_server" {
 
   # 부팅 스크립트가 SSM에서 인증서를 읽으므로, 파라미터와 읽기 권한이 먼저 만들어져 있어야 한다.
   # 코드는 S3에서 받으므로 코드 파일과 읽기 권한도 먼저 있어야 한다.
-  depends_on = [aws_ssm_parameter.mtls_key, aws_ssm_parameter.mtls_cert, aws_ssm_parameter.mtls_ca_cert, aws_iam_role_policy.mtls_read,
+  # 로그인 서버가 새 SG로 옮겨 가기 전에 새 SG의 규칙(Web->Auth 8080, Auth->DB 3306, 인터넷 443/80)이 먼저 있어야 끊김이 없다
+  depends_on = [aws_vpc_security_group_ingress_rule.auth_from_web, aws_vpc_security_group_egress_rule.web_to_auth,
+    aws_vpc_security_group_egress_rule.auth_to_db, aws_vpc_security_group_ingress_rule.db_from_auth,
+    aws_vpc_security_group_egress_rule.auth_out_https, aws_vpc_security_group_egress_rule.auth_out_http,
+  aws_ssm_parameter.mtls_key, aws_ssm_parameter.mtls_cert, aws_ssm_parameter.mtls_ca_cert, aws_iam_role_policy.mtls_read,
   aws_s3_object.auth_code, aws_iam_role_policy.auth_code_read, aws_ssm_parameter.elk_cert, aws_ssm_parameter.elk_key, aws_iam_role_policy.elk_beats_read]
 
   lifecycle {

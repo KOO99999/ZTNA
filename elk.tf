@@ -231,7 +231,7 @@ resource "aws_security_group" "elk_sg" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "elk_from_tiers" {
-  for_each                     = var.enable_elk ? { web = aws_security_group.web_sg.id, app = aws_security_group.app_sg.id } : {}
+  for_each                     = var.enable_elk ? { web = aws_security_group.web_sg.id, app = aws_security_group.app_sg.id, auth = aws_security_group.auth_sg.id } : {}
   security_group_id            = aws_security_group.elk_sg[0].id
   referenced_security_group_id = each.value
   description                  = "Filebeat to Logstash (mTLS) from ${each.key} tier"
@@ -241,7 +241,7 @@ resource "aws_vpc_security_group_ingress_rule" "elk_from_tiers" {
 }
 
 resource "aws_vpc_security_group_egress_rule" "tiers_to_elk" {
-  for_each                     = var.enable_elk ? { web = aws_security_group.web_sg.id, app = aws_security_group.app_sg.id } : {}
+  for_each                     = var.enable_elk ? { web = aws_security_group.web_sg.id, app = aws_security_group.app_sg.id, auth = aws_security_group.auth_sg.id } : {}
   security_group_id            = each.value
   referenced_security_group_id = aws_security_group.elk_sg[0].id
   description                  = "Filebeat to Logstash 5044"

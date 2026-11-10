@@ -15,6 +15,7 @@ from urllib.parse import unquote, urlsplit
 
 from flask import Flask, Response, jsonify, redirect, request
 
+import zt_jwt_signal
 from zt_jwt import JwtVerifyError, log_jwt_failure, verify_access_jwt
 from zt_risk import check_risk, log_event, resource_path_for, stepup_url
 from zt_ui import status_page
@@ -55,6 +56,11 @@ def auth():
     except JwtVerifyError as e:
         log_jwt_failure(e.reason, host, path, request.headers.get("X-Real-IP"),
                         request.headers.get("Cf-Connecting-Ip"))
+        # 같은 IP에서 위조 시도가 반복되면 엔진에 jwt_tamper 신호로 알린다(관제용). 실패해도 403은 그대로다.
+        try:
+            zt_jwt_signal.handle(e.reason, request.headers.get("Cf-Connecting-Ip") or request.headers.get("X-Real-IP"), host, path)
+        except Exception as sig_err:      # 신호 기록이 어떤 이유로든 실패해도 차단 응답은 바뀌지 않는다
+            print(f"[JWT_TAMPER_SIGNAL_ERROR] {type(sig_err).__name__}", flush=True)
         return _deny_auth("jwt_invalid")
     identity = claims["email"]
 

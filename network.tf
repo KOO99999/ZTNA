@@ -126,7 +126,24 @@ resource "aws_security_group" "app_sg" {
   }
 }
 
-# DB 티어: 인바운드는 오직 App 티어(SG 참조)에서만 3306 허용. Web 티어는 SG 규칙 자체가
+# Auth 티어(로그인 서버): App 티어와 분리한 전용 SG. 인바운드는 Web 티어(8080)에서만,
+#           아웃바운드는 DB(3306)·ELK(5044, elk.tf)·인터넷 443/80(API Gateway·SSM·S3·패키지)만.
+#           이렇게 나누면 포털 서버(app_sg)가 뚫려도 로그인 서버 쪽 규칙과 DB 로그인 서버 전용 규칙은 따로라 영향 범위가 줄어든다.
+resource "aws_security_group" "auth_sg" {
+  name_prefix = "zt-auth-sg-"
+  description = "Auth tier: ingress from Web tier only, egress to DB tier and internet only"
+  vpc_id      = aws_vpc.zt_vpc.id
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  tags = {
+    Name = "ZT-Auth-SG"
+  }
+}
+
+# DB 티어: 인바운드는 오직 App/Auth 티어(SG 참조)에서만 3306 허용. Web 티어는 SG 규칙 자체가
 #          없어 원천적으로 DB에 접근 불가 — 이게 3-Tier 격리의 핵심.
 resource "aws_security_group" "db_sg" {
   name_prefix = "zt-db-sg-"
@@ -206,12 +223,28 @@ resource "aws_vpc_security_group_egress_rule" "app_out_http" {
   ip_protocol        = "tcp"
 }
 
-# --- DB 티어 egress (전체 허용, RDS 기본 아웃바운드용) ---
-resource "aws_vpc_security_group_egress_rule" "db_out_all" {
-  security_group_id = aws_security_group.db_sg.id
+# --- Auth 티어 egress (App 티어와 같은 목적지: 인터넷 443/80. DB 3306은 아래 auth_to_db, ELK 5044는 elk.tf) ---
+resource "aws_vpc_security_group_egress_rule" "auth_out_https" {
+  security_group_id = aws_security_group.auth_sg.id
   cidr_ipv4          = "0.0.0.0/0"
-  ip_protocol        = "-1"
+  description        = "Outbound HTTPS for Lambda API Gateway, SSM, S3 and package install"
+  from_port          = 443
+  to_port            = 443
+  ip_protocol        = "tcp"
 }
+
+resource "aws_vpc_security_group_egress_rule" "auth_out_http" {
+  security_group_id = aws_security_group.auth_sg.id
+  cidr_ipv4          = "0.0.0.0/0"
+  description        = "Outbound HTTP for apt package install"
+  from_port          = 80
+  to_port            = 80
+  ip_protocol        = "tcp"
+}
+
+# --- DB 티어 egress: 규칙 없음(삭제됨) ---
+# RDS는 먼저 연결을 만들어 나가는 일이 없고, SG는 상태 저장(stateful)이라 들어온 3306 요청의 응답은 아웃바운드 규칙 없이도 나간다.
+# 예전의 "전체 허용(-1, 0.0.0.0/0)" egress(db_out_all)는 DB가 뚫렸을 때 밖으로 나가는 길만 되므로 지웠다.
 
 # --- 티어 간 참조 규칙 (Web→App, App→DB) ---
 resource "aws_vpc_security_group_egress_rule" "web_to_app" {
@@ -229,6 +262,42 @@ resource "aws_vpc_security_group_ingress_rule" "app_from_web" {
   description                 = "Allow Flask 8080 access from Web tier only"
   from_port                   = 8080
   to_port                     = 8080
+  ip_protocol                 = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "web_to_auth" {
+  security_group_id           = aws_security_group.web_sg.id
+  referenced_security_group_id = aws_security_group.auth_sg.id
+  description                 = "Allow proxy to Auth tier Flask on 8080"
+  from_port                   = 8080
+  to_port                     = 8080
+  ip_protocol                 = "tcp"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "auth_from_web" {
+  security_group_id           = aws_security_group.auth_sg.id
+  referenced_security_group_id = aws_security_group.web_sg.id
+  description                 = "Allow Flask 8080 access from Web tier only"
+  from_port                   = 8080
+  to_port                     = 8080
+  ip_protocol                 = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "auth_to_db" {
+  security_group_id           = aws_security_group.auth_sg.id
+  referenced_security_group_id = aws_security_group.db_sg.id
+  description                 = "Allow access to DB tier MySQL on 3306"
+  from_port                   = 3306
+  to_port                     = 3306
+  ip_protocol                 = "tcp"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "db_from_auth" {
+  security_group_id           = aws_security_group.db_sg.id
+  referenced_security_group_id = aws_security_group.auth_sg.id
+  description                 = "Allow MySQL 3306 access from Auth tier only"
+  from_port                   = 3306
+  to_port                     = 3306
   ip_protocol                 = "tcp"
 }
 
